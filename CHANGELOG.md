@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.17.0] - 2026-03-02
+
+### Features
+
+- **web**: add ChatGPT to Claude migration tutorial blog post
+
+
 ## [0.16.0] - 2026-03-02
 
 ### Features
