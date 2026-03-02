@@ -11,6 +11,7 @@ packages/signetai/dist/
 packages/signetai/dashboard/
 *.tgz
 *.png
+!web/public/blog/*.png
 .ruff_cache
 
 # TypeScript declaration files (generated in wrong locations)
