@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.36.0] - 2026-03-03
+
+### Docs
+
+- update documentation suite and add runtime spec
+
+
 ## [0.35.4] - 2026-03-03
 
 ### Features
