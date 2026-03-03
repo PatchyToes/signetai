@@ -11,7 +11,11 @@ interface Props {
 }
 
 const { title, description, children, defaultOpen = true }: Props = $props();
-let open = $state(defaultOpen);
+let open = $state(true);
+
+$effect(() => {
+	open = defaultOpen;
+});
 </script>
 
 <Collapsible.Root bind:open class="border-b border-[var(--sig-border)]">

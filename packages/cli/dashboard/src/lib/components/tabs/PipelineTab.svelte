@@ -21,13 +21,30 @@
 
 	let feedViewport: HTMLElement | null = $state(null);
 	let autoScroll = $state(true);
+	const BOTTOM_THRESHOLD_PX = 24;
+
+	function isNearBottom(viewport: HTMLElement | null): boolean {
+		if (!viewport) return true;
+		return viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - BOTTOM_THRESHOLD_PX;
+	}
+
+	function handleFeedScroll(): void {
+		autoScroll = isNearBottom(feedViewport);
+	}
+
+	function scrollFeedToBottom(behavior: ScrollBehavior = "auto"): void {
+		if (!feedViewport) return;
+		feedViewport.scrollTo({ top: feedViewport.scrollHeight, behavior });
+	}
 
 	// Auto-scroll feed
 	$effect(() => {
 		const _ = pipeline.feed.length;
-		if (autoScroll && feedViewport) {
+		const shouldFollow = autoScroll || isNearBottom(feedViewport);
+		if (shouldFollow && feedViewport) {
 			requestAnimationFrame(() => {
-				feedViewport?.scrollTo({ top: feedViewport.scrollHeight, behavior: "smooth" });
+				scrollFeedToBottom("auto");
+				autoScroll = true;
 			});
 		}
 	});
@@ -157,14 +174,24 @@
 				<span class="text-[10px] uppercase tracking-[0.1em] text-[var(--sig-text-muted)] font-[family-name:var(--font-display)]">
 					Live Feed
 				</span>
-				<span class="text-[9px] text-[var(--sig-text-muted)] font-[family-name:var(--font-mono)]">
-					{pipeline.feed.length} events
-				</span>
+				<div class="flex items-center gap-2">
+					<span class="text-[9px] text-[var(--sig-text-muted)] font-[family-name:var(--font-mono)]">
+						{pipeline.feed.length} events
+					</span>
+					<span
+						class="text-[9px] font-[family-name:var(--font-mono)]"
+						class:text-[#4ade80]={autoScroll}
+						class:text-[var(--sig-text-muted)]={!autoScroll}
+					>
+						{autoScroll ? "following" : "paused"}
+					</span>
+				</div>
 			</div>
 
 			<!-- Feed entries -->
 			<div
 				bind:this={feedViewport}
+				onscroll={handleFeedScroll}
 				class="flex-1 overflow-y-auto px-1 py-1"
 			>
 				{#each pipeline.feed as entry, i (entry.timestamp + "-" + i)}

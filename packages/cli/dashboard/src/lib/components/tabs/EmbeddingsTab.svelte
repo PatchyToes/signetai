@@ -19,6 +19,7 @@ import { mem } from "$lib/stores/memory.svelte";
 import EmbeddingCanvas2D from "../embeddings/EmbeddingCanvas2D.svelte";
 import EmbeddingCanvas3D from "../embeddings/EmbeddingCanvas3D.svelte";
 import EmbeddingInspector from "../embeddings/EmbeddingInspector.svelte";
+import * as Sheet from "$lib/components/ui/sheet/index.js";
 import PageHero from "$lib/components/layout/PageHero.svelte";
 import { PAGE_HEADERS } from "$lib/components/layout/page-headers";
 import {
@@ -30,6 +31,7 @@ import {
 	embeddingLabel,
 	DEFAULT_EMBEDDING_LIMIT,
 	MAX_EMBEDDING_LIMIT,
+	sourceColors,
 } from "../embeddings/embedding-graph";
 
 interface Props {
@@ -80,6 +82,36 @@ let activePresetId = $state("focus");
 let customPresets = $state<FilterPreset[]>([]);
 let presetsHydrated = $state(false);
 let showAdvancedFilters = $state(false);
+let commandPanelOpen = $state(false);
+
+const COACH_MARK_STORAGE_KEY = "signet-embeddings-coach-v1";
+
+const coachSteps = [
+	{
+		title: "Select a node",
+		body: "Click any point to inspect memory content, tags, and related neighbors.",
+		target: "Canvas",
+	},
+	{
+		title: "Shift-lock preview",
+		body: "Hold Shift while hovering to lock the preview card in place for deeper reading.",
+		target: "Hover preview",
+	},
+	{
+		title: "Neighborhood mode",
+		body: "Use Neighborhood to focus only the selected memory and its active relation set.",
+		target: "Toolbar",
+	},
+	{
+		title: "Scope controls",
+		body: "Open Commands to adjust window, time range, harness filters, and source/type scopes.",
+		target: "Command panel",
+	},
+] as const;
+
+let coachHydrated = $state(false);
+let coachOpen = $state(false);
+let coachStep = $state(0);
 
 type TimeFilterPreset = "all" | "24h" | "7d" | "30d" | "90d" | "custom";
 
@@ -107,6 +139,9 @@ let relationMode = $state<RelationKind>("similar");
 let similarNeighbors = $state<EmbeddingRelation[]>([]);
 let dissimilarNeighbors = $state<EmbeddingRelation[]>([]);
 let activeNeighbors = $state<EmbeddingRelation[]>([]);
+let neighborsLoading = $state(false);
+let inspectorLoading = $state(false);
+let relationRequestId = 0;
 let loadingGlobalSimilar = $state(false);
 let globalSimilar = $state<Memory[]>([]);
 
@@ -123,7 +158,7 @@ let relationLookup = $state(new Map<string, RelationKind>());
 let hoverLockedId = $state<string | null>(null);
 
 let graphRegion = $state<HTMLDivElement | null>(null);
-let hoverCardEl: HTMLDivElement | null = null;
+let hoverCardEl = $state<HTMLDivElement | null>(null);
 let hoverX = 0;
 let hoverY = 0;
 let cachedRegionRect: DOMRect | null = null;
@@ -153,6 +188,40 @@ async function runFix(check: EmbeddingCheckResult): Promise<void> {
 	} finally {
 		healthFixBusy = false;
 	}
+}
+
+function completeCoachMarks(): void {
+	coachOpen = false;
+	if (typeof window === "undefined") return;
+	window.localStorage.setItem(COACH_MARK_STORAGE_KEY, "done");
+}
+
+function nextCoachMark(): void {
+	if (coachStep < coachSteps.length - 1) {
+		coachStep += 1;
+		return;
+	}
+	completeCoachMarks();
+}
+
+function togglePinnedOnly(): void {
+	showPinnedOnly = !showPinnedOnly;
+	activePresetId = "custom-live";
+}
+
+function toggleNeighborhoodOnly(): void {
+	showNeighborhoodOnly = !showNeighborhoodOnly;
+	activePresetId = "custom-live";
+}
+
+function toggleClusterLens(): void {
+	clusterLensMode = !clusterLensMode;
+	activePresetId = "custom-live";
+}
+
+function toggleSourceFilter(who: string): void {
+	toggleSource(who);
+	activePresetId = "custom-live";
 }
 
 function healthDotColor(status: "healthy" | "degraded" | "unhealthy"): string {
@@ -653,25 +722,45 @@ async function initGraph(): Promise<void> {
 async function computeRelationsForSelection(
 	selected: EmbeddingPoint | null,
 ): Promise<void> {
+	const requestId = ++relationRequestId;
 	if (!selected) {
 		similarNeighbors = [];
 		dissimilarNeighbors = [];
 		activeNeighbors = [];
 		relationLookup = new Map();
+		neighborsLoading = false;
+		inspectorLoading = false;
 		return;
 	}
 
-	const results = await getSimilarMemories(selected.id, 10);
-	similarNeighbors = results.map((m) => ({
-		id: m.id,
-		score: m.score ?? 0,
-		kind: "similar" as const,
-	}));
-	dissimilarNeighbors = [];
-	activeNeighbors = similarNeighbors;
-	relationLookup = new Map(
-		similarNeighbors.map((item) => [item.id, item.kind]),
-	);
+	neighborsLoading = true;
+	inspectorLoading = true;
+	const startedAt = Date.now();
+
+	try {
+		const results = await getSimilarMemories(selected.id, 10);
+		if (requestId !== relationRequestId) return;
+
+		similarNeighbors = results.map((m) => ({
+			id: m.id,
+			score: m.score ?? 0,
+			kind: "similar" as const,
+		}));
+		dissimilarNeighbors = [];
+		activeNeighbors = similarNeighbors;
+		relationLookup = new Map(
+			similarNeighbors.map((item) => [item.id, item.kind]),
+		);
+	} finally {
+		if (requestId !== relationRequestId) return;
+		const elapsed = Date.now() - startedAt;
+		if (elapsed < 120) {
+			await new Promise<void>((resolve) => setTimeout(resolve, 120 - elapsed));
+		}
+		if (requestId !== relationRequestId) return;
+		neighborsLoading = false;
+		inspectorLoading = false;
+	}
 }
 
 // -----------------------------------------------------------------------

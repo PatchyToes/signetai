@@ -21,6 +21,7 @@
 
 	let { data } = $props();
 	let daemonStatus = $state<DaemonStatus | null>(null);
+	let embeddingsPrefetchPromise: Promise<unknown[]> | null = null;
 
 	// --- Theme ---
 	let theme = $state<"dark" | "light">("dark");
@@ -81,6 +82,16 @@
 		queueMemorySearch();
 	}
 
+	function prefetchEmbeddingsTab(): void {
+		if (!browser) return;
+		if (embeddingsPrefetchPromise) return;
+
+		embeddingsPrefetchPromise = Promise.all([
+			import("$lib/components/tabs/EmbeddingsTab.svelte"),
+			import("3d-force-graph"),
+		]);
+	}
+
 	// --- Cleanup ---
 	$effect(() => {
 		return () => {
@@ -109,6 +120,7 @@
 		{daemonStatus}
 		{theme}
 		onthemetoggle={toggleTheme}
+		onprefetchembeddings={prefetchEmbeddingsTab}
 	/>
 	<main class="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden
 		m-2 ml-0 rounded-lg border border-[var(--sig-border)]

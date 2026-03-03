@@ -1,5 +1,5 @@
 <script lang="ts">
-import { parse, stringify } from "yaml";
+import * as YAML from "yaml";
 import { saveConfigFile, type ConfigFile } from "$lib/api";
 import { toast } from "$lib/stores/toast.svelte";
 import FormField from "$lib/components/config/FormField.svelte";
@@ -81,7 +81,7 @@ let settingsIsSameAsAgent = $derived(
 $effect(() => {
 	if (agentFile?.content) {
 		try {
-			agent = JSON.parse(JSON.stringify(parse(agentFile.content) ?? {}));
+			agent = JSON.parse(JSON.stringify(YAML.parse(agentFile.content) ?? {}));
 		} catch { agent = {}; }
 	} else { agent = {}; }
 });
@@ -89,7 +89,7 @@ $effect(() => {
 $effect(() => {
 	if (configFile?.content) {
 		try {
-			config = JSON.parse(JSON.stringify(parse(configFile.content) ?? {}));
+			config = JSON.parse(JSON.stringify(YAML.parse(configFile.content) ?? {}));
 		} catch { config = {}; }
 	} else { config = {}; }
 });
@@ -184,11 +184,11 @@ async function saveSettings(): Promise<void> {
 	const results: boolean[] = [];
 	try {
 		if (agentFile) {
-			results.push(await saveConfigFile("agent.yaml", stringify(agent)));
+			results.push(await saveConfigFile("agent.yaml", YAML.stringify(agent)));
 		}
 		// Only save config.yaml separately when settings live there (not in agent.yaml)
 		if (!settingsIsSameAsAgent && settingsFileName) {
-			results.push(await saveConfigFile(settingsFileName, stringify(config)));
+			results.push(await saveConfigFile(settingsFileName, YAML.stringify(config)));
 		}
 		const allOk = results.length > 0 && results.every(Boolean);
 		toast(allOk ? "Settings saved" : "Failed to save settings", allOk ? "success" : "error");
@@ -249,7 +249,7 @@ let hasFiles = $derived(!!agentFile || !!configFile);
 								<div class="checkbox-group">
 									{#each KNOWN_HARNESSES as h (h)}
 										<label class="cb-row">
-											<input type="checkbox" checked={harnessArray().includes(h)} onchange={(e) => toggleHarness(h, (e.target as HTMLInputElement).checked)} />
+											<input type="checkbox" checked={harnessArray().includes(h)} onchange={(e: Event) => toggleHarness(h, (e.target as HTMLInputElement).checked)} />
 											<span>{h}</span>
 										</label>
 									{/each}
@@ -265,7 +265,7 @@ let hasFiles = $derived(!!agentFile || !!configFile);
 						<FormField label="Add custom harness" description="Add a custom harness name for third-party integrations.">
 							{#snippet children()}
 								<div class="inline-add">
-									<input type="text" class="inp" placeholder="harness-name" bind:value={customHarnessInput} onkeydown={(e) => { if (e.key === "Enter") addCustomHarness(); }} />
+									<input type="text" class="inp" placeholder="harness-name" bind:value={customHarnessInput} onkeydown={(e: KeyboardEvent) => { if (e.key === "Enter") addCustomHarness(); }} />
 									<button class="btn-add" onclick={addCustomHarness}>Add</button>
 								</div>
 							{/snippet}

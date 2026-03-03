@@ -153,7 +153,7 @@ let isInstalled = $derived(
 
 		<!-- Action button (browse only) -->
 		{#if mode === "browse" && isSearchResult(item)}
-			<div class="card-action" onclick={(e) => e.stopPropagation()}>
+			<div class="card-action">
 				{#if item.installed}
 					<Button
 						variant="outline"
@@ -184,7 +184,7 @@ let isInstalled = $derived(
 		<button
 			type="button"
 			class="remove-corner"
-			onclick={(e) => { e.stopPropagation(); onuninstall?.(); }}
+			onclick={(e: MouseEvent) => { e.stopPropagation(); onuninstall?.(); }}
 			disabled={uninstalling}
 			title="Uninstall"
 		>
