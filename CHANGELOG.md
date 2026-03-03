@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.33.4] - 2026-03-03
+
+### Bug Fixes
+
+- **daemon**: externalize sharp to prevent native binary path errors
+
+
 ## [0.33.3] - 2026-03-03
 
 ### Bug Fixes
