@@ -1,33 +1,23 @@
 <script lang="ts">
-import FormField from "$lib/components/config/FormField.svelte";
-import FormSection from "$lib/components/config/FormSection.svelte";
-import { Input } from "$lib/components/ui/input/index.js";
-import * as Select from "$lib/components/ui/select/index.js";
-import { st } from "$lib/stores/settings.svelte";
+	import FormField from "$lib/components/config/FormField.svelte";
+	import FormSection from "$lib/components/config/FormSection.svelte";
+	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
+	import { st } from "$lib/stores/settings.svelte";
 
-const selectTriggerClass =
-	"font-[family-name:var(--font-mono)] text-[11px] text-[var(--sig-text)] bg-[var(--sig-bg)] border-[var(--sig-border-strong)] rounded-none w-full h-auto min-h-[30px] px-2 py-[5px] box-border focus-visible:border-[var(--sig-accent)]";
-const selectContentClass =
-	"font-[family-name:var(--font-mono)] text-[11px] bg-[var(--sig-bg)] text-[var(--sig-text)] border-[var(--sig-border-strong)] rounded-none";
-const selectItemClass = "font-[family-name:var(--font-mono)] text-[11px] rounded-none";
+	const selectTriggerClass =
+		"font-[family-name:var(--font-mono)] text-[11px] text-[var(--sig-text)] bg-[var(--sig-bg)] border-[var(--sig-border-strong)] rounded-none w-full h-auto min-h-[30px] px-2 py-[5px] box-border focus-visible:border-[var(--sig-accent)]";
+	const selectContentClass =
+		"font-[family-name:var(--font-mono)] text-[11px] bg-[var(--sig-bg)] text-[var(--sig-text)] border-[var(--sig-border-strong)] rounded-none";
+	const selectItemClass = "font-[family-name:var(--font-mono)] text-[11px] rounded-none";
 
-function handleProviderChange(v: string | undefined) {
-	st.sSetStr([...st.embPath(), "provider"], v ?? "");
-}
-
-let embeddingPaths = $derived([
-	[...st.embPath(), "provider"],
-	[...st.embPath(), "model"],
-	[...st.embPath(), "dimensions"],
-	[...st.embPath(), "base_url"],
-	[...st.embPath(), "api_key"],
-]);
-
-let isDirty = $derived(st.isAnyPathDirty(st.settingsIsSameAsAgent ? "agent" : "config", embeddingPaths));
+	function handleProviderChange(v: string | undefined) {
+		st.sSetStr([...st.embPath(), "provider"], v ?? "");
+	}
 </script>
 
 {#if st.settingsFileName}
-	<FormSection title="Embeddings" defaultOpen={false} description="Vector embedding configuration for semantic memory search. Embeddings power the vector half of hybrid recall." dirty={isDirty}>
+	<FormSection description="Vector embedding configuration for semantic memory search. Embeddings power the vector half of hybrid recall.">
 		<FormField label="Provider" description="Embedding backend. Ollama runs locally, OpenAI requires an API key.">
 			<Select.Root
 				type="single"
