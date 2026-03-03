@@ -2,6 +2,17 @@
 
 All notable changes to Signet are documented here.
 
+## [0.31.3] - 2026-03-03
+
+### Features
+
+- **dashboard**: add task presets and skill integration for scheduled tasks
+
+### Bug Fixes
+
+- **daemon**: validate skill name against path traversal in task routes
+
+
 ## [0.31.2] - 2026-03-03
 
 ### Bug Fixes
