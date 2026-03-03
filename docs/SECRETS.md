@@ -115,6 +115,8 @@ The dashboard's **Settings → Secrets** panel lets you:
 - View all secret names (values always masked as `•••••`)
 - Add new secrets via an input form
 - Delete secrets
+- Connect/disconnect a 1Password service account token
+- Select vaults and import password-like fields into Signet secrets
 
 There is intentionally no "reveal" button — the UI never has access to secret values.
 
