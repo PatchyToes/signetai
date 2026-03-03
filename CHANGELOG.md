@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.33.1] - 2026-03-03
+
+### Bug Fixes
+
+- **daemon**: lazy-load @1password/sdk to prevent WASM ENOENT crash
+
+
 ## [0.33.0] - 2026-03-03
 
 ### Bug Fixes
