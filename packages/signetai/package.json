@@ -63,7 +63,8 @@
     "open": "^10.0.0",
     "ora": "^8.0.0",
     "sqlite-vec": "^0.1.7-alpha.2",
-    "onnxruntime-node": "1.21.0"
+    "onnxruntime-node": "1.21.0",
+    "@huggingface/transformers": "^3.4.0"
   },
   "optionalDependencies": {
     "@1password/sdk": "^0.3.0",

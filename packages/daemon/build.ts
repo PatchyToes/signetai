@@ -7,7 +7,7 @@
  * onnxruntime-node: external (native binary, installed as dep)
  */
 
-const EXTERNAL = ["@1password/sdk", "onnxruntime-node"];
+const EXTERNAL = ["@1password/sdk", "onnxruntime-node", "@huggingface/transformers"];
 
 const ALIAS = {
 	sharp: "./src/shims/sharp.ts",

@@ -3,7 +3,7 @@
  * packages/daemon/build.ts with the same externals and aliases.
  */
 
-const EXTERNAL = ["@1password/sdk", "onnxruntime-node"];
+const EXTERNAL = ["@1password/sdk", "onnxruntime-node", "@huggingface/transformers"];
 
 const ALIAS = {
 	sharp: "../daemon/src/shims/sharp.ts",
