@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.34.0] - 2026-03-03
+
+### Bug Fixes
+
+- externalize @huggingface/transformers from bundler
+
+
 ## [0.33.8] - 2026-03-03
 
 ### Features
