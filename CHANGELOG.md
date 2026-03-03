@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.33.5] - 2026-03-03
+
+### Bug Fixes
+
+- **daemon**: alias sharp to empty shim via Bun.build() API
+
+
 ## [0.33.4] - 2026-03-03
 
 ### Bug Fixes
