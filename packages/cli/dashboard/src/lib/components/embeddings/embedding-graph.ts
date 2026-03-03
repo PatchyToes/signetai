@@ -45,11 +45,18 @@ export const sourceColors: Record<string, string> = {
 	unknown: "#737373",
 };
 
+const NEWNESS_HOUR_MS = 60 * 60 * 1000;
+const NEWNESS_DAY_MS = 24 * NEWNESS_HOUR_MS;
+const NEWNESS_WEEK_MS = 7 * NEWNESS_DAY_MS;
+const NEWNESS_MONTH_MS = 30 * NEWNESS_DAY_MS;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export type RelationKind = "similar" | "dissimilar";
+
+export type NodeColorMode = "source" | "newness";
 
 export interface EmbeddingRelation {
 	id: string;
@@ -131,6 +138,46 @@ export function hexToRgb(hex: string): [number, number, number] {
 export function sourceColorRgba(who: string | undefined, alpha: number): string {
 	const [r, g, b] = hexToRgb(sourceColors[who ?? "unknown"] ?? sourceColors["unknown"]);
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function parseCreatedAtMs(createdAt: string | undefined): number | null {
+	if (!createdAt) return null;
+	const parsed = new Date(createdAt).getTime();
+	if (Number.isNaN(parsed)) return null;
+	return parsed;
+}
+
+export function newnessIntensity(createdAt: string | undefined, nowMs: number): number {
+	const createdMs = parseCreatedAtMs(createdAt);
+	if (createdMs === null) return 0.35;
+	const ageMs = Math.max(0, nowMs - createdMs);
+	if (ageMs <= NEWNESS_HOUR_MS) return 1;
+	if (ageMs <= NEWNESS_DAY_MS) {
+		const t = (ageMs - NEWNESS_HOUR_MS) / (NEWNESS_DAY_MS - NEWNESS_HOUR_MS);
+		return 0.85 - t * 0.25;
+	}
+	if (ageMs <= NEWNESS_WEEK_MS) {
+		const t = (ageMs - NEWNESS_DAY_MS) / (NEWNESS_WEEK_MS - NEWNESS_DAY_MS);
+		return 0.6 - t * 0.35;
+	}
+	if (ageMs <= NEWNESS_MONTH_MS) {
+		const t = (ageMs - NEWNESS_WEEK_MS) / (NEWNESS_MONTH_MS - NEWNESS_WEEK_MS);
+		return 0.25 - t * 0.13;
+	}
+	return 0.12;
+}
+
+export function newnessFillStyle(intensity: number, alpha: number): string {
+	const normalized = Math.min(1, Math.max(0.08, intensity));
+	const lightness = Math.round(26 + normalized * 56);
+	return `hsla(38, 70%, ${lightness}%, ${alpha})`;
+}
+
+export function isNewSinceLastSeen(createdAt: string | undefined, lastSeenMs: number | null): boolean {
+	if (lastSeenMs === null) return false;
+	const createdMs = parseCreatedAtMs(createdAt);
+	if (createdMs === null) return false;
+	return createdMs > lastSeenMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +400,8 @@ export function nodeFillStyle(
 	pinnedIds: Set<string>,
 	lensIds: Set<string>,
 	lensActive: boolean,
+	colorMode: NodeColorMode,
+	nowMs: number,
 ): string {
 	const id = node.data.id;
 	const relation = relations.get(id) ?? null;
@@ -366,6 +415,10 @@ export function nodeFillStyle(
 	if (relation === "dissimilar") return dimmed ? "rgba(255, 146, 146, 0.35)" : "rgba(255, 146, 146, 0.9)";
 	if (isPinned) return dimmed ? "rgba(220, 220, 220, 0.42)" : "rgba(235, 235, 235, 0.95)";
 	if (dimmed) return "rgba(120, 120, 120, 0.2)";
+	if (colorMode === "newness") {
+		const intensity = newnessIntensity(node.data.createdAt, nowMs);
+		return newnessFillStyle(intensity, 0.9);
+	}
 	return sourceColorRgba(node.data.who, 0.85);
 }
 
@@ -395,12 +448,17 @@ export function edgeStrokeStyle(
 export function nodeColor3D(
 	id: string,
 	who: string,
+	createdAt: string | undefined,
 	selectedId: string | null,
 	filterIds: Set<string> | null,
 	relations: Map<string, RelationKind>,
 	pinnedIds: Set<string>,
 	lensIds: Set<string>,
 	lensActive: boolean,
+	colorMode: NodeColorMode,
+	nowMs: number,
+	showNewSinceLastSeen: boolean,
+	lastSeenMs: number | null,
 ): string {
 	if (selectedId === id) return "#ffffff";
 	if (lensActive && !lensIds.has(id)) return "#3b3b3b";
@@ -410,6 +468,8 @@ export function nodeColor3D(
 	if (pinnedIds.has(id)) return "#e5e7eb";
 	const dimmed = filterIds !== null && !filterIds.has(id);
 	if (dimmed) return "#5b5b5b";
+	if (showNewSinceLastSeen && isNewSinceLastSeen(createdAt, lastSeenMs)) return "#f6c26b";
+	if (colorMode === "newness") return newnessFillStyle(newnessIntensity(createdAt, nowMs), 1);
 	return sourceColors[who] ?? sourceColors["unknown"];
 }
 

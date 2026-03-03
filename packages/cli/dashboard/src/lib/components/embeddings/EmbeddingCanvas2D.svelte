@@ -5,10 +5,12 @@ import {
 	type GraphEdge,
 	type GraphNode,
 	type GraphPhysicsConfig,
+	type NodeColorMode,
 	type RelationKind,
 	clampGraphPhysics,
 	edgeStrokeStyle,
 	embeddingLabel,
+	isNewSinceLastSeen,
 	nodeFillStyle,
 } from "./embedding-graph";
 
@@ -23,6 +25,10 @@ interface Props {
 	lensIds: Set<string>;
 	clusterLensMode: boolean;
 	graphPhysics: GraphPhysicsConfig;
+	colorMode: NodeColorMode;
+	nowMs: number;
+	showNewSinceLastSeen: boolean;
+	lastSeenMs: number | null;
 	onselectnode: (embedding: EmbeddingPoint | null) => void;
 	onhovernode: (embedding: EmbeddingPoint | null) => void;
 }
@@ -39,6 +45,10 @@ let {
 	lensIds,
 	clusterLensMode,
 	graphPhysics,
+	colorMode,
+	nowMs,
+	showNewSinceLastSeen,
+	lastSeenMs,
 	onselectnode,
 	onhovernode,
 }: Props = $props();
@@ -436,8 +446,18 @@ function draw(ctx: CanvasRenderingContext2D, now: number): void {
 			pinnedIds,
 			lensIds,
 			clusterLensMode,
+			colorMode,
+			nowMs,
 		);
 		ctx.fill();
+
+		if (showNewSinceLastSeen && isNewSinceLastSeen(node.data.createdAt, lastSeenMs)) {
+			ctx.beginPath();
+			ctx.arc(node.x, node.y, node.radius + 2.2, 0, Math.PI * 2);
+			ctx.strokeStyle = "rgba(246, 194, 107, 0.85)";
+			ctx.lineWidth = 1.1 / camZoom;
+			ctx.stroke();
+		}
 
 		if (pinnedIds.has(node.data.id)) {
 			const side = (node.radius + 2.5) * 2;

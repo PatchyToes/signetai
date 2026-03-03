@@ -7,6 +7,7 @@ import {
 	edgeColor3D,
 	embeddingLabel,
 	GRAPH_K,
+	type NodeColorMode,
 } from "./embedding-graph";
 
 interface Props {
@@ -18,6 +19,10 @@ interface Props {
 	pinnedIds: Set<string>;
 	lensIds: Set<string>;
 	clusterLensMode: boolean;
+	colorMode: NodeColorMode;
+	nowMs: number;
+	showNewSinceLastSeen: boolean;
+	lastSeenMs: number | null;
 	onselectnode: (embedding: EmbeddingPoint | null) => void;
 	onhovernode: (embedding: EmbeddingPoint | null) => void;
 	embeddingById: Map<string, EmbeddingPoint>;
@@ -32,6 +37,10 @@ let {
 	pinnedIds,
 	lensIds,
 	clusterLensMode,
+	colorMode,
+	nowMs,
+	showNewSinceLastSeen,
+	lastSeenMs,
 	onselectnode,
 	onhovernode,
 	embeddingById,
@@ -73,12 +82,17 @@ export function refreshAppearance(): void {
 		nodeColor3D(
 			String(node.id),
 			String(node.who ?? "unknown"),
+			embeddingById.get(String(node.id))?.createdAt,
 			graphSelected?.id ?? null,
 			embeddingFilterIds,
 			relationLookup,
 			pinnedIds,
 			lensIds,
 			clusterLensMode,
+			colorMode,
+			nowMs,
+			showNewSinceLastSeen,
+			lastSeenMs,
 		),
 	);
 	graph3d.linkColor((link: any) => {
@@ -138,12 +152,17 @@ export async function init(): Promise<void> {
 			nodeColor3D(
 				String(node.id),
 				String(node.who ?? "unknown"),
+				embeddingById.get(String(node.id))?.createdAt,
 				graphSelected?.id ?? null,
 				embeddingFilterIds,
 				relationLookup,
 				pinnedIds,
 				lensIds,
 				clusterLensMode,
+				colorMode,
+				nowMs,
+				showNewSinceLastSeen,
+				lastSeenMs,
 			),
 		)
 		.nodeVal(
