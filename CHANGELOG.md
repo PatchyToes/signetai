@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.33.7] - 2026-03-03
+
+### Bug Fixes
+
+- **embedding**: harden native transformers bootstrap path
+
+
 ## [0.33.6] - 2026-03-03
 
 ### Bug Fixes
