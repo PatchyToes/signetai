@@ -183,6 +183,7 @@ export async function shutdownNativeProvider(): Promise<void> {
 		embedFn = null;
 		initPromise = null;
 		initError = null;
+		modelCached = false;
 		logger.info("native-embedding", "Provider shut down");
 	}
 }
