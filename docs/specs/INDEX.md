@@ -86,7 +86,7 @@ Legend:
    locked before GA.
 
 Validation command:
-- `bun run spec:deps`
+- `bun scripts/spec-deps-check.ts`
 - Script: `scripts/spec-deps-check.ts`
 - Checks: unknown IDs, hard-dependency cycles, missing spec paths,
   and `INDEX.md` <-> `dependencies.yaml` drift (ID/status/path).
@@ -95,7 +95,7 @@ Validation command:
 
 ## Suggested Next Spec Ops
 
-1. Wire `bun run spec:deps` into CI as a required docs gate.
+1. Wire `bun scripts/spec-deps-check.ts` into CI as a required docs gate.
 2. Add per-spec `Spec Metadata` blocks (ID, status, depends_on) to make each
    spec self-describing.
 3. Add a dashboard/API view later, reading `dependencies.yaml`, so dependency
