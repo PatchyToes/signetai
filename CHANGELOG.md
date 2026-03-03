@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.33.6] - 2026-03-03
+
+### Bug Fixes
+
+- **daemon**: harden native embedding init for transformers exports
+
+
 ## [0.33.5] - 2026-03-03
 
 ### Bug Fixes
