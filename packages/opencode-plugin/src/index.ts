@@ -41,10 +41,19 @@ interface PreCompactionResult {
 // ============================================================================
 
 export const SignetPlugin: Plugin = async ({ directory }) => {
-	const enabled = process.env.SIGNET_ENABLED !== "false";
+	const readEnv = (key: string): string | undefined => {
+		const proc = Reflect.get(globalThis, "process");
+		if (!proc || typeof proc !== "object") return undefined;
+		const env = Reflect.get(proc, "env");
+		if (!env || typeof env !== "object") return undefined;
+		const value = Reflect.get(env, key);
+		return typeof value === "string" ? value : undefined;
+	};
+
+	const enabled = readEnv("SIGNET_ENABLED") !== "false";
 	if (!enabled) return {};
 
-	const daemonUrl = process.env.SIGNET_DAEMON_URL ?? DAEMON_URL_DEFAULT;
+	const daemonUrl = readEnv("SIGNET_DAEMON_URL") ?? DAEMON_URL_DEFAULT;
 
 	const client = createDaemonClient(daemonUrl);
 

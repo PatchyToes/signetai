@@ -45,7 +45,7 @@ let showFeatured = $derived(mode === "browse" && featuredItems.length > 0);
 		{#if showFeatured}
 			<div class="section-label">TRENDING</div>
 			<div class="featured-row">
-				{#each featuredItems as item (`${'fullName' in item ? item.fullName : item.name}-featured`)}
+				{#each featuredItems as item (`${item.name}-featured`)}
 					<div class="featured-card-wrapper">
 						<SkillCard
 							{item}
@@ -66,7 +66,7 @@ let showFeatured = $derived(mode === "browse" && featuredItems.length > 0);
 
 		<!-- Main grid -->
 		<div class="grid">
-			{#each items as item (`${'fullName' in item ? item.fullName : item.name}`)}
+			{#each items as item (item.name)}
 				<SkillCard
 					{item}
 					{mode}

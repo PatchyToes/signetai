@@ -25,7 +25,7 @@ function makeTempAgentsDir(): string {
 }
 
 describe("loadMemoryConfig", () => {
-	it("prefers agent.yaml embedding settings over legacy files", () => {
+	it("prefers agent.yaml embedding settings over config.yaml fallback", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(
 			join(agentsDir, "agent.yaml"),
@@ -36,12 +36,11 @@ describe("loadMemoryConfig", () => {
 `,
 		);
 		writeFileSync(
-			join(agentsDir, "AGENT.yaml"),
-			`memory:
-  embeddings:
-    provider: openai
-    model: text-embedding-3-large
-    dimensions: 3072
+			join(agentsDir, "config.yaml"),
+			`embeddings:
+  provider: openai
+  model: text-embedding-3-large
+  dimensions: 3072
 `,
 		);
 

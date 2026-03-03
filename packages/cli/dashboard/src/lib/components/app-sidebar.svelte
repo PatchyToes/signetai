@@ -103,7 +103,7 @@
 								onclick={() => setTab(item.id)}
 								onmouseenter={() => maybePrefetchEmbeddings(item.id)}
 								onfocus={() => maybePrefetchEmbeddings(item.id)}
-								tooltip={item.label}
+								tooltipContent={item.label}
 							>
 								<item.icon class="size-4" />
 								<span class="text-xs uppercase tracking-[0.06em]
@@ -146,10 +146,10 @@
 			</Sidebar.MenuItem>
 
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton
-					onclick={onthemetoggle}
-					tooltip={theme === "dark" ? "Light mode" : "Dark mode"}
-				>
+			<Sidebar.MenuButton
+				onclick={onthemetoggle}
+				tooltipContent={theme === "dark" ? "Light mode" : "Dark mode"}
+			>
 					{#if theme === "dark"}
 						<Sun class="size-4" />
 					{:else}
@@ -166,10 +166,10 @@
 			</Sidebar.MenuItem>
 
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton
-					onclick={() => window.open("https://github.com/Signet-AI/signetai", "_blank")}
-					tooltip="GitHub"
-				>
+			<Sidebar.MenuButton
+				onclick={() => window.open("https://github.com/Signet-AI/signetai", "_blank")}
+				tooltipContent="GitHub"
+			>
 					<Github class="size-4" />
 					<span class="text-xs font-[family-name:var(--font-mono)]
 						overflow-hidden whitespace-nowrap
