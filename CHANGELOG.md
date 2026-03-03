@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.31.0] - 2026-03-03
+
+### Bug Fixes
+
+- **daemon**: ignore SQLite journal files in file watcher
+
+
 ## [0.30.0] - 2026-03-03
 
 ### Features
