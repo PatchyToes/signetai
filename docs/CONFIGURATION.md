@@ -246,7 +246,7 @@ memory:
     shadowMode: true        # extract without writing — safe first step
     extraction:
       provider: ollama
-      model: qwen3:4b
+      model: qwen2.5:7b-instruct
 ```
 
 
@@ -283,6 +283,27 @@ When using `ollama`, the model must be available locally. When using
 `claude-code`, the Claude Code CLI must be on PATH. Lower `minConfidence`
 to capture more facts at the cost of noise; raise it to write only
 high-confidence facts.
+
+On Apple Silicon macOS (`darwin` + `arm64`), Signet applies a
+stability-focused local Ollama default profile when pipeline settings are
+not explicitly set in `agent.yaml`:
+
+| Field | Apple Silicon default |
+|-------|------------------------|
+| `extraction.provider` | `"ollama"` |
+| `extraction.model` | `"qwen2.5:7b-instruct"` |
+| `extraction.timeout` | `180000` |
+| `extraction.minConfidence` | `0.6` |
+| `worker.pollMs` | `1000` |
+| `worker.leaseTimeoutMs` | `420000` |
+| `graph.enabled` | `false` |
+| `reranker.topN` | `25` |
+| `reranker.timeoutMs` | `2500` |
+| `autonomous.maintenanceIntervalMs` | `600000` |
+
+The setup wizard also uses this profile by default for Ollama extraction
+on Apple Silicon, while other platforms keep the standard cross-platform
+defaults unless overridden.
 
 
 ### Worker (`worker`)
