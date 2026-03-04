@@ -141,6 +141,14 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.pipelineV2).toEqual(DEFAULT_PIPELINE_V2);
 	});
 
+	it("applies Apple Silicon Ollama defaults on macOS", () => {
+		if (process.platform !== "darwin" || process.arch !== "arm64") return;
+		expect(DEFAULT_PIPELINE_V2.extraction.provider).toBe("ollama");
+		expect(DEFAULT_PIPELINE_V2.extraction.model).toBe("qwen2.5:7b-instruct");
+		expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(180000);
+		expect(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs).toBe(420000);
+	});
+
 	it("loads pipelineV2 flags from agent.yaml (flat keys, backward compat)", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(

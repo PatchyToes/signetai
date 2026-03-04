@@ -2233,16 +2233,21 @@ async function setupWizard(options: SetupWizardOptions) {
 			})) as string;
 		}
 	} else if (extractionProvider === "ollama") {
+		const useMacOllamaProfile = platform() === "darwin" && process.arch === "arm64";
 		if (nonInteractive) {
 			extractionModel =
 				normalizeStringValue(options.extractionModel) ||
 				normalizeStringValue(existingMemory.pipelineV2?.extractionModel) ||
-				"glm-4.7-flash";
+				(useMacOllamaProfile ? "qwen2.5:7b-instruct" : "glm-4.7-flash");
 		} else {
 			console.log();
 			extractionModel = (await select({
 				message: "Which Ollama model for extraction?",
 				choices: [
+					{
+						value: "qwen2.5:7b-instruct",
+						name: `qwen2.5:7b-instruct (${useMacOllamaProfile ? "recommended for Apple Silicon" : "balanced quality and speed"})`,
+					},
 					{
 						value: "glm-4.7-flash",
 						name: "glm-4.7-flash (good quality, recommended)",
@@ -2453,20 +2458,49 @@ ${agentName} is a helpful assistant.
 		}
 
 		if (extractionProvider !== "none") {
-			(config.memory as Record<string, unknown>).pipelineV2 = {
+			const useMacOllamaProfile =
+				extractionProvider === "ollama" &&
+				platform() === "darwin" &&
+				process.arch === "arm64";
+			const pipelineV2Config: Record<string, unknown> = {
 				enabled: true,
 				extraction: {
 					provider: extractionProvider,
 					model: extractionModel,
+					...(useMacOllamaProfile
+						? { timeout: 180000, minConfidence: 0.6 }
+						: {}),
 				},
-				graph: { enabled: true },
-				reranker: { enabled: true },
+				graph: {
+					enabled: !useMacOllamaProfile,
+					...(useMacOllamaProfile ? { boostWeight: 0.15 } : {}),
+				},
+				reranker: {
+					enabled: true,
+					...(useMacOllamaProfile ? { topN: 25, timeoutMs: 2500 } : {}),
+				},
+				...(useMacOllamaProfile
+					? {
+						worker: {
+							pollMs: 1000,
+							maxRetries: 3,
+							leaseTimeoutMs: 420000,
+						},
+					}
+					: {}),
 				autonomous: {
 					enabled: true,
 					allowUpdateDelete: true,
+					...(useMacOllamaProfile ? { maintenanceIntervalMs: 10 * 60 * 1000 } : {}),
 					maintenanceMode: "execute",
 				},
+				...(useMacOllamaProfile
+					? {
+						semanticContradictionEnabled: false,
+					}
+					: {}),
 			};
+			(config.memory as Record<string, unknown>).pipelineV2 = pipelineV2Config;
 		}
 
 		writeFileSync(join(basePath, "agent.yaml"), formatYaml(config));

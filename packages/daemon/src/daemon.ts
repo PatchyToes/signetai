@@ -7287,10 +7287,10 @@ async function main() {
 						model: memoryCfg.pipelineV2.extraction.model || "haiku",
 						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 					})
-				: createOllamaProvider({
-						model: memoryCfg.pipelineV2.extraction.model || "qwen3:4b",
-						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-					});
+			: createOllamaProvider({
+					model: memoryCfg.pipelineV2.extraction.model || "qwen2.5:7b-instruct",
+					defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+				});
 	initLlmProvider(llmProvider);
 
 	// Telemetry collector (opt-in, anonymous)

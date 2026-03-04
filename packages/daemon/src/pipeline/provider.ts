@@ -40,9 +40,9 @@ export interface OllamaProviderConfig {
 }
 
 const DEFAULT_OLLAMA_CONFIG: OllamaProviderConfig = {
-	model: "qwen3:4b",
+	model: "qwen2.5:7b-instruct",
 	baseUrl: "http://localhost:11434",
-	defaultTimeoutMs: 90000,
+	defaultTimeoutMs: 180000,
 };
 
 interface OllamaGenerateResponse {
@@ -307,7 +307,7 @@ const DEFAULT_OPENCODE_CONFIG: OpenCodeProviderConfig = {
 	model: "anthropic/claude-haiku-4-5-20251001",
 	defaultTimeoutMs: 60000,
 	enableOllamaFallback: true,
-	ollamaFallbackModel: "qwen3:4b",
+	ollamaFallbackModel: "qwen2.5:7b-instruct",
 };
 
 /**
