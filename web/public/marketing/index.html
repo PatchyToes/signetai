@@ -871,10 +871,10 @@ body {
   function getRadius() {
     const style = getComputedStyle(document.documentElement);
     const raw = style.getPropertyValue('--radius-orbit').trim();
-    const raw = style.getPropertyValue('--radius-orbit').trim();
     // Parse min(42vw, 42vh)
     const vw = window.innerWidth * 0.42;
     const vh = window.innerHeight * 0.42;
+    return Math.min(vw, vh);
   }
 
   // ===== AMBIENT FRAGMENTS =====
