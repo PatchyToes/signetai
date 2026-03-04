@@ -30,6 +30,10 @@ async function saveSettings() {
 	await st.save();
 }
 
+function resetToDefaults() {
+	st.resetToMacDefaults();
+}
+
 function formatSavedAt(raw: string | null): string {
 	if (!raw) return "";
 	try {
@@ -74,9 +78,14 @@ $effect(() => {
 					<span>{st.lastSaveFeedback}</span>
 				{/if}
 			</div>
-			<button class="save-btn" onclick={saveSettings} disabled={st.saving || !st.isDirty}>
-				{st.saving ? "Saving…" : "Save"}
-			</button>
+			<div class="save-actions">
+				<button class="reset-btn" onclick={resetToDefaults} disabled={st.saving}>
+					Reset to Defaults
+				</button>
+				<button class="save-btn" onclick={saveSettings} disabled={st.saving || !st.isDirty}>
+					{st.saving ? "Saving…" : "Save"}
+				</button>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -137,18 +146,38 @@ $effect(() => {
 		color: var(--sig-warning, #d4a017);
 	}
 
+	.save-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+
+	.reset-btn,
 	.save-btn {
 		font-family: var(--font-mono);
 		font-size: 11px;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: var(--sig-bg);
-		background: var(--sig-text-bright);
-		border: none;
 		border-radius: 0;
 		padding: 6px 20px;
 		cursor: pointer;
-		transition: opacity var(--dur) var(--ease);
+		transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+	}
+
+	.reset-btn {
+		color: var(--sig-text);
+		background: var(--sig-surface-raised);
+		border: 1px solid var(--sig-border-strong);
+	}
+
+	.reset-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+	.reset-btn:not(:disabled):hover { background: var(--sig-border); }
+
+	.save-btn {
+		color: var(--sig-bg);
+		background: var(--sig-text-bright);
+		border: 1px solid var(--sig-text-bright);
+		border-radius: 0;
 	}
 
 	.save-btn:disabled { opacity: 0.5; cursor: not-allowed; }

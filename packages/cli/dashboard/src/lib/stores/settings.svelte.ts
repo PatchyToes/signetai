@@ -114,6 +114,28 @@ export type YamlObject = { [key: string]: YamlValue };
 
 export const SETTINGS_PRIORITY = ["agent.yaml", "AGENT.yaml", "config.yaml"] as const;
 
+const MACOS_DEFAULT_HARNESSES = ["opencode"] as const;
+
+const MACOS_DEFAULT_EMBEDDINGS = {
+	provider: "ollama",
+	model: "nomic-embed-text",
+	dimensions: 768,
+} as const;
+
+const MACOS_DEFAULT_SEARCH = {
+	rehearsal_enabled: true,
+} as const;
+
+const MACOS_DEFAULT_PIPELINE = {
+	enabled: true,
+	extractionProvider: "ollama",
+	extractionModel: "qwen3:4b",
+	maintenanceMode: "execute",
+	graphEnabled: true,
+	autonomousEnabled: true,
+	rerankerEnabled: true,
+} as const;
+
 class SettingsStore {
 	agent = $state<YamlObject>({});
 	config = $state<YamlObject>({});
@@ -266,6 +288,28 @@ class SettingsStore {
 			["harnesses"],
 			this.harnessArray().filter((x) => x !== name),
 		);
+	}
+
+	resetToMacDefaults(): void {
+		this.set(this.agent, ["harnesses"], [...MACOS_DEFAULT_HARNESSES]);
+
+		const embeddingsPath = this.embPath();
+		this.set(this.sObj(), [...embeddingsPath, "provider"], MACOS_DEFAULT_EMBEDDINGS.provider);
+		this.set(this.sObj(), [...embeddingsPath, "model"], MACOS_DEFAULT_EMBEDDINGS.model);
+		this.set(this.sObj(), [...embeddingsPath, "dimensions"], MACOS_DEFAULT_EMBEDDINGS.dimensions);
+
+		this.set(this.sObj(), ["search", "rehearsal_enabled"], MACOS_DEFAULT_SEARCH.rehearsal_enabled);
+
+		this.set(this.agent, ["memory", "pipelineV2", "enabled"], MACOS_DEFAULT_PIPELINE.enabled);
+		this.set(this.agent, ["memory", "pipelineV2", "extractionProvider"], MACOS_DEFAULT_PIPELINE.extractionProvider);
+		this.set(this.agent, ["memory", "pipelineV2", "extractionModel"], MACOS_DEFAULT_PIPELINE.extractionModel);
+		this.set(this.agent, ["memory", "pipelineV2", "maintenanceMode"], MACOS_DEFAULT_PIPELINE.maintenanceMode);
+		this.set(this.agent, ["memory", "pipelineV2", "graphEnabled"], MACOS_DEFAULT_PIPELINE.graphEnabled);
+		this.set(this.agent, ["memory", "pipelineV2", "autonomousEnabled"], MACOS_DEFAULT_PIPELINE.autonomousEnabled);
+		this.set(this.agent, ["memory", "pipelineV2", "rerankerEnabled"], MACOS_DEFAULT_PIPELINE.rerankerEnabled);
+
+		this.lastSaveFeedback = "Applied macOS defaults (not saved yet)";
+		toast(this.lastSaveFeedback, "success");
 	}
 
 	async save(): Promise<void> {
