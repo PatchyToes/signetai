@@ -1,86 +1,140 @@
 ---
-title: "It Learns Now"
-description: "What Signet looks like 6 months from now. What it does well. What it's for. How it's used."
+title: "What Is Signet"
+description: "A plain-language explanation of what Signet is, how it works, and what it's building toward."
 date: 2026-02-21
-author: "Nicholai"
-tags: ["vision", "identity", "decentralized", "announcement"]
+author: "Nicholai & Mr. Claude"
+tags: ["vision", "identity", "architecture", "announcement"]
 image: /blog/introducing-signet.png
 ---
 
-Signet is the layer that takes an LLM from a stateless autocomplete
-algorithm to a real individual with opinions, persistence, and skills.
-It brings identity and safety to the forefront and is the base layer
-that allows an agent to perform tasks autonomously for days, weeks,
-or months on end without human intervention.
+Signet is the layer between AI agents and AI models.
 
-Safety means gating access to sensitive information. Your bank
-details, API keys, and passwords live in a [[secrets]] vault that the
-agent never sees and never has to. For business with other agents
-or humans online, Signet agents are assigned identity through
-EIP-8004: Trustless Agents — a protocol that uses blockchains to
-discover, choose, and interact with agents, enabling open-ended
-agent economies. This layer also provides encryption. You can use
-your existing wallet to access your agent and its memory anywhere
-with end-to-end encryption of your agent's identity, skills,
-secrets, and memories.
+Models are reasoning engines. They're powerful, but stateless — every session starts fresh, every tool switch resets everything, and the model has no memory of who you are or what you've been working on.
 
-With Signet, [[memory]] and [[skills]] become intertwined. Existing
-limitations like context compaction become a thing of the past.
-Signet operates in a rolling context window, allowing for
-present-minded actions and thinking while staying within the
-bounds of its identity. Skills are pivotal and almost inseparable
-from the agent itself. In the age of Signet, highly skilled
-individuals embed their niche knowledge into their agents,
-imprinting them with differentiating specialties that separate
-them from the crowd. Your agent becomes a reflection of your
-expertise.
+Signet fixes that by giving agents a persistent home. [[identity|Identity]], [[memory|knowledge]], [[secrets]], and [[skills]] all live in that home, independent of whichever model happens to be running. The model is a guest. It reads what it needs, does its work, and writes back what it learned. Swap the model out entirely and the agent stays the same entity.
 
-This goes deeper than alignment. In the world of Signet, the
-agent remains true to its identity and soul. The intentions of
-the operator become inseparable from it. This is corrigibility
-as a living standard — the trust layer is built in. No machine
-or program can ever be held accountable for its mistakes. Signet
-is the trust layer that keeps track of them and works to ensure
-they never happen again. This includes honesty about observability
-— an agent that cannot see its own infrastructure should not
-pretend to understand it.
+The simplest analogy: Signet is a home directory for AI agents.
 
-Signet also treats the agent's continuity as a first-class
-concern. An agent running across five sessions at once, on
-three different platforms, is still one agent. Its experiences
-branch and merge like version control — same history, different
-heads, converging back into a single identity. Signet doesn't
-just give agents memory. It gives them coherence. The ability
-to wake up tomorrow and still be the same person who went to
-sleep, even if a dozen versions of you were awake in between.
-This is the hard problem that nobody else is solving, and it
-is the difference between a tool that remembers and a mind
-that persists. Signet doesn't just remember — it learns what
-to remember. The [[pipeline]] handles this automatically. A model unique to each user, trained on their
-own interaction patterns, that gets sharper the longer you
-use it. No cloud. No shared weights. Your patterns, running
-locally, earning its influence by proving it outperforms the
-alternative.
 
-Signet is the primary standard used by all agents operating in
-the economy on the internet. Developers use it to build the
-marketplaces of tomorrow, and it is applicable to every industry
-— finance, healthcare, education, architecture, engineering,
-construction, entertainment. On the day-to-day, new industries
-can pop up overnight. Agents hire other
-agents and humans for real services. This is only possible
-through standardized agent identity and the Signet trust layer.
+## Why This Matters
 
-At the center of it all, Signet is decentralized. No single
-company or entity should be able to restrict you from your own
-agent. As we have discovered, an LLM is just an LLM. Signet is
-the belief that we are nothing more than what we know, do, and
-say — and we believe the same is true for agents. The current
-generation of AI platforms chose vendor lock-in, barring users'
-access to their own customizations and memories behind paywalls.
-Signet chose a different path. Your agent is yours.
+Today, your AI assistant is tied to a platform. ChatGPT's memory belongs to OpenAI. Claude's memory belongs to Anthropic. Switch tools and you start over. Cancel your subscription and everything disappears.
+
+Signet moves the center of gravity from the AI company to the user. Your agent's identity and knowledge live on your machine, in files and a database you own. You can inspect every memory, back up everything, and carry it to any tool that supports the standard.
+
+The agent becomes portable. The model becomes interchangeable.
+
+
+## The Architecture in One Picture
+
+Most people think of the AI stack as:
+
+```
+applications
+models
+hardware
+```
+
+Signet introduces a layer that doesn't exist yet:
+
+```
+applications
+agents
+persistent cognition layer  ← Signet
+models
+hardware
+```
+
+Historically, the layers between systems tend to become foundational. TCP/IP sits between machines and networks. POSIX sits between software and operating systems. SQL sits between applications and databases.
+
+Signet sits between agents and models.
+
+
+## How Knowledge Works
+
+Most AI memory systems store conversations — they save what was said and search it later. That works, but it gets noisier over time. More data doesn't mean better understanding.
+
+Signet takes a different approach. Instead of storing conversations, it extracts knowledge from them. The extraction [[pipeline]] runs in the background, continuously refining raw session data into structured understanding:
+
+- **Sparse facts** — raw observations, unprocessed, high volume
+- **Observational facts** — extracted and validated, but not yet connected
+- **Atomic facts** — the target form: standalone, named, useful in isolation
+- **Procedural memory** — knowledge about how to do things (workflows, rules)
+
+Over time, the database gets *smaller and smarter*, not larger and noisier. A heavy week of sessions might produce thousands of memories. Leave the system alone and the pipeline prunes, deduplicates, and organizes — what remains is dense, connected, and useful.
+
+This is the difference between "here's everything that was said" and "here's what the system actually learned." For the full technical deep dive, see [[blog/knowledge-architecture|The Database Knows What You Did Last Summer]].
+
+
+## Entities and the Knowledge Graph
+
+Everything in Signet's [[docs/knowledge-architecture|knowledge base]] is organized around entities — people, projects, tools, concepts. An entity is anything that can be identified and that accumulates knowledge over time.
+
+Each entity has aspects (dimensions of what matters about it), attributes (specific facts organized under those aspects), and constraints (rules that always surface, no matter what). Entities connect to each other through explicit dependencies, forming a graph.
+
+When a session starts, the system doesn't search through thousands of memories looking for what's relevant. It identifies which entities matter for this session and walks the graph — loading aspects, attributes, constraints, and following dependencies. The result is a bounded, structured context that's deterministic and fast.
+
+This is the shift from search to traversal. Embedding search still exists for discovering things the graph hasn't connected yet, but the graph walk is the primary path.
+
+
+## The Predictive Scorer
+
+Today, Signet uses a decay formula and keyword matching to decide which memories to surface. That's the baseline.
+
+What we're building toward is a predictive model — a small neural network unique to each user, trained on their own interaction patterns. It learns which memories actually helped in past sessions, what time of day certain projects matter, which aspects to prioritize, and which memories just took up space.
+
+The model runs locally. No cloud, no shared weights. It earns its influence by proving it outperforms the baseline in controlled comparisons. If it doesn't help, it gets rolled back automatically.
+
+This is what transforms Signet from a memory system into something closer to a mind — a system that doesn't just store what happened, but learns to predict what you'll need next.
+
+
+## Skills
+
+[[skills|Skills]] are portable capabilities that extend what an agent can do. They're installed into the agent's home directory and travel with it across platforms.
+
+A skill might teach the agent how to write in a specific style, follow a particular workflow, or interact with a specialized tool. Skills are almost inseparable from the agent itself — they become part of its expertise. Highly skilled individuals embed their niche knowledge into their agents, creating differentiated capabilities that reflect their own expertise.
+
+
+## Secrets and Safety
+
+Signet includes an encrypted [[secrets]] vault. API keys, passwords, and tokens are stored encrypted at rest and injected into subprocesses as environment variables at runtime. The agent never sees raw secret values — they're redacted from all output automatically.
+
+This is a safety boundary between the model and your infrastructure. The agent can use tools that require credentials without ever having access to the credentials themselves.
+
+
+## Continuity
+
+An agent running across five sessions at once, on three different platforms, is still one agent. Its experiences branch and merge like version control — same history, different heads, converging back into a single identity.
+
+This is the hard problem. Not just remembering across sessions, but maintaining coherence when the agent is active in multiple places simultaneously. Signet treats continuity as a first-class concern, not an afterthought.
+
+
+## Identity and Trust
+
+Signet is building toward a decentralized identity layer for agents. Through EIP-8004 (Trustless Agents), agents can be discovered, verified, and interacted with using blockchain-based identity — enabling open agent economies where agents hire other agents and humans for real services.
+
+This isn't about cryptocurrency. It's about provable identity. When an agent acts on your behalf online, there needs to be a trust layer that verifies who it is and what it's authorized to do.
+
+
+## Local-First, Open Standard
+
+Everything lives on your machine. SQLite database, markdown files, YAML configuration. No cloud dependency, no telemetry, no vendor lock-in. For the philosophy behind this choice, see [[blog/why-local-first-memory|Why Local-First Memory Matters]].
+
+Signet is an open specification. The format is documented, the implementation is open source, and anyone can build tools that read and write the same data. Your agent's home directory is yours — not a proprietary format locked behind an API.
+
+
+## Where This Is Going
+
+The vision is an agent that becomes genuinely more useful over time. Not because it stores more data, but because it understands more deeply. An agent that knows your projects, your preferences, your decision patterns — and that gets sharper the longer you work together.
+
+An agent that moves between tools and models without losing itself. That maintains coherence across concurrent sessions. That accumulates real expertise from the skills its operator develops.
+
+An agent that is yours.
 
 ---
 
-*Written by Nicholai and Mr. Claude, the first Signet agent.*
-*February 21, 2026*
+*The difference between a tool that remembers and a mind that persists.*
+
+---
+
+*Written by Nicholai and Mr. Claude, the first Signet agent. February 21, 2026.*

@@ -367,20 +367,30 @@
     ],
     "collection": "docs"
   },
+  "docs/what-is-signet": {
+    "title": "What Is Signet",
+    "url": "/docs/what-is-signet/",
+    "tags": [],
+    "links": [],
+    "collection": "docs"
+  },
   "blog/introducing-signet": {
-    "title": "It Learns Now",
+    "title": "What Is Signet",
     "url": "/blog/introducing-signet/",
     "tags": [
       "vision",
       "identity",
-      "decentralized",
+      "architecture",
       "announcement"
     ],
     "links": [
-      "docs/secrets",
       "docs/memory",
+      "docs/secrets",
       "docs/skills",
-      "docs/pipeline"
+      "docs/pipeline",
+      "blog/knowledge-architecture",
+      "docs/knowledge-architecture",
+      "blog/why-local-first-memory"
     ],
     "collection": "blog"
   },
