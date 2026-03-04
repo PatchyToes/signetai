@@ -2189,6 +2189,11 @@ async function setupWizard(options: SetupWizardOptions) {
 		})) as ExtractionProviderChoice;
 	}
 
+	const useMacOllamaProfile =
+		extractionProvider === "ollama" &&
+		platform() === "darwin" &&
+		process.arch === "arm64";
+
 	let extractionModel = "haiku";
 	if (extractionProvider === "claude-code") {
 		if (nonInteractive) {
@@ -2233,7 +2238,6 @@ async function setupWizard(options: SetupWizardOptions) {
 			})) as string;
 		}
 	} else if (extractionProvider === "ollama") {
-		const useMacOllamaProfile = platform() === "darwin" && process.arch === "arm64";
 		if (nonInteractive) {
 			extractionModel =
 				normalizeStringValue(options.extractionModel) ||
@@ -2458,10 +2462,6 @@ ${agentName} is a helpful assistant.
 		}
 
 		if (extractionProvider !== "none") {
-			const useMacOllamaProfile =
-				extractionProvider === "ollama" &&
-				platform() === "darwin" &&
-				process.arch === "arm64";
 			const pipelineV2Config: Record<string, unknown> = {
 				enabled: true,
 				extraction: {
@@ -2473,7 +2473,6 @@ ${agentName} is a helpful assistant.
 				},
 				graph: {
 					enabled: !useMacOllamaProfile,
-					...(useMacOllamaProfile ? { boostWeight: 0.15 } : {}),
 				},
 				reranker: {
 					enabled: true,
