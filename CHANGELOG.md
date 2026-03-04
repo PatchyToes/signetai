@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.38.1] - 2026-03-04
+
+### Bug Fixes
+
+- **daemon**: replace `as Error` casts with proper narrowing in db-accessor
+
+
 ## [0.38.0] - 2026-03-04
 
 ### Bug Fixes
