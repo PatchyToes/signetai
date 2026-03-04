@@ -153,7 +153,7 @@ describe("loadMemoryConfig", () => {
 
 		expect(DEFAULT_PIPELINE_V2.extraction.provider).toBe("claude-code");
 		expect(DEFAULT_PIPELINE_V2.extraction.model).toBe("haiku");
-		expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(45000);
+		expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(90000);
 		expect(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs).toBe(300000);
 	});
 
