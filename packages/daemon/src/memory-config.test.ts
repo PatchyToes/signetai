@@ -142,11 +142,19 @@ describe("loadMemoryConfig", () => {
 	});
 
 	it("applies Apple Silicon Ollama defaults on macOS", () => {
-		if (process.platform !== "darwin" || process.arch !== "arm64") return;
-		expect(DEFAULT_PIPELINE_V2.extraction.provider).toBe("ollama");
-		expect(DEFAULT_PIPELINE_V2.extraction.model).toBe("qwen2.5:7b-instruct");
-		expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(180000);
-		expect(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs).toBe(420000);
+		const isAppleSiliconMac = process.platform === "darwin" && process.arch === "arm64";
+		if (isAppleSiliconMac) {
+			expect(DEFAULT_PIPELINE_V2.extraction.provider).toBe("ollama");
+			expect(DEFAULT_PIPELINE_V2.extraction.model).toBe("qwen2.5:7b-instruct");
+			expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(180000);
+			expect(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs).toBe(420000);
+			return;
+		}
+
+		expect(DEFAULT_PIPELINE_V2.extraction.provider).toBe("claude-code");
+		expect(DEFAULT_PIPELINE_V2.extraction.model).toBe("haiku");
+		expect(DEFAULT_PIPELINE_V2.extraction.timeout).toBe(45000);
+		expect(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs).toBe(300000);
 	});
 
 	it("loads pipelineV2 flags from agent.yaml (flat keys, backward compat)", () => {
