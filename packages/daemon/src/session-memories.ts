@@ -12,9 +12,13 @@ import { join } from "node:path";
 import { getDbAccessor } from "./db-accessor";
 import { logger } from "./logger";
 
+let cachedDbPath: string | undefined;
+
 function getMemoryDbPath(): string {
+	if (cachedDbPath) return cachedDbPath;
 	const agentsDir = process.env.SIGNET_PATH || join(homedir(), ".agents");
-	return join(agentsDir, "memory", "memories.db");
+	cachedDbPath = join(agentsDir, "memory", "memories.db");
+	return cachedDbPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,30 +48,31 @@ export function recordSessionCandidates(
 	if (!sessionKey || candidates.length === 0 || !existsSync(getMemoryDbPath())) return;
 
 	try {
+		const now = new Date().toISOString();
 		getDbAccessor().withWriteTx((db) => {
-			const now = new Date().toISOString();
-			const stmt = db.prepare(
+			const count = candidates.length;
+			const params: Array<string | number> = new Array(count * 9);
+			for (let i = 0; i < count; i++) {
+				const c = candidates[i];
+				const offset = i * 9;
+				params[offset] = crypto.randomUUID();
+				params[offset + 1] = sessionKey;
+				params[offset + 2] = c.id;
+				params[offset + 3] = c.source;
+				params[offset + 4] = c.effScore;
+				params[offset + 5] = c.effScore;
+				params[offset + 6] = i;
+				params[offset + 7] = injectedIds.has(c.id) ? 1 : 0;
+				params[offset + 8] = now;
+			}
+
+			const placeholders = Array(count).fill("(?,?,?,?,?,?,?,?,0,?)").join(",");
+			db.prepare(
 				`INSERT OR IGNORE INTO session_memories
 				 (id, session_key, memory_id, source, effective_score,
 				  final_score, rank, was_injected, fts_hit_count, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-			);
-
-			let rank = 0;
-			for (const c of candidates) {
-				const wasInjected = injectedIds.has(c.id) ? 1 : 0;
-				stmt.run(
-					crypto.randomUUID(),
-					sessionKey,
-					c.id,
-					c.source,
-					c.effScore,
-					c.effScore, // final_score = effective_score until predictor exists
-					rank++,
-					wasInjected,
-					now,
-				);
-			}
+				 VALUES ${placeholders}`,
+			).run(...params);
 		});
 
 		logger.debug("session-memories", "Recorded session candidates", {
@@ -92,31 +97,24 @@ export function recordSessionCandidates(
  * If a memory wasn't a session-start candidate, inserts a new row with
  * source='fts_only'.
  */
-export function trackFtsHits(
-	sessionKey: string | undefined,
-	matchedIds: ReadonlyArray<string>,
-): void {
+export function trackFtsHits(sessionKey: string | undefined, matchedIds: ReadonlyArray<string>): void {
 	if (!sessionKey || matchedIds.length === 0 || !existsSync(getMemoryDbPath())) return;
 
 	try {
 		getDbAccessor().withWriteTx((db) => {
 			const now = new Date().toISOString();
-			const updateStmt = db.prepare(
-				`UPDATE session_memories
-				 SET fts_hit_count = fts_hit_count + 1
-				 WHERE session_key = ? AND memory_id = ?`,
-			);
-			const insertStmt = db.prepare(
-				`INSERT OR IGNORE INTO session_memories
+
+			const upsertStmt = db.prepare(
+				`INSERT INTO session_memories
 				 (id, session_key, memory_id, source, effective_score,
 				  final_score, rank, was_injected, fts_hit_count, created_at)
-				 VALUES (?, ?, ?, 'fts_only', 0, 0, 0, 0, 1, ?)`,
+				 VALUES (?, ?, ?, 'fts_only', 0, 0, 0, 0, 1, ?)
+				 ON CONFLICT(session_key, memory_id) DO UPDATE SET
+				 fts_hit_count = fts_hit_count + 1`,
 			);
 
 			for (const id of matchedIds) {
-				updateStmt.run(sessionKey, id);
-				// INSERT OR IGNORE is a no-op if the row already exists
-				insertStmt.run(crypto.randomUUID(), sessionKey, id, now);
+				upsertStmt.run(crypto.randomUUID(), sessionKey, id, now);
 			}
 		});
 	} catch (e) {
