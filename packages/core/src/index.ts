@@ -46,6 +46,7 @@ export type {
 	PipelineTelemetryConfig,
 	PipelineEmbeddingTrackerConfig,
 	PipelineContinuityConfig,
+	PipelineProceduralConfig,
 	ExtractedFact,
 	ExtractedEntity,
 	ExtractionResult,

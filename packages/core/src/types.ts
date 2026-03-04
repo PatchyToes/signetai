@@ -224,12 +224,23 @@ export interface PipelineV2Config {
 	readonly telemetry: PipelineTelemetryConfig;
 	readonly continuity: PipelineContinuityConfig;
 	readonly embeddingTracker: PipelineEmbeddingTrackerConfig;
+	readonly procedural: PipelineProceduralConfig;
 }
 
 export interface PipelineEmbeddingTrackerConfig {
 	readonly enabled: boolean;
 	readonly pollMs: number;
 	readonly batchSize: number;
+}
+
+export interface PipelineProceduralConfig {
+	readonly enabled: boolean;
+	readonly decayRate: number;
+	readonly minImportance: number;
+	readonly importanceOnInstall: number;
+	readonly enrichOnInstall: boolean;
+	readonly enrichMinDescription: number;
+	readonly reconcileIntervalMs: number;
 }
 
 // -- Status/union constants --

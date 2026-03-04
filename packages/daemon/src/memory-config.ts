@@ -104,6 +104,15 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 		pollMs: 5000,
 		batchSize: 8,
 	},
+	procedural: {
+		enabled: true,
+		decayRate: 0.99,
+		minImportance: 0.3,
+		importanceOnInstall: 0.7,
+		enrichOnInstall: true,
+		enrichMinDescription: 30,
+		reconcileIntervalMs: 60000,
+	},
 };
 
 export interface ResolvedMemoryConfig {
@@ -151,6 +160,7 @@ export function loadPipelineConfig(
 	const telemetryRaw = raw.telemetry as Record<string, unknown> | undefined;
 	const continuityRaw = raw.continuity as Record<string, unknown> | undefined;
 	const embeddingTrackerRaw = raw.embeddingTracker as Record<string, unknown> | undefined;
+	const proceduralRaw = raw.procedural as Record<string, unknown> | undefined;
 
 	// Helper: resolve nested-first, flat-fallback
 	const d = DEFAULT_PIPELINE_V2;
@@ -468,6 +478,39 @@ export function loadPipelineConfig(
 				1,
 				20,
 				d.embeddingTracker.batchSize,
+			),
+		},
+
+		procedural: {
+			enabled: resolveBool(
+				proceduralRaw?.enabled, undefined, d.procedural.enabled,
+			),
+			decayRate: clampFraction(
+				proceduralRaw?.decayRate,
+				d.procedural.decayRate,
+			),
+			minImportance: clampFraction(
+				proceduralRaw?.minImportance,
+				d.procedural.minImportance,
+			),
+			importanceOnInstall: clampFraction(
+				proceduralRaw?.importanceOnInstall,
+				d.procedural.importanceOnInstall,
+			),
+			enrichOnInstall: resolveBool(
+				proceduralRaw?.enrichOnInstall, undefined, d.procedural.enrichOnInstall,
+			),
+			enrichMinDescription: clampPositive(
+				proceduralRaw?.enrichMinDescription,
+				10,
+				500,
+				d.procedural.enrichMinDescription,
+			),
+			reconcileIntervalMs: clampPositive(
+				proceduralRaw?.reconcileIntervalMs,
+				10000,
+				600000,
+				d.procedural.reconcileIntervalMs,
 			),
 		},
 	};
