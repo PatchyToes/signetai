@@ -30,6 +30,48 @@ function globDir(dir: string, pattern: RegExp): string[] {
 	return readdirSync(absDir).filter((f) => pattern.test(f));
 }
 
+function listTsFilesRecursive(dir: string): string[] {
+	const absDir = join(ROOT, dir);
+	if (!existsSync(absDir) || !statSync(absDir).isDirectory()) return [];
+
+	const files: string[] = [];
+
+	function walk(currentAbs: string, relPrefix: string): void {
+		for (const entry of readdirSync(currentAbs)) {
+			if (entry === "node_modules" || entry.startsWith(".")) continue;
+			const nextAbs = join(currentAbs, entry);
+			const nextRel = relPrefix ? `${relPrefix}/${entry}` : entry;
+			const nextStat = statSync(nextAbs);
+			if (nextStat.isDirectory()) {
+				walk(nextAbs, nextRel);
+				continue;
+			}
+			if (!entry.endsWith(".ts")) continue;
+			if (entry.endsWith(".test.ts")) continue;
+			files.push(`${dir}/${nextRel}`);
+		}
+	}
+
+	walk(absDir, "");
+	return files.sort();
+}
+
+function sliceSection(content: string, heading: string): string {
+	const start = content.indexOf(heading);
+	if (start === -1) return "";
+
+	const afterStart = content.slice(start + heading.length);
+	const nextH2 = afterStart.search(/\n##\s+/);
+	const nextSetext = afterStart.search(/\n[^\n]+\n---/);
+	const boundaries = [nextH2, nextSetext].filter((offset) => offset >= 0);
+	const end =
+		boundaries.length > 0
+			? start + heading.length + Math.min(...boundaries)
+			: content.length;
+
+	return content.slice(start, end);
+}
+
 /** Normalize a route path for comparison (strip trailing slash, lowercase). */
 function normRoute(p: string): string {
 	return p.replace(/\/+$/, "").toLowerCase();
@@ -52,9 +94,7 @@ interface RouteEntry {
 function extractRoutesFromSource(): RouteEntry[] {
 	const files = [
 		"packages/daemon/src/daemon.ts",
-		"packages/daemon/src/routes/skills.ts",
-		"packages/daemon/src/routes/marketplace.ts",
-		"packages/daemon/src/routes/marketplace-reviews.ts",
+		...listTsFilesRecursive("packages/daemon/src/routes"),
 		"packages/daemon/src/mcp/route.ts",
 	];
 
@@ -108,11 +148,10 @@ function checkRouteDrift(): {
 } {
 	const sourceRoutes = extractRoutesFromSource();
 	const claudeMd = read("CLAUDE.md");
-
-	const endpointSection = claudeMd.slice(
-		claudeMd.indexOf("## HTTP API Endpoints"),
-	);
-	const docRoutes = parseClaudeMdRoutes(endpointSection);
+	const endpointSection = sliceSection(claudeMd, "## HTTP API Endpoints");
+	const docRoutes = endpointSection
+		? parseClaudeMdRoutes(endpointSection)
+		: [];
 
 	// Build a set of documented route keys
 	const docKeys = new Set<string>();
@@ -175,10 +214,13 @@ function checkMigrationDrift(): MigrationDrift {
 		}
 	}
 
-	const hasDrift = ranges.some((r) => {
-		const endNum = r.text.match(/through\s+(\d{3})/)?.[1];
-		return endNum !== maxNum;
-	});
+	const hasDrift =
+		ranges.length === 0
+			? migFiles.length > 0
+			: ranges.some((r) => {
+					const endNum = r.text.match(/through\s+(\d{3})/)?.[1];
+					return endNum !== maxNum;
+				});
 
 	return {
 		documentedRanges: ranges,
