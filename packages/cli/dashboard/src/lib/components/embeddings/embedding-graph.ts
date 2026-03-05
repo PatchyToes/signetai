@@ -421,11 +421,11 @@ export function nodeFillStyle(
 	if (selectedId === id) return "rgba(255, 255, 255, 0.95)";
 	if (outsideLens) return dimmed ? "rgba(80, 80, 80, 0.08)" : "rgba(95, 95, 95, 0.15)";
 	if (relation === "similar") {
-		if (colorMode === "none") return dimmed ? "rgba(164, 164, 164, 0.28)" : "rgba(206, 206, 206, 0.82)";
+		if (colorMode === "none") return dimmed ? "rgba(160, 170, 185, 0.3)" : "rgba(198, 210, 228, 0.84)";
 		return dimmed ? "rgba(129, 180, 255, 0.35)" : "rgba(129, 180, 255, 0.9)";
 	}
 	if (relation === "dissimilar") {
-		if (colorMode === "none") return dimmed ? "rgba(122, 122, 122, 0.24)" : "rgba(178, 178, 178, 0.7)";
+		if (colorMode === "none") return dimmed ? "rgba(165, 150, 150, 0.28)" : "rgba(208, 190, 190, 0.8)";
 		return dimmed ? "rgba(255, 146, 146, 0.35)" : "rgba(255, 146, 146, 0.9)";
 	}
 	if (isPinned) return dimmed ? "rgba(220, 220, 220, 0.42)" : "rgba(235, 235, 235, 0.95)";
@@ -487,8 +487,8 @@ export function nodeColor3D(
 	if (selectedId === id) return "#ffffff";
 	if (lensActive && !lensIds.has(id)) return "#3b3b3b";
 	const relation = relations.get(id) ?? null;
-	if (relation === "similar") return noColorMode ? "#c6c6c6" : "#81b4ff";
-	if (relation === "dissimilar") return noColorMode ? "#8f8f8f" : "#ff9292";
+	if (relation === "similar") return noColorMode ? "#c6d2e4" : "#81b4ff";
+	if (relation === "dissimilar") return noColorMode ? "#cfbcbc" : "#ff9292";
 	if (pinnedIds.has(id)) return "#e5e7eb";
 	const dimmed = filterIds !== null && !filterIds.has(id);
 	if (dimmed) return "#5b5b5b";
