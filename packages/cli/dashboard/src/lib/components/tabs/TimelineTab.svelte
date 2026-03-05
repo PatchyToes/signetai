@@ -218,17 +218,62 @@ function buildBucketTopMemories(
 	bucketsInput: readonly MemoryTimelineBucket[],
 	memories: readonly Memory[],
 ): Record<string, Memory[]> {
+	const parsedRangeBounds = new Map<
+		MemoryTimelineBucket["rangeKey"],
+		{ startMs: number; endMs: number }
+	>();
+	for (const bucket of bucketsInput) {
+		const startMs = Date.parse(bucket.start);
+		const endMs = Date.parse(bucket.end);
+		if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
+		parsedRangeBounds.set(bucket.rangeKey, { startMs, endMs });
+	}
+
+	const todayRange = parsedRangeBounds.get("today") ?? null;
+	const lastWeekRange = parsedRangeBounds.get("last_week") ?? null;
+
+	function getSelectionWindow(
+		bucket: MemoryTimelineBucket,
+	): { startMs: number; endMs: number } {
+		const parsed = parsedRangeBounds.get(bucket.rangeKey);
+		const fallbackStartMs = Date.parse(bucket.start);
+		const fallbackEndMs = Date.parse(bucket.end);
+		const fallback = {
+			startMs: Number.isFinite(fallbackStartMs) ? fallbackStartMs : Number.NEGATIVE_INFINITY,
+			endMs: Number.isFinite(fallbackEndMs) ? fallbackEndMs : Number.POSITIVE_INFINITY,
+		};
+		if (!parsed) return fallback;
+
+		let startMs = parsed.startMs;
+		let endMs = parsed.endMs;
+		if (bucket.rangeKey === "last_week" && todayRange) {
+			endMs = Math.min(endMs, todayRange.startMs - 1);
+		} else if (bucket.rangeKey === "one_month") {
+			if (lastWeekRange) {
+				endMs = Math.min(endMs, lastWeekRange.startMs - 1);
+			} else if (todayRange) {
+				endMs = Math.min(endMs, todayRange.startMs - 1);
+			}
+		}
+
+		if (endMs < startMs) return fallback;
+		return { startMs, endMs };
+	}
+
 	const bucketEntries: Array<{
 		bucket: MemoryTimelineBucket;
 		startMs: number;
 		endMs: number;
 		candidates: Array<{ memory: Memory; score: number; createdAt: number }>;
-	}> = bucketsInput.map((bucket) => ({
-		bucket,
-		startMs: Date.parse(bucket.start),
-		endMs: Date.parse(bucket.end),
-		candidates: [],
-	}));
+	}> = bucketsInput.map((bucket) => {
+		const window = getSelectionWindow(bucket);
+		return {
+			bucket,
+			startMs: window.startMs,
+			endMs: window.endMs,
+			candidates: [],
+		};
+	});
 
 	for (const memory of memories) {
 		const createdAt = Date.parse(memory.created_at);
@@ -357,13 +402,13 @@ function formatMemoryMoment(
 		return date.toLocaleTimeString("en-US", {
 			hour: "numeric",
 			minute: "2-digit",
-			timeZone: "UTC",
 		});
 	}
-	return date.toLocaleDateString("en-US", {
+	return date.toLocaleString("en-US", {
 		month: "short",
 		day: "numeric",
-		timeZone: "UTC",
+		hour: "numeric",
+		minute: "2-digit",
 	});
 }
 

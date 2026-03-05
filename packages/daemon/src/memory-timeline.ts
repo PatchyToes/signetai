@@ -73,7 +73,6 @@ export interface MemoryTimelineBucket {
 	readonly typeBreakdown: readonly TimelineMetric[];
 	readonly sourceBreakdown: readonly TimelineMetric[];
 	readonly topTags: readonly TimelineMetric[];
-	readonly summary: string;
 }
 
 export interface MemoryTimelineResponse {
@@ -213,16 +212,6 @@ function sortMetrics(map: Map<string, number>, limit = 5): TimelineMetric[] {
 		.map(([key, count]) => ({ key, count }));
 }
 
-function bucketSummary(bucket: MutableBucket): string {
-	const added = `${bucket.memoriesAdded} added`;
-	const evolved = `${bucket.evolved} evolved`;
-	const strengthened = `${bucket.strengthened} strengthened`;
-	if (bucket.trackedEvents === 0) {
-		return `${added}. Quiet window with no tracked memory mutations.`;
-	}
-	return `${added}, ${evolved}, ${strengthened}. ${bucket.trackedEvents} tracked events captured.`;
-}
-
 export function buildMemoryTimeline(
 	db: ReadDb,
 	options?: {
@@ -341,7 +330,6 @@ export function buildMemoryTimeline(
 			typeBreakdown: sortMetrics(bucket.typeBreakdown),
 			sourceBreakdown: sortMetrics(bucket.sourceBreakdown),
 			topTags: sortMetrics(bucket.topTags),
-			summary: bucketSummary(bucket),
 		});
 	}
 

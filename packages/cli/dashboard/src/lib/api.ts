@@ -49,7 +49,6 @@ export interface MemoryTimelineBucket {
 	typeBreakdown: TimelineMetric[];
 	sourceBreakdown: TimelineMetric[];
 	topTags: TimelineMetric[];
-	summary: string;
 }
 
 export interface MemoryTimelineResponse {
@@ -295,7 +294,10 @@ function buildTimelineFallback(memories: readonly Memory[]): MemoryTimelineRespo
 
 		let tags: string[] = [];
 		if (Array.isArray(memory.tags)) {
-			tags = memory.tags;
+			tags = memory.tags
+				.filter((tag): tag is string => typeof tag === "string")
+				.map((tag) => tag.trim())
+				.filter((tag) => tag.length > 0);
 		} else if (typeof memory.tags === "string") {
 			const trimmed = memory.tags.trim();
 			if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
@@ -362,14 +364,14 @@ function buildTimelineFallback(memories: readonly Memory[]): MemoryTimelineRespo
 			recovered: 0,
 			avgImportance:
 				bucket.importanceCount > 0
-					? Number((bucket.importanceSum / bucket.importanceCount).toFixed(3))
+					? Number(
+							Math.min(1, Math.max(0, bucket.importanceSum / bucket.importanceCount)).toFixed(3),
+						)
 					: 0,
 			pinned: bucket.pinned,
 			typeBreakdown: toMetrics(bucket.typeMap),
 			sourceBreakdown: toMetrics(bucket.sourceMap),
 			topTags: toMetrics(bucket.tagMap),
-			summary:
-				`${bucket.memoriesAdded} added. Fallback timeline from memory index only.`,
 		})),
 	};
 }
