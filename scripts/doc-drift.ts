@@ -7,7 +7,7 @@
  * Usage: bun scripts/doc-drift.ts [--json | --markdown]
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -40,8 +40,12 @@ function listTsFilesRecursive(dir: string): string[] {
 	if (!existsSync(absDir) || !statSync(absDir).isDirectory()) return [];
 
 	const files: string[] = [];
+	const visited = new Set<string>();
 
 	function walk(currentAbs: string, relPrefix: string): void {
+		const real = realpathSync(currentAbs);
+		if (visited.has(real)) return; // guard against circular symlinks
+		visited.add(real);
 		for (const entry of readdirSync(currentAbs)) {
 			if (entry === "node_modules" || entry.startsWith(".")) continue;
 			const nextAbs = join(currentAbs, entry);
@@ -314,9 +318,13 @@ interface PackageInfo {
 function getActualPackages(): PackageInfo[] {
 	const packagesDir = join(ROOT, "packages");
 	const packages: PackageInfo[] = [];
+	const visitedDirs = new Set<string>();
 
 	function scan(dir: string, relPrefix: string): void {
 		if (!existsSync(dir)) return;
+		const realDir = realpathSync(dir);
+		if (visitedDirs.has(realDir)) return; // guard against circular symlinks
+		visitedDirs.add(realDir);
 		for (const entry of readdirSync(dir)) {
 			const full = join(dir, entry);
 			const rel = relPrefix ? `${relPrefix}/${entry}` : entry;
@@ -324,7 +332,9 @@ function getActualPackages(): PackageInfo[] {
 			if (existsSync(pkgJson)) {
 				try {
 					const pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
-					if (pkg.name) {
+					// Skip private packages (workspace roots etc.) — they are
+					// intentionally omitted from documentation tables.
+					if (pkg.name && !pkg.private) {
 						packages.push({ name: pkg.name, dir: `packages/${rel}` });
 					}
 				} catch {
@@ -534,7 +544,14 @@ function formatMarkdown(report: DriftReport): string {
 
 	if (report.migrations.hasDrift) {
 		lines.push("## Migration Drift", "");
-		lines.push(`Actual latest: \`${report.migrations.actualMax}\``, "");
+		if (report.migrations.actualMax === "") {
+			lines.push(
+				"_No migration files found on disk. Remove or comment out the documented range._",
+				"",
+			);
+		} else {
+			lines.push(`Actual latest: \`${report.migrations.actualMax}\``, "");
+		}
 		if (report.migrations.documentedRanges.length === 0) {
 			lines.push(
 				"_No migration range found in CLAUDE.md. The `## Database Migrations` section may be missing or contain no `NNN through NNN` pattern._",
