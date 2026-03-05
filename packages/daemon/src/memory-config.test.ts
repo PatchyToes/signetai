@@ -126,6 +126,17 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.embedding.base_url).toBe("http://192.168.1.100:11434");
 	});
 
+	it("preserves explicit empty ollama base_url", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			"embedding:\n  provider: ollama\n  model: nomic-embed-text\n  base_url: \"\"\n",
+		);
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.embedding.provider).toBe("ollama");
+		expect(cfg.embedding.base_url).toBe("");
+	});
+
 	it("does not set default base_url for non-ollama providers", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(

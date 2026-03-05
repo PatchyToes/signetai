@@ -515,25 +515,25 @@ export function loadMemoryConfig(agentsDir: string): ResolvedMemoryConfig {
 				{};
 			const srch = (yaml.search as Record<string, unknown> | undefined) ?? {};
 
-		if (emb.provider === "none") {
-			defaults.embedding.provider = "none";
-		} else if (emb.provider) {
-			defaults.embedding.provider = emb.provider as "native" | "ollama" | "openai";
-			defaults.embedding.model =
-				(emb.model as string | undefined) ?? defaults.embedding.model;
-			defaults.embedding.dimensions = Number.parseInt(
-				String(emb.dimensions ?? "768"),
-				10,
-			);
-			// For ollama provider, default to standard local URL if not specified
-			const explicitBaseUrl = emb.base_url as string | undefined;
-			if (defaults.embedding.provider === "ollama") {
-				defaults.embedding.base_url = explicitBaseUrl || DEFAULT_OLLAMA_BASE_URL;
-			} else {
-				defaults.embedding.base_url = explicitBaseUrl ?? defaults.embedding.base_url;
+			if (emb.provider === "none") {
+				defaults.embedding.provider = "none";
+			} else if (emb.provider) {
+				defaults.embedding.provider = emb.provider as "native" | "ollama" | "openai";
+				defaults.embedding.model =
+					(emb.model as string | undefined) ?? defaults.embedding.model;
+				defaults.embedding.dimensions = Number.parseInt(
+					String(emb.dimensions ?? "768"),
+					10,
+				);
+				// For ollama provider, default to standard local URL only when base_url is omitted.
+				const explicitBaseUrl = emb.base_url as string | undefined;
+				if (defaults.embedding.provider === "ollama") {
+					defaults.embedding.base_url = explicitBaseUrl ?? DEFAULT_OLLAMA_BASE_URL;
+				} else {
+					defaults.embedding.base_url = explicitBaseUrl ?? defaults.embedding.base_url;
+				}
+				defaults.embedding.api_key = emb.api_key as string | undefined;
 			}
-			defaults.embedding.api_key = emb.api_key as string | undefined;
-		}
 
 			if (srch.alpha !== undefined) {
 				defaults.search.alpha = Number.parseFloat(String(srch.alpha));
