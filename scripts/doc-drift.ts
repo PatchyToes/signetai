@@ -149,7 +149,7 @@ interface DocRoute {
 function parseClaudeMdRoutes(content: string): DocRoute[] {
 	const routes: DocRoute[] = [];
 	const tablePattern =
-		/^\|\s*`([^`]+)`\s*\|\s*([A-Z/]+)\s*\|\s*(.+?)\s*\|$/gm;
+		/^\|\s*`([^`]+)`\s*\|\s*([A-Z/]+)\s*\|\s*(.*?)\s*\|$/gm;
 
 	let match: RegExpExecArray | null = null;
 	while ((match = tablePattern.exec(content)) !== null) {
@@ -535,10 +535,17 @@ function formatMarkdown(report: DriftReport): string {
 	if (report.migrations.hasDrift) {
 		lines.push("## Migration Drift", "");
 		lines.push(`Actual latest: \`${report.migrations.actualMax}\``, "");
-		for (const r of report.migrations.documentedRanges) {
-			lines.push(`- ${r.location}: "${r.text}"`);
+		if (report.migrations.documentedRanges.length === 0) {
+			lines.push(
+				"_No migration range found in CLAUDE.md. The `## Database Migrations` section may be missing or contain no `NNN through NNN` pattern._",
+				"",
+			);
+		} else {
+			for (const r of report.migrations.documentedRanges) {
+				lines.push(`- ${r.location}: "${r.text}"`);
+			}
+			lines.push("");
 		}
-		lines.push("");
 	}
 
 	if (report.keyFiles.missing.length > 0) {
