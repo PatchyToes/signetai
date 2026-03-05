@@ -1280,11 +1280,15 @@ $effect(() => {
 		} else {
 			window.sessionStorage.setItem(NODE_COLOR_MODE_SESSION_STORAGE_KEY, nodeColorMode);
 		}
+	} catch {
+		// Ignore sessionStorage write failures and keep in-memory state.
+	}
+	try {
 		if (lastSeenWriteMs !== null) {
 			window.localStorage.setItem(LAST_SEEN_STORAGE_KEY, String(lastSeenWriteMs));
 		}
 	} catch {
-		// Ignore storage write failures and keep in-memory state.
+		// Ignore localStorage write failures and keep in-memory state.
 	}
 });
 
