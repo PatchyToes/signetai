@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.38.5] - 2026-03-05
+
+### Bug Fixes
+
+- **daemon**: harden SIGNET-ARCHITECTURE.md persistence (#137)
+
+
 ## [0.38.4] - 2026-03-05
 
 ### Bug Fixes
