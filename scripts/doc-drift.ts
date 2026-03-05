@@ -125,7 +125,16 @@ function extractRoutesFromSource(): RouteEntry[] {
 		}
 	}
 
-	return routes;
+	// Deduplicate by method+path — the same route can appear in both daemon.ts
+	// and a routes file (re-export/remount), which would produce duplicate
+	// false positives in missingFromDocs even after the route is documented.
+	const seen = new Set<string>();
+	return routes.filter((r) => {
+		const k = routeKey(r.method, r.path);
+		if (seen.has(k)) return false;
+		seen.add(k);
+		return true;
+	});
 }
 
 interface DocRoute {
@@ -266,7 +275,7 @@ function checkKeyFilesDrift(claudeMd: string): KeyFilesDrift {
 	const section = sliceSection(claudeMd, "## Key Files");
 	if (!section) return { missing: [], total: 0 };
 
-	const pathPattern = /^- `([^`]+)`/gm;
+	const pathPattern = /^[ \t]*- `([^`]+)`/gm;
 	const paths: string[] = [];
 	let match: RegExpExecArray | null = null;
 	while ((match = pathPattern.exec(section)) !== null) {
