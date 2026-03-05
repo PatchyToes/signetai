@@ -51,19 +51,29 @@ export function recordSessionCandidates(
 		getDbAccessor().withWriteTx((db) => {
 			const now = new Date().toISOString();
 			const CHUNK_SIZE = 50;
+			const ROW = "(?,?,?,?,?,?,?,?,0,?)";
+			const BASE_SQL = `INSERT OR IGNORE INTO session_memories
+					 (id, session_key, memory_id, source, effective_score,
+					  final_score, rank, was_injected, fts_hit_count, created_at)
+					 VALUES `;
+
+			// Pre-compile the full-chunk statement once to avoid recompiling
+			// identical SQL on every iteration of the loop.
+			const fullChunkStmt =
+				candidates.length >= CHUNK_SIZE
+					? db.prepare(BASE_SQL + Array.from({ length: CHUNK_SIZE }, () => ROW).join(","))
+					: null;
 
 			let rank = 0;
 			for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
 				const chunk = candidates.slice(i, i + CHUNK_SIZE);
 
-				// Multi-row INSERT: (?,?,?,?,?,?,?,?,0,?), (?,?,?,?,?,?,?,?,0,?), ...
-				const placeholders = Array.from({ length: chunk.length }, () => "(?,?,?,?,?,?,?,?,0,?)").join(",");
-				const stmt = db.prepare(
-					`INSERT OR IGNORE INTO session_memories
-					 (id, session_key, memory_id, source, effective_score,
-					  final_score, rank, was_injected, fts_hit_count, created_at)
-					 VALUES ${placeholders}`,
-				);
+				// Reuse pre-compiled statement for full chunks; compile once for
+				// the remainder chunk (different SQL, can't reuse).
+				const stmt =
+					chunk.length === CHUNK_SIZE
+						? fullChunkStmt!
+						: db.prepare(BASE_SQL + Array.from({ length: chunk.length }, () => ROW).join(","));
 
 				const values: unknown[] = [];
 				for (const c of chunk) {
@@ -116,19 +126,46 @@ export function trackFtsHits(sessionKey: string | undefined, matchedIds: Readonl
 	try {
 		getDbAccessor().withWriteTx((db) => {
 			const now = new Date().toISOString();
-
-			// COLLAPSE: Use UPSERT to handle both new hits and existing candidate updates
-			const stmt = db.prepare(`
-				INSERT INTO session_memories
+			const CHUNK_SIZE = 50;
+			// Each row contributes 4 params: id, session_key, memory_id, created_at
+			const ROW = "(?, ?, ?, 'fts_only', 0, 0, 0, 0, 1, ?)";
+			const BASE_SQL = `INSERT INTO session_memories
 				 (id, session_key, memory_id, source, effective_score,
 				  final_score, rank, was_injected, fts_hit_count, created_at)
-				 VALUES (?, ?, ?, 'fts_only', 0, 0, 0, 0, 1, ?)
+				 VALUES `;
+			const CONFLICT_CLAUSE = `
 				 ON CONFLICT(session_key, memory_id) DO UPDATE SET
-				  fts_hit_count = fts_hit_count + 1
-			`);
+				  fts_hit_count = fts_hit_count + 1`;
 
-			for (const id of matchedIds) {
-				stmt.run(crypto.randomUUID(), sessionKey, id, now);
+			// Pre-compile the full-chunk UPSERT statement once to avoid
+			// recompiling identical SQL for every batch of 50.
+			const fullChunkStmt =
+				matchedIds.length >= CHUNK_SIZE
+					? db.prepare(
+							BASE_SQL +
+								Array.from({ length: CHUNK_SIZE }, () => ROW).join(",") +
+								CONFLICT_CLAUSE,
+						)
+					: null;
+
+			for (let i = 0; i < matchedIds.length; i += CHUNK_SIZE) {
+				const chunk = matchedIds.slice(i, i + CHUNK_SIZE);
+
+				const stmt =
+					chunk.length === CHUNK_SIZE
+						? fullChunkStmt!
+						: db.prepare(
+								BASE_SQL +
+									Array.from({ length: chunk.length }, () => ROW).join(",") +
+									CONFLICT_CLAUSE,
+							);
+
+				const values: unknown[] = [];
+				for (const id of chunk) {
+					values.push(crypto.randomUUID(), sessionKey, id, now);
+				}
+
+				stmt.run(...values);
 			}
 		});
 	} catch (e) {
