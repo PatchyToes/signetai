@@ -1293,7 +1293,7 @@ $effect(() => {
 		// Ignore sessionStorage write failures and keep in-memory state.
 	}
 	try {
-		if (showNewSinceLastSeen) {
+		if (showNewSinceLastSeen && nodeColorMode !== "none") {
 			window.sessionStorage.setItem(NEW_SINCE_SESSION_STORAGE_KEY, "true");
 		} else {
 			window.sessionStorage.removeItem(NEW_SINCE_SESSION_STORAGE_KEY);
