@@ -89,6 +89,12 @@ function listCargoFiles(): string[] {
 		.filter(Boolean);
 }
 
+function readCargoVersion(filePath: string): string | null {
+	const raw = readFileSync(filePath, "utf8");
+	const match = raw.match(/\[package\][^\[]*version\s*=\s*"([^"]+)"/s);
+	return match ? match[1] : null;
+}
+
 function updateCargoVersion(filePath: string, targetVersion: string): boolean {
 	const raw = readFileSync(filePath, "utf8");
 	// Anchor to [package] section to avoid matching dependency version strings
@@ -104,6 +110,15 @@ function updateCargoVersion(filePath: string, targetVersion: string): boolean {
 
 	writeFileSync(filePath, next);
 	return true;
+}
+
+function regenerateCargoLock(cargoFile: string): void {
+	const dir = cargoFile.replace(/\/Cargo\.toml$/, "");
+	try {
+		execSync("cargo generate-lockfile", { cwd: dir, stdio: "ignore" });
+	} catch {
+		// cargo may not be installed — non-fatal
+	}
 }
 
 function getArg(name: string): string | null {
@@ -173,7 +188,22 @@ function main() {
 	for (const file of cargoFiles) {
 		if (updateCargoVersion(file, targetVersion)) {
 			cargoUpdated.push(file);
+			regenerateCargoLock(file);
 		}
+	}
+
+	const cargoMismatches: string[] = [];
+	for (const file of cargoFiles) {
+		const version = readCargoVersion(file);
+		if (version !== targetVersion) {
+			cargoMismatches.push(`${file} (${version ?? "missing"})`);
+		}
+	}
+
+	if (cargoMismatches.length > 0) {
+		throw new Error(
+			`Cargo version sync failed. Mismatches:\n- ${cargoMismatches.join("\n- ")}`,
+		);
 	}
 
 	if (updated.length === 0 && cargoUpdated.length === 0) {

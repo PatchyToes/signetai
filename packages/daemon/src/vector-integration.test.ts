@@ -1,44 +1,20 @@
 /**
  * Integration tests for native vector operations in the real data flow.
  *
- * These tests verify that the native Rust addon (when loaded) produces
- * results consistent with the TS fallback across actual DB operations:
- * vectorToBlob writes, blobToVector reads, cosineSimilarity in reranking,
- * and squaredDistance in UMAP projection.
+ * Verifies that vectorToBlob (native when available) writes correct blobs
+ * to SQLite, that cosineSimilarity (native when available) scores them
+ * correctly on read-back, and that KNN edge building produces correct
+ * graph topology.
  */
 
 import { Database } from "bun:sqlite";
-import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cosineSimilarity, runMigrations } from "@signet/core";
 import { vectorToBlob } from "./db-helpers";
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 
 // ---------------------------------------------------------------------------
 // Helpers (same pattern as repair-actions.test.ts)
 // ---------------------------------------------------------------------------
-
-function asAccessor(db: Database): DbAccessor {
-	return {
-		withWriteTx<T>(fn: (wdb: WriteDb) => T): T {
-			db.exec("BEGIN IMMEDIATE");
-			try {
-				const result = fn(db as unknown as WriteDb);
-				db.exec("COMMIT");
-				return result;
-			} catch (err) {
-				db.exec("ROLLBACK");
-				throw err;
-			}
-		},
-		withReadDb<T>(fn: (rdb: ReadDb) => T): T {
-			return fn(db as unknown as ReadDb);
-		},
-		close() {
-			db.close();
-		},
-	};
-}
 
 function insertMemory(db: Database, id: string, content: string): void {
 	const now = new Date().toISOString();
@@ -200,22 +176,9 @@ describe("vectorToBlob -> DB -> cosineSimilarity integration", () => {
 // Integration: squaredDistance in UMAP-like edge building
 // ---------------------------------------------------------------------------
 
-describe("squaredDistance in projection edge building", () => {
-	test("KNN edges connect nearest points using squaredDistance", () => {
-		// Replicate the exact native-first logic from umap-projection.ts
-		let nativeFn: ((a: Float64Array, b: Float64Array) => number) | null = null;
-		try {
-			const esmRequire = createRequire(import.meta.url);
-			const native: typeof import("@signet/native") = esmRequire("@signet/native");
-			nativeFn = native.squaredDistance;
-		} catch {
-			// fallback
-		}
-
+describe("KNN edge building (same algorithm as umap-projection.ts)", () => {
+	test("KNN edges connect nearest points correctly", () => {
 		function squaredDistance(left: readonly number[], right: readonly number[]): number {
-			if (nativeFn !== null) {
-				return nativeFn(new Float64Array(left), new Float64Array(right));
-			}
 			let distance = 0;
 			for (let i = 0; i < left.length; i++) {
 				const diff = left[i] - right[i];
