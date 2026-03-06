@@ -176,7 +176,7 @@ onMount(() => {
 let keyboardNavActive = $state(false);
 let engineTabFocus = $state<"tabs" | "content">("tabs");
 let engineTabIndex = $state(0);
-const ENGINE_TABS = ["settings", "pipeline", "connectors", "logs"] as const;
+const ENGINE_TABS = ["settings", "pipeline", "predictor", "connectors", "logs"] as const;
 
 let memoryTabFocus = $state<"tabs" | "content">("tabs");
 let memoryTabIndex = $state(0);
@@ -582,13 +582,25 @@ function handlePageClick(e: MouseEvent) {
 							}}
 						>Pipeline</button>
 						<button
-							data-engine-tab="connectors"
-							class={activeTab === 'connectors' ? tabActive : tabInactive}
+							data-engine-tab="predictor"
+							class={activeTab === 'predictor' ? tabActive : tabInactive}
 							onclick={() => {
 								engineTabIndex = 2;
 								engineTabFocus = "tabs";
+								setTab("predictor");
+								const tabButton = document.querySelector('[data-engine-tab="predictor"]');
+								if (tabButton instanceof HTMLElement) {
+									tabButton.focus();
+								}
+							}}
+						>Predictor</button>
+						<button
+							data-engine-tab="connectors"
+							class={activeTab === 'connectors' ? tabActive : tabInactive}
+							onclick={() => {
+								engineTabIndex = 3;
+								engineTabFocus = "tabs";
 								setTab("connectors");
-								// Focus the clicked tab button
 								const tabButton = document.querySelector('[data-engine-tab="connectors"]');
 								if (tabButton instanceof HTMLElement) {
 									tabButton.focus();
@@ -599,7 +611,7 @@ function handlePageClick(e: MouseEvent) {
 							data-engine-tab="logs"
 							class={activeTab === 'logs' ? tabActive : tabInactive}
 							onclick={() => {
-								engineTabIndex = 3;
+								engineTabIndex = 4;
 								engineTabFocus = "tabs";
 								setTab("logs");
 								// Focus the clicked tab button
@@ -816,6 +828,14 @@ function handlePageClick(e: MouseEvent) {
 			{:else if activeTab === "tasks"}
 				{#await import("$lib/components/tabs/TasksTab.svelte")}
 					{@render skeletonList()}
+				{:then module}
+					<module.default />
+				{:catch error}
+					{@render skeletonError(error)}
+				{/await}
+			{:else if activeTab === "predictor"}
+				{#await import("$lib/components/tabs/PredictorTab.svelte")}
+					{@render skeletonCards()}
 				{:then module}
 					<module.default />
 				{:catch error}
