@@ -66,6 +66,7 @@ import { normalizeAndHashContent } from "./content-normalization";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
 import { createProviderTracker, getDiagnostics } from "./diagnostics";
+import { fetchEmbedding } from "./embedding-fetch";
 import { buildEmbeddingHealth } from "./embedding-health";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
@@ -73,7 +74,6 @@ import { closeLlmProvider, initLlmProvider } from "./llm";
 import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
 import { type LogEntry, logger } from "./logger";
 import {
-	DEFAULT_OPENAI_BASE_URL,
 	type EmbeddingConfig,
 	loadMemoryConfig,
 } from "./memory-config";
@@ -119,7 +119,7 @@ import {
 } from "./repair-actions";
 import { CRON_PRESETS, computeNextRun, isHarnessAvailable, resolveSkillPrompt, startSchedulerWorker, validateCron } from "./scheduler";
 import { emitTaskStream, getTaskStreamSnapshot, subscribeTaskStream } from "./scheduler/task-stream";
-import { deleteSecret, execWithSecrets, getSecret, hasSecret, listSecrets, putSecret } from "./secrets.js";
+import { deleteSecret, execWithSecrets, hasSecret, listSecrets, putSecret } from "./secrets.js";
 import {
 	flushPendingCheckpoints,
 	getCheckpointsByProject,
@@ -252,101 +252,6 @@ interface EmbeddingStatus {
 	base_url: string;
 	error?: string;
 	checkedAt: string;
-}
-
-// Cached native embed function — avoids dynamic import on every call
-let cachedNativeEmbed: ((text: string) => Promise<number[]>) | null = null;
-
-async function fetchOllamaEmbedding(text: string, baseUrl: string, model: string): Promise<number[] | null> {
-	const res = await fetch(`${baseUrl.replace(/\/$/, "")}/api/embeddings`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ model, prompt: text }),
-		signal: AbortSignal.timeout(30000),
-	});
-	if (!res.ok) return null;
-	const data = (await res.json()) as { embedding: number[] };
-	return data.embedding ?? null;
-}
-
-function resolveEmbeddingBaseUrl(cfg: EmbeddingConfig): string {
-	if (cfg.provider === "openai") {
-		return cfg.base_url.trim() || DEFAULT_OPENAI_BASE_URL;
-	}
-	return cfg.base_url;
-}
-
-async function resolveEmbeddingApiKey(rawApiKey: string | undefined): Promise<string> {
-	const configured = rawApiKey?.trim() ?? "";
-	if (configured.startsWith("$secret:")) {
-		const secretName = configured.slice("$secret:".length).trim();
-		return secretName ? getSecret(secretName) : "";
-	}
-	if (configured.startsWith("op://")) {
-		return getSecret(configured);
-	}
-	return configured || process.env.OPENAI_API_KEY || "";
-}
-
-// Track whether we've already fallen back to ollama for native failures
-let nativeFallbackToOllama = false;
-
-async function fetchEmbedding(text: string, cfg: EmbeddingConfig): Promise<number[] | null> {
-	if (cfg.provider === "none") return null;
-	try {
-		if (cfg.provider === "native") {
-			// If we've already determined native is broken, go straight to ollama
-			if (nativeFallbackToOllama) {
-				return await fetchOllamaEmbedding(text, "http://localhost:11434", "nomic-embed-text");
-			}
-			try {
-				if (!cachedNativeEmbed) {
-					const mod = await import("./native-embedding");
-					cachedNativeEmbed = mod.nativeEmbed;
-				}
-				return await cachedNativeEmbed(text);
-			} catch (nativeErr) {
-				// Native failed — try ollama as fallback
-				logger.warn("embedding", `Native embedding failed, attempting ollama fallback: ${nativeErr instanceof Error ? nativeErr.message : String(nativeErr)}`);
-				try {
-					const result = await fetchOllamaEmbedding(text, "http://localhost:11434", "nomic-embed-text");
-					if (result !== null) {
-						nativeFallbackToOllama = true;
-						logger.info("embedding", "Ollama fallback succeeded — will use ollama for remaining embeddings this session");
-						return result;
-					}
-					logger.warn("embedding", "Ollama fallback also failed");
-				} catch {
-					logger.warn("embedding", "Ollama fallback not reachable");
-				}
-				return null;
-			}
-		}
-		if (cfg.provider === "ollama") {
-			return await fetchOllamaEmbedding(text, cfg.base_url, cfg.model);
-		} else {
-			// OpenAI-compatible
-			const apiKey = await resolveEmbeddingApiKey(cfg.api_key);
-			if (!apiKey) return null;
-			const baseUrl = resolveEmbeddingBaseUrl(cfg);
-			const res = await fetch(`${baseUrl.replace(/\/$/, "")}/embeddings`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-				},
-				body: JSON.stringify({ model: cfg.model, input: text }),
-				signal: AbortSignal.timeout(30000),
-			});
-			if (!res.ok) return null;
-			const data = (await res.json()) as {
-				data: Array<{ embedding: number[] }>;
-			};
-			return data.data?.[0]?.embedding ?? null;
-		}
-	} catch {
-		return null;
-	}
 }
 
 function blobToVector(blob: Buffer, dimensions: number | null): number[] {
@@ -4533,7 +4438,7 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 		if (conflict) return conflict;
 
 		stampHarness(body.harness);
-		const result = handleUserPromptSubmit(body);
+		const result = await handleUserPromptSubmit(body);
 		return c.json(result);
 	} catch (e) {
 		logger.error("hooks", "User prompt submit hook failed", e as Error);

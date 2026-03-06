@@ -20,6 +20,7 @@ import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
 
 export interface RecallParams {
 	query: string;
+	keywordQuery?: string;
 	limit?: number;
 	type?: string;
 	tags?: string;
@@ -117,6 +118,7 @@ export async function hybridRecall(
 	embedFn: EmbedFn,
 ): Promise<RecallResponse> {
 	const query = params.query;
+	const keywordQuery = (params.keywordQuery ?? params.query).trim();
 	const limit = params.limit ?? 10;
 	const alpha = cfg.search.alpha;
 	const minScore = cfg.search.min_score;
@@ -136,16 +138,18 @@ export async function hybridRecall(
         ORDER BY raw_score
         LIMIT ?
       `) as any
-			).all(query, ...filter.args, cfg.search.top_k) as Array<{
+			).all(keywordQuery, ...filter.args, cfg.search.top_k) as Array<{
 				id: string;
 				raw_score: number;
 			}>;
 
 			// Min-max normalize BM25 scores to [0,1] within the batch
 			const rawScores = ftsRows.map((r) => Math.abs(r.raw_score));
-			const maxRaw = Math.max(...rawScores, 1);
+			const maxRaw =
+				rawScores.length > 0 ? Math.max(...rawScores) : 1;
+			const normalizer = maxRaw > 0 ? maxRaw : 1;
 			for (const row of ftsRows) {
-				const normalised = Math.abs(row.raw_score) / maxRaw;
+				const normalised = Math.abs(row.raw_score) / normalizer;
 				bm25Map.set(row.id, normalised);
 			}
 		});

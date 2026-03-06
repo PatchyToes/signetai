@@ -17,6 +17,8 @@ import { join } from "node:path";
 import { parseSimpleYaml } from "@signet/core";
 import { logger } from "./logger";
 import { getDbAccessor } from "./db-accessor";
+import { fetchEmbedding } from "./embedding-fetch";
+import { hybridRecall } from "./memory-search";
 import { enqueueSummaryJob } from "./pipeline/summary-worker";
 import { getUpdateSummary } from "./update-system";
 import { loadMemoryConfig } from "./memory-config";
@@ -1165,22 +1167,140 @@ function stripUntrustedMetadata(text: string): string {
 	return remaining.trim();
 }
 
-function extractRecallWords(
-	userPrompt: string,
-	lastAssistantMessage?: string,
-): string[] {
-	const cleanedUserPrompt = stripUntrustedMetadata(userPrompt);
-	const cleanedAssistant = lastAssistantMessage
-		? stripUntrustedMetadata(lastAssistantMessage)
-		: "";
+const RECALL_STOPWORDS = new Set([
+	"a",
+	"about",
+	"actually",
+	"after",
+	"all",
+	"also",
+	"am",
+	"an",
+	"and",
+	"any",
+	"are",
+	"as",
+	"at",
+	"be",
+	"been",
+	"before",
+	"but",
+	"by",
+	"can",
+	"could",
+	"did",
+	"do",
+	"does",
+	"doing",
+	"done",
+	"for",
+	"from",
+	"get",
+	"go",
+	"had",
+	"has",
+	"have",
+	"hey",
+	"hi",
+	"how",
+	"i",
+	"if",
+	"in",
+	"into",
+	"is",
+	"it",
+	"its",
+	"just",
+	"kind",
+	"like",
+	"make",
+	"me",
+	"more",
+	"my",
+	"need",
+	"now",
+	"of",
+	"ok",
+	"okay",
+	"on",
+	"or",
+	"our",
+	"out",
+	"please",
+	"pretty",
+	"really",
+	"right",
+	"say",
+	"should",
+	"so",
+	"some",
+	"something",
+	"still",
+	"sure",
+	"thanks",
+	"thank",
+	"that",
+	"the",
+	"their",
+	"them",
+	"then",
+	"there",
+	"these",
+	"they",
+	"this",
+	"to",
+	"too",
+	"uh",
+	"um",
+	"use",
+	"very",
+	"want",
+	"was",
+	"we",
+	"well",
+	"were",
+	"what",
+	"when",
+	"which",
+	"who",
+	"why",
+	"will",
+	"with",
+	"would",
+	"yeah",
+	"yes",
+	"you",
+	"your",
+]);
 
-	return [cleanedUserPrompt, cleanedAssistant]
-		.filter((part) => part.length > 0)
-		.join(" ")
+interface RecallQueryShape {
+	readonly keywordTerms: string[];
+	readonly vectorQuery: string;
+}
+
+function extractSubstantiveWords(text: string): string[] {
+	return stripUntrustedMetadata(text)
 		.toLowerCase()
 		.split(/\W+/)
-		.filter((word) => word.length >= 3)
-		.slice(0, 12);
+		.filter(
+			(word) =>
+				word.length >= 3 &&
+				!RECALL_STOPWORDS.has(word) &&
+				!/^\d+$/.test(word),
+		);
+}
+
+function buildRecallQueryShape(
+	userPrompt: string,
+	lastAssistantMessage?: string,
+): RecallQueryShape {
+	const userTerms = extractSubstantiveWords(userPrompt);
+	const assistantTerms = lastAssistantMessage
+		? extractSubstantiveWords(lastAssistantMessage)
+		: [];
+	const keywordTerms = [...new Set([...userTerms, ...assistantTerms])].slice(0, 12);
+	const vectorQuery = stripUntrustedMetadata(userPrompt).trim().slice(0, 200);
+	return { keywordTerms, vectorQuery };
 }
 
 function resolveRecallUserMessage(req: UserPromptSubmitRequest): string {
@@ -1194,19 +1314,21 @@ function resolveRecallUserMessage(req: UserPromptSubmitRequest): string {
 	return stripUntrustedMetadata(req.userPrompt).trim();
 }
 
-export function handleUserPromptSubmit(
+export async function handleUserPromptSubmit(
 	req: UserPromptSubmitRequest,
-): UserPromptSubmitResponse {
+): Promise<UserPromptSubmitResponse> {
 	const start = Date.now();
 	const userMessage = resolveRecallUserMessage(req);
-
-	const words = extractRecallWords(userMessage, req.lastAssistantMessage);
+	const { keywordTerms, vectorQuery } = buildRecallQueryShape(
+		userMessage,
+		req.lastAssistantMessage,
+	);
 
 	// Always record the prompt for continuity tracking, even if no FTS query
 	const snippet = userMessage.slice(0, 200).trim();
 	recordPrompt(
 		req.sessionKey,
-		words.length > 0 ? words.join(" ") : undefined,
+		keywordTerms.length > 0 ? keywordTerms.join(" ") : undefined,
 		snippet.length > 0 ? snippet : undefined,
 	);
 	{
@@ -1232,84 +1354,57 @@ export function handleUserPromptSubmit(
 		}
 	}
 
-	if (words.length === 0 || !existsSync(MEMORY_DB)) {
+	if (
+		keywordTerms.length < 2 ||
+		vectorQuery.length === 0 ||
+		!existsSync(MEMORY_DB)
+	) {
 		return { inject: "", memoryCount: 0 };
 	}
 
 	try {
-		const ftsQuery = words.join(" OR ");
+		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const recall = await hybridRecall(
+			{
+				query: vectorQuery,
+				keywordQuery: keywordTerms.join(" OR "),
+				limit: 10,
+				importance_min: 0.3,
+			},
+			cfg,
+			fetchEmbedding,
+		);
 
-		const rows = getDbAccessor().withReadDb((db) => {
-			type MemRow = {
-				id: string;
-				content: string;
-				type: string;
-				importance: number;
-				tags: string | null;
-				pinned: number;
-				project: string | null;
-				created_at: string;
-			};
+		if (
+			recall.results.length === 0 ||
+			typeof recall.results[0]?.score !== "number" ||
+			recall.results[0].score < 0.4
+		) {
+			return { inject: "", memoryCount: 0 };
+		}
 
-			try {
-				const baseQuery = req.project
-					? `SELECT m.id, m.content, m.type, m.importance, m.tags,
-					   m.pinned, m.project, m.created_at
-					   FROM memories m
-					   JOIN memories_fts f ON m.rowid = f.rowid
-					   WHERE memories_fts MATCH ?
-					   AND m.is_deleted = 0
-					   AND m.project = ?
-					   LIMIT 30`
-					: `SELECT m.id, m.content, m.type, m.importance, m.tags,
-					   m.pinned, m.project, m.created_at
-					   FROM memories m
-					   JOIN memories_fts f ON m.rowid = f.rowid
-					   WHERE memories_fts MATCH ?
-					   AND m.is_deleted = 0
-					   LIMIT 30`;
-
-				return req.project
-					? (db.prepare(baseQuery).all(ftsQuery, req.project) as MemRow[])
-					: (db.prepare(baseQuery).all(ftsQuery) as MemRow[]);
-			} catch {
-				// FTS table might not exist
-				return [] as MemRow[];
-			}
-		});
-
-		// Score and filter
-		const scored = rows
-			.map((r) => ({
-				...r,
-				effScore: effectiveScore(r.importance, r.created_at, r.pinned === 1),
-			}))
-			.filter((r) => r.effScore > 0.3 || r.pinned === 1)
-			.sort((a, b) => b.effScore - a.effScore);
-
-		// Apply 500 char budget
-		const selected = selectWithBudget(scored, 500);
+		const selected = selectWithBudget(
+			recall.results.map((result) => ({
+				...result,
+				pinned: result.pinned ? 1 : 0,
+			})),
+			500,
+		).slice(0, 5);
 
 		if (selected.length === 0) {
 			return { inject: "", memoryCount: 0 };
 		}
 
-		// Update access tracking
-		const ids = scored
-			.slice(0, selected.length)
-			.map((s) => (s as ScoredMemory).id);
-		updateAccessTracking(ids);
-
 		// Track FTS hits for predictive scorer data collection
-		const allMatchedIds = scored.map((s) => s.id);
+		const allMatchedIds = recall.results.map((result) => result.id);
 		trackFtsHits(req.sessionKey, allMatchedIds);
 
-		const queryTerms = words.join(" ");
+		const queryTerms = keywordTerms.join(" ");
 		const lines = selected.map((s) => {
 			const dateStr = formatMemoryDate(s.created_at);
 			return `- ${s.content} (${dateStr})`;
 		});
-		const inject = `[signet:recall | query="${queryTerms}" | results=${selected.length} | engine=fts+decay]\n${lines.join("\n")}`;
+		const inject = `[signet:recall | query="${queryTerms}" | results=${selected.length} | engine=hybrid]\n${lines.join("\n")}`;
 
 		const duration = Date.now() - start;
 		logger.info("hooks", "User prompt submit", {
@@ -1327,7 +1422,7 @@ export function handleUserPromptSubmit(
 			inject,
 			memoryCount: selected.length,
 			queryTerms,
-			engine: "fts+decay",
+			engine: "hybrid",
 		};
 	} catch (e) {
 		logger.error("hooks", "User prompt submit failed", e as Error);

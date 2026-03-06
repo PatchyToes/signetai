@@ -624,7 +624,7 @@ hooks:
 // ============================================================================
 
 describe("handleUserPromptSubmit", () => {
-	test("returns matching memories for prompt", () => {
+	test("returns matching memories for prompt", async () => {
 		createMemoryDb([
 			{
 				content: "TypeScript is the preferred language",
@@ -632,7 +632,7 @@ describe("handleUserPromptSubmit", () => {
 			},
 		]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt: "What TypeScript language should we use?",
 		});
@@ -641,7 +641,7 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.inject).toContain("TypeScript");
 	});
 
-	test("strips untrusted metadata block from user prompt", () => {
+	test("strips untrusted metadata block from user prompt", async () => {
 		createMemoryDb([
 			{
 				content: "Reiterate the release checklist before deploy",
@@ -649,7 +649,7 @@ describe("handleUserPromptSubmit", () => {
 			},
 		]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt:
 				"Conversation info (untrusted metadata):\n{\"conversation_label\":\"OpenClaw Session\",\"message_id\":\"msg_123\",\"sender_id\":\"user_456\"}\n\nCan you reiterate the release checklist?",
@@ -660,7 +660,7 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.queryTerms).not.toContain("conversation_label");
 	});
 
-	test("prefers adapter-provided userMessage over raw prompt envelope", () => {
+	test("prefers adapter-provided userMessage over raw prompt envelope", async () => {
 		createMemoryDb([
 			{
 				content: "The release checklist includes smoke tests and rollback notes",
@@ -668,7 +668,7 @@ describe("handleUserPromptSubmit", () => {
 			},
 		]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "openclaw",
 			userMessage: "Can you reiterate the release checklist?",
 			userPrompt:
@@ -684,7 +684,7 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.queryTerms).not.toContain("discord");
 	});
 
-	test("includes last assistant message in recall query terms", () => {
+	test("includes last assistant message in recall query terms", async () => {
 		createMemoryDb([
 			{
 				content: "Use pgvector in PostgreSQL for semantic embeddings",
@@ -692,9 +692,9 @@ describe("handleUserPromptSubmit", () => {
 			},
 		]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
-			userPrompt: "Can you remind me what to use?",
+			userPrompt: "Can you remind me which embeddings database to use?",
 			lastAssistantMessage: "Earlier I suggested pgvector for embeddings.",
 		});
 
@@ -702,12 +702,12 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.queryTerms).toContain("pgvector");
 	});
 
-	test("returns empty for no-match prompt", () => {
+	test("returns empty for no-match prompt", async () => {
 		createMemoryDb([
 			{ content: "PostgreSQL replication setup guide", importance: 0.8 },
 		]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt: "quantum entanglement photon wavelength",
 		});
@@ -716,10 +716,10 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.inject).toBe("");
 	});
 
-	test("skips very short prompts with no words >= 3 chars", () => {
+	test("skips very short prompts with no words >= 3 chars", async () => {
 		createMemoryDb([{ content: "Something important", importance: 0.8 }]);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt: "hi ok",
 		});
@@ -728,8 +728,8 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.inject).toBe("");
 	});
 
-	test("handles missing database gracefully", () => {
-		const result = handleUserPromptSubmit({
+	test("handles missing database gracefully", async () => {
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt: "A reasonable question here",
 		});
@@ -738,7 +738,7 @@ describe("handleUserPromptSubmit", () => {
 		expect(result.inject).toBe("");
 	});
 
-	test("applies character budget", () => {
+	test("applies character budget", async () => {
 		// Create many memories that would exceed the 500 char budget
 		const mems = Array.from({ length: 20 }, (_, i) => ({
 			content: `Important fact number ${i}: ${"x".repeat(80)}`,
@@ -746,7 +746,7 @@ describe("handleUserPromptSubmit", () => {
 		}));
 		createMemoryDb(mems);
 
-		const result = handleUserPromptSubmit({
+		const result = await handleUserPromptSubmit({
 			harness: "test",
 			userPrompt: "important fact number",
 		});
@@ -758,6 +758,24 @@ describe("handleUserPromptSubmit", () => {
 			expect(totalChars).toBeLessThan(700);
 		}
 	});
+
+	test("skips conversational prompts with too few substantive words", async () => {
+		createMemoryDb([
+			{
+				content: "The payment retry queue should drain before deploy",
+				importance: 0.9,
+			},
+		]);
+
+		const result = await handleUserPromptSubmit({
+			harness: "test",
+			userPrompt: "yeah do that",
+		});
+
+		expect(result.memoryCount).toBe(0);
+		expect(result.inject).toBe("");
+	});
+
 });
 
 // ============================================================================
@@ -1302,7 +1320,7 @@ describe("session memory recording integration", () => {
 		expect(count.cnt).toBe(0);
 	});
 
-	test("handleUserPromptSubmit tracks FTS hits", () => {
+	test("handleUserPromptSubmit tracks FTS hits", async () => {
 		createMemoryDb([
 			{
 				content: "TypeScript is the preferred language for this project",
@@ -1316,8 +1334,8 @@ describe("session memory recording integration", () => {
 			sessionKey: "fts-tracking-session",
 		});
 
-		// Now submit a prompt that will match via FTS
-		handleUserPromptSubmit({
+		// Now submit a prompt that will match via hybrid recall
+		await handleUserPromptSubmit({
 			harness: "test",
 			sessionKey: "fts-tracking-session",
 			userPrompt: "What TypeScript language config should we use?",
