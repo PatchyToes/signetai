@@ -180,7 +180,7 @@ const ENGINE_TABS = ["settings", "pipeline", "connectors", "logs"] as const;
 
 let memoryTabFocus = $state<"tabs" | "content">("tabs");
 let memoryTabIndex = $state(0);
-const MEMORY_TABS = ["memory", "timeline", "embeddings"] as const;
+const MEMORY_TABS = ["memory", "timeline", "knowledge", "embeddings"] as const;
 
 function focusEngineTab(index: number): void {
 	engineTabIndex = index;
@@ -523,13 +523,25 @@ function handlePageClick(e: MouseEvent) {
 							}}
 						>Timeline</button>
 						<button
-							data-memory-tab="embeddings"
-							class={activeTab === 'embeddings' ? tabActive : tabInactive}
+							data-memory-tab="knowledge"
+							class={activeTab === 'knowledge' ? tabActive : tabInactive}
 							onclick={() => {
 								memoryTabIndex = 2;
 								memoryTabFocus = "tabs";
+								setTab("knowledge");
+								const tabButton = document.querySelector('[data-memory-tab="knowledge"]');
+								if (tabButton instanceof HTMLElement) {
+									tabButton.focus();
+								}
+							}}
+						>Knowledge</button>
+						<button
+							data-memory-tab="embeddings"
+							class={activeTab === 'embeddings' ? tabActive : tabInactive}
+							onclick={() => {
+								memoryTabIndex = 3;
+								memoryTabFocus = "tabs";
 								setTab("embeddings");
-								// Focus the clicked tab button
 								const tabButton = document.querySelector('[data-memory-tab="embeddings"]');
 								if (tabButton instanceof HTMLElement) {
 									tabButton.focus();
@@ -631,6 +643,10 @@ function handlePageClick(e: MouseEvent) {
 				{:else if activeTab === "embeddings"}
 					<span class="sig-label">
 						Constellation
+					</span>
+				{:else if activeTab === "knowledge"}
+					<span class="sig-label">
+						Knowledge graph
 					</span>
 				{:else if activeTab === "tasks"}
 					<Button
@@ -757,6 +773,14 @@ function handlePageClick(e: MouseEvent) {
 				{:catch error}
 					{@render skeletonError(error)}
 				{/await}
+			{:else if activeTab === "knowledge"}
+				{#await import("$lib/components/tabs/KnowledgeTab.svelte")}
+					{@render skeletonCards()}
+				{:then module}
+					<module.default />
+				{:catch error}
+					{@render skeletonError(error)}
+				{/await}
 			{:else if activeTab === "pipeline"}
 				{#await import("$lib/components/tabs/PipelineTab.svelte")}
 					{@render skeletonList()}
@@ -851,6 +875,9 @@ function handlePageClick(e: MouseEvent) {
 			{:else if activeTab === "embeddings"}
 				<span>Constellation</span>
 				<span>UMAP</span>
+			{:else if activeTab === "knowledge"}
+				<span>structural graph browser</span>
+				<span>entities, traversal, predictor slices</span>
 			{:else if activeTab === "logs"}
 				<span>Log viewer</span>
 				<span>daemon logs</span>
