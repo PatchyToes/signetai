@@ -95,7 +95,9 @@ function getLastSessionEndTime(): number {
 // Core synthesis execution
 // ---------------------------------------------------------------------------
 
-async function runSynthesis(config: PipelineSynthesisConfig): Promise<boolean> {
+type SynthesisResult = "ok" | "empty" | "failed";
+
+async function runSynthesis(config: PipelineSynthesisConfig): Promise<SynthesisResult> {
 	logger.info("synthesis", "Starting scheduled synthesis", {
 		provider: config.provider,
 		model: config.model,
@@ -118,7 +120,7 @@ async function runSynthesis(config: PipelineSynthesisConfig): Promise<boolean> {
 
 		if (synthesisData.memories.length === 0) {
 			logger.info("synthesis", "No memories to synthesize, skipping");
-			return true;
+			return "empty";
 		}
 
 		// Call the synthesis-specific LLM provider
@@ -130,7 +132,7 @@ async function runSynthesis(config: PipelineSynthesisConfig): Promise<boolean> {
 
 		if (!result.text || result.text.trim().length === 0) {
 			logger.warn("synthesis", "LLM returned empty synthesis");
-			return false;
+			return "failed";
 		}
 
 		// Write MEMORY.md via shared helper (handles backup)
@@ -147,10 +149,10 @@ async function runSynthesis(config: PipelineSynthesisConfig): Promise<boolean> {
 				: {}),
 		});
 
-		return true;
+		return "ok";
 	} catch (e) {
 		logger.error("synthesis", "Synthesis failed", e as Error);
-		return false;
+		return "failed";
 	}
 }
 
@@ -282,11 +284,15 @@ export function startSynthesisWorker(
 
 			isSynthesizing = true;
 			try {
-				const success = await runSynthesis(config);
+				const result = await runSynthesis(config);
 				// Write timestamp on both success and failure to prevent
 				// rapid retry loops (next attempt waits MIN_INTERVAL_MS)
 				writeLastSynthesisTime(Date.now());
-				return { success, skipped: false };
+				return {
+					success: result === "ok",
+					skipped: result === "empty",
+					reason: result === "empty" ? "No memories to synthesize" : undefined,
+				};
 			} finally {
 				isSynthesizing = false;
 			}

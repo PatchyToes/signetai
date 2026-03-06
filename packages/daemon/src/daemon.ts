@@ -7331,45 +7331,49 @@ async function main() {
 
 	// Create synthesis provider — separate from extraction because synthesis
 	// needs a smarter model that can reason across long context
-	let effectiveSynthesisProvider = memoryCfg.pipelineV2.synthesis.provider;
-	if (effectiveSynthesisProvider === "opencode") {
-		const serverReady = await ensureOpenCodeServer(4096);
-		if (!serverReady) {
-			logger.warn("config", "OpenCode server not available for synthesis, falling back to ollama");
-			effectiveSynthesisProvider = "ollama";
+	if (memoryCfg.pipelineV2.synthesis.enabled) {
+		let effectiveSynthesisProvider = memoryCfg.pipelineV2.synthesis.provider;
+		if (effectiveSynthesisProvider === "opencode") {
+			const serverReady = await ensureOpenCodeServer(4096);
+			if (!serverReady) {
+				logger.warn("config", "OpenCode server not available for synthesis, falling back to ollama");
+				effectiveSynthesisProvider = "ollama";
+			}
+		} else if (effectiveSynthesisProvider === "claude-code") {
+			try {
+				const proc = Bun.spawn(["claude", "--version"], {
+					stdout: "pipe",
+					stderr: "pipe",
+					env: { ...process.env, SIGNET_NO_HOOKS: "1" },
+				});
+				const exitCode = await proc.exited;
+				if (exitCode !== 0) throw new Error("non-zero exit");
+			} catch {
+				logger.warn("config", "Claude Code CLI not found, falling back to ollama for synthesis");
+				effectiveSynthesisProvider = "ollama";
+			}
 		}
-	} else if (effectiveSynthesisProvider === "claude-code") {
-		try {
-			const proc = Bun.spawn(["claude", "--version"], {
-				stdout: "pipe",
-				stderr: "pipe",
-				env: { ...process.env, SIGNET_NO_HOOKS: "1" },
-			});
-			const exitCode = await proc.exited;
-			if (exitCode !== 0) throw new Error("non-zero exit");
-		} catch {
-			logger.warn("config", "Claude Code CLI not found, falling back to ollama for synthesis");
-			effectiveSynthesisProvider = "ollama";
-		}
-	}
-	logger.info("config", "Synthesis provider", { provider: effectiveSynthesisProvider });
+		logger.info("config", "Synthesis provider", { provider: effectiveSynthesisProvider });
 
-	const synthesisProvider =
-		effectiveSynthesisProvider === "opencode"
-			? createOpenCodeProvider({
-					model: memoryCfg.pipelineV2.synthesis.model || "anthropic/claude-haiku-4-5-20251001",
-					defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
-				})
-			: effectiveSynthesisProvider === "claude-code"
-				? createClaudeCodeProvider({
-						model: memoryCfg.pipelineV2.synthesis.model || "sonnet",
+		const synthesisProvider =
+			effectiveSynthesisProvider === "opencode"
+				? createOpenCodeProvider({
+						model: memoryCfg.pipelineV2.synthesis.model || "anthropic/claude-haiku-4-5-20251001",
 						defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 					})
-				: createOllamaProvider({
-						model: memoryCfg.pipelineV2.synthesis.model || "qwen3:4b",
-						defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
-					});
-	initSynthesisProvider(synthesisProvider);
+				: effectiveSynthesisProvider === "claude-code"
+					? createClaudeCodeProvider({
+							model: memoryCfg.pipelineV2.synthesis.model || "sonnet",
+							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+						})
+					: createOllamaProvider({
+							model: memoryCfg.pipelineV2.synthesis.model || "qwen3:4b",
+							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+						});
+		initSynthesisProvider(synthesisProvider);
+	} else {
+		logger.info("config", "Synthesis disabled");
+	}
 
 	// Telemetry collector (opt-in, anonymous)
 	let telemetryCollector: TelemetryCollector | undefined;
