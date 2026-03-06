@@ -23,11 +23,19 @@ import { loadMemoryConfig } from "./memory-config";
 import { recordSessionCandidates, trackFtsHits } from "./session-memories";
 import { listSecrets } from "./secrets";
 import { getStructuralFeatures } from "./structural-features";
+import { propagateMemoryStatus } from "./knowledge-graph";
 import {
 	resolveFocalEntities,
 	setTraversalStatus,
 	traverseKnowledgeGraph,
 } from "./pipeline/graph-traversal";
+import {
+	applyFtsOverlapFeedback,
+	decayAspectWeights,
+	getFeedbackTelemetry,
+	recordFeedbackTelemetry,
+	shouldRunSessionDecay,
+} from "./pipeline/aspect-feedback";
 import {
 	initContinuity,
 	recordPrompt,
@@ -1613,6 +1621,7 @@ export function handleSessionEnd(
 	req: SessionEndRequest,
 ): SessionEndResponse {
 	const sessionKey = req.sessionKey || req.sessionId;
+	const agentId = "default";
 
 	// Flush pending periodic checkpoints
 	try {
@@ -1685,6 +1694,63 @@ export function handleSessionEnd(
 		}
 	}
 
+	let feedbackAspectsUpdated = 0;
+	let feedbackFtsConfirmations = 0;
+	let feedbackDecayedAspects = 0;
+	let feedbackPropagatedAttributes = 0;
+	if (
+		sessionKey &&
+		memoryCfg.pipelineV2.graph.enabled &&
+		memoryCfg.pipelineV2.feedback.enabled
+	) {
+		try {
+			const feedback = applyFtsOverlapFeedback(
+				getDbAccessor(),
+				sessionKey,
+				agentId,
+				{
+					delta: memoryCfg.pipelineV2.feedback.ftsWeightDelta,
+					maxWeight: memoryCfg.pipelineV2.feedback.maxAspectWeight,
+					minWeight: memoryCfg.pipelineV2.feedback.minAspectWeight,
+				},
+			);
+			feedbackAspectsUpdated = feedback.aspectsUpdated;
+			feedbackFtsConfirmations = feedback.totalFtsConfirmations;
+
+			if (
+				memoryCfg.pipelineV2.feedback.decayEnabled &&
+				shouldRunSessionDecay(
+					agentId,
+					memoryCfg.pipelineV2.feedback.decayIntervalSessions,
+				)
+			) {
+				feedbackDecayedAspects = decayAspectWeights(
+					getDbAccessor(),
+					agentId,
+					{
+						decayRate: memoryCfg.pipelineV2.feedback.decayRate,
+						minWeight: memoryCfg.pipelineV2.feedback.minAspectWeight,
+						staleDays: memoryCfg.pipelineV2.feedback.staleDays,
+					},
+				);
+			}
+
+			feedbackPropagatedAttributes = propagateMemoryStatus(
+				getDbAccessor(),
+				agentId,
+			);
+			recordFeedbackTelemetry({
+				feedbackDecayedAspects,
+				feedbackPropagatedAttributes,
+			});
+		} catch (err) {
+			logger.warn("hooks", "Aspect feedback failed", {
+				error: err instanceof Error ? err.message : String(err),
+				sessionKey,
+			});
+		}
+	}
+
 	if (transcript.length < 500) {
 		return { memoriesSaved: 0 };
 	}
@@ -1706,7 +1772,14 @@ export function handleSessionEnd(
 		project: req.cwd,
 	});
 
-	logger.info("hooks", "Session end queued for summary", { jobId });
+	logger.info("hooks", "Session end queued for summary", {
+		jobId,
+		feedbackAspectsUpdated,
+		feedbackFtsConfirmations,
+		feedbackDecayedAspects,
+		feedbackPropagatedAttributes,
+		feedbackTelemetry: getFeedbackTelemetry(),
+	});
 	logger.info("hooks", "Session end transcript queued", {
 		harness: req.harness,
 		project: req.cwd,
