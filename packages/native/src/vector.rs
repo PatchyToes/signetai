@@ -49,9 +49,16 @@ pub fn vector_to_blob(vec: Vec<f64>) -> Buffer {
 }
 
 /// Deserialize a Buffer (Float32Array bytes) to a Vec<f32>.
+/// Returns an error if the buffer length is not a multiple of 4.
 #[napi]
-pub fn blob_to_vector(buf: Buffer) -> Vec<f32> {
+pub fn blob_to_vector(buf: Buffer) -> napi::Result<Vec<f32>> {
     let bytes: &[u8] = &buf;
+    if bytes.len() % 4 != 0 {
+        return Err(napi::Error::from_reason(format!(
+            "blob length {} is not a multiple of 4",
+            bytes.len()
+        )));
+    }
     let count = bytes.len() / 4;
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -64,5 +71,5 @@ pub fn blob_to_vector(buf: Buffer) -> Vec<f32> {
         ]);
         result.push(value);
     }
-    result
+    Ok(result)
 }

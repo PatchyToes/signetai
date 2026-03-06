@@ -115,9 +115,15 @@ function updateCargoVersion(filePath: string, targetVersion: string): boolean {
 function regenerateCargoLock(cargoFile: string): void {
 	const dir = cargoFile.replace(/\/Cargo\.toml$/, "");
 	try {
-		execSync("cargo generate-lockfile", { cwd: dir, stdio: "ignore" });
-	} catch {
-		// cargo may not be installed — non-fatal
+		// --workspace avoids bumping transitive deps (unlike generate-lockfile)
+		execSync("cargo update --workspace", { cwd: dir, stdio: "ignore" });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (msg.includes("not found") || msg.includes("ENOENT")) {
+			// cargo not installed — non-fatal
+		} else {
+			console.warn(`Warning: cargo update failed in ${dir}: ${msg}`);
+		}
 	}
 }
 
