@@ -241,6 +241,7 @@ export interface PipelineEmbeddingTrackerConfig {
 }
 
 export interface PipelineSynthesisConfig {
+	readonly enabled: boolean;
 	readonly provider: "ollama" | "claude-code" | "opencode";
 	readonly model: string;
 	readonly timeout: number;

@@ -118,7 +118,7 @@ export function startPipeline(
 	}
 
 	// Synthesis worker — session-activity-based MEMORY.md regeneration
-	if (!synthesisWorkerHandle) {
+	if (!synthesisWorkerHandle && pipelineCfg.synthesis.enabled) {
 		synthesisWorkerHandle = startSynthesisWorker(pipelineCfg.synthesis);
 	}
 

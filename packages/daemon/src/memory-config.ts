@@ -105,6 +105,7 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 		batchSize: 8,
 	},
 	synthesis: {
+		enabled: true,
 		provider: "claude-code",
 		model: "sonnet",
 		timeout: 120000,
@@ -480,6 +481,7 @@ export function loadPipelineConfig(
 		},
 
 		synthesis: {
+			enabled: resolveBool(synthesisRaw?.enabled, undefined, d.synthesis.enabled),
 			provider: (() => {
 				const p = synthesisRaw?.provider;
 				if (p === "ollama" || p === "claude-code" || p === "opencode") return p;
