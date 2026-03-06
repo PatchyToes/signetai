@@ -7,22 +7,28 @@ export interface NormalizedMemoryContent {
 	readonly contentHash: string;
 }
 
+// Try to load native Rust implementation, fall back to pure TS
+let native: typeof import("@signet/native") | null = null;
+try {
+	native = require("@signet/native");
+} catch {
+	// Native addon not available — using TypeScript fallback
+}
+
 const TRAILING_PUNCTUATION = /[.,!?;:]+$/;
 
-export function normalizeContentForStorage(content: string): string {
+function tsNormalizeContentForStorage(content: string): string {
 	return content.trim().replace(/\s+/g, " ");
 }
 
-export function deriveNormalizedContent(storageContent: string): string {
+function tsDeriveNormalizedContent(storageContent: string): string {
 	const lowered = storageContent.toLowerCase();
 	return lowered.replace(TRAILING_PUNCTUATION, "").trim();
 }
 
-export function normalizeAndHashContent(
-	content: string,
-): NormalizedMemoryContent {
-	const storageContent = normalizeContentForStorage(content);
-	const normalizedContent = deriveNormalizedContent(storageContent);
+function tsNormalizeAndHashContent(content: string): NormalizedMemoryContent {
+	const storageContent = tsNormalizeContentForStorage(content);
+	const normalizedContent = tsDeriveNormalizedContent(storageContent);
 	const hashBasis =
 		normalizedContent.length > 0
 			? normalizedContent
@@ -30,3 +36,20 @@ export function normalizeAndHashContent(
 	const contentHash = createHash("sha256").update(hashBasis).digest("hex");
 	return { storageContent, normalizedContent, hashBasis, contentHash };
 }
+
+export const normalizeContentForStorage: (content: string) => string =
+	native !== null
+		? native.normalizeContentForStorage
+		: tsNormalizeContentForStorage;
+
+export const deriveNormalizedContent: (storageContent: string) => string =
+	native !== null
+		? native.deriveNormalizedContent
+		: tsDeriveNormalizedContent;
+
+export const normalizeAndHashContent: (
+	content: string,
+) => NormalizedMemoryContent =
+	native !== null
+		? native.normalizeAndHashContent
+		: tsNormalizeAndHashContent;
