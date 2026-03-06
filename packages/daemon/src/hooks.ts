@@ -35,10 +35,12 @@ import {
 	shouldCheckpoint,
 	consumeState,
 	clearContinuity,
+	setStructuralSnapshot,
 } from "./continuity-state";
 import {
 	getLatestCheckpoint,
 	getLatestCheckpointBySession,
+	formatRecoveryDigest,
 	formatPeriodicDigest,
 	formatPreCompactionDigest,
 	formatSessionEndDigest,
@@ -930,8 +932,11 @@ export function handleSessionStart(
 	const candidatePoolLimit = Math.max(1, config.candidatePoolLimit ?? 100);
 	const allCandidates = getAllScoredCandidates(req.project, recallLimit);
 	const candidateById = new Map(allCandidates.map((candidate) => [candidate.id, candidate]));
-	const candidateSourceById = new Map(
-		allCandidates.map((candidate) => [candidate.id, "effective" as const]),
+	const candidateSourceById = new Map<
+		string,
+		"effective" | "ka_traversal"
+	>(
+		allCandidates.map((candidate) => [candidate.id, "effective"]),
 	);
 
 	const traversalAgentId = req.agentId ?? "default";
@@ -942,10 +947,12 @@ export function handleSessionStart(
 		| "session_key"
 		| null = null;
 	let traversalEntities = 0;
+	let traversalEntityNames: ReadonlyArray<string> = [];
 	let traversalTraversedEntities = 0;
 	let traversalMemories = 0;
 	let traversalConstraints = 0;
 	let traversalTimedOut = false;
+	let traversalActiveAspectIds: ReadonlyArray<string> = [];
 	let constraintsForInject: ReadonlyArray<{
 		readonly entityName: string;
 		readonly content: string;
@@ -962,6 +969,7 @@ export function handleSessionStart(
 			);
 			traversalFocalSource = focal.source;
 			traversalEntities = focal.entityIds.length;
+			traversalEntityNames = focal.entityNames;
 
 			if (focal.entityIds.length > 0) {
 				const traversalResult = getDbAccessor().withReadDb((db) =>
@@ -977,6 +985,7 @@ export function handleSessionStart(
 				traversalMemories = traversalResult.memoryIds.size;
 				constraintsForInject = traversalResult.constraints;
 				traversalConstraints = traversalResult.constraints.length;
+				traversalActiveAspectIds = traversalResult.activeAspectIds;
 
 				for (const memoryId of traversalResult.memoryIds) {
 					if (!candidateById.has(memoryId)) {
@@ -1013,12 +1022,23 @@ export function handleSessionStart(
 				phase: "session_start",
 				at: new Date().toISOString(),
 				source: traversalFocalSource,
+				focalEntityNames: traversalEntityNames,
 				focalEntities: traversalEntities,
 				traversedEntities: traversalTraversedEntities,
 				memoryCount: traversalMemories,
 				constraintCount: traversalConstraints,
 				timedOut: traversalTimedOut,
 			});
+
+			if (req.sessionKey) {
+				setStructuralSnapshot(req.sessionKey, {
+					focalEntityIds: focal.entityIds,
+					focalEntityNames: traversalEntityNames,
+					activeAspectIds: traversalActiveAspectIds,
+					surfacedConstraintCount: traversalConstraints,
+					traversalMemoryCount: traversalMemories,
+				});
+			}
 		} catch {
 			// Traversal is best-effort; fall back silently
 		}
@@ -1184,12 +1204,10 @@ export function handleSessionStart(
 			}
 
 			if (checkpoint) {
-				let recoveryText = checkpoint.digest;
-				if (recoveryText.length > continuityCfg.recoveryBudgetChars) {
-					recoveryText =
-						recoveryText.slice(0, continuityCfg.recoveryBudgetChars) +
-						"\n[truncated]";
-				}
+				const recoveryText = formatRecoveryDigest(
+					checkpoint,
+					continuityCfg.recoveryBudgetChars,
+				);
 				// Store separately — appended after budget truncation to guarantee space
 				recoverySection = `\n## Session Recovery Context\n${recoveryText}`;
 			}
@@ -1323,6 +1341,13 @@ ${guidelines}
 				promptCount: snap.promptCount,
 				memoryQueries: snap.pendingQueries,
 				recentRemembers: snap.pendingRemembers,
+				focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
+				focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
+				activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
+				surfacedConstraintCount:
+					snap.structuralSnapshot?.surfacedConstraintCount,
+				traversalMemoryCount:
+					snap.structuralSnapshot?.traversalMemoryCount,
 			}, cfg.maxCheckpointsPerSession);
 		} catch (err) {
 			logger.warn("hooks", "Pre-compaction checkpoint write failed", {
@@ -1463,6 +1488,13 @@ export function handleUserPromptSubmit(
 						promptCount: snap.promptCount,
 						memoryQueries: snap.pendingQueries,
 						recentRemembers: snap.pendingRemembers,
+						focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
+						focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
+						activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
+						surfacedConstraintCount:
+							snap.structuralSnapshot?.surfacedConstraintCount,
+						traversalMemoryCount:
+							snap.structuralSnapshot?.traversalMemoryCount,
 					},
 					cfg.maxCheckpointsPerSession,
 				);
@@ -1614,6 +1646,13 @@ export function handleSessionEnd(
 				promptCount: snap.totalPromptCount,
 				memoryQueries: snap.pendingQueries,
 				recentRemembers: snap.pendingRemembers,
+				focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
+				focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
+				activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
+				surfacedConstraintCount:
+					snap.structuralSnapshot?.surfacedConstraintCount,
+				traversalMemoryCount:
+					snap.structuralSnapshot?.traversalMemoryCount,
 			}, cfg.maxCheckpointsPerSession);
 		} catch (err) {
 			logger.warn("hooks", "Session-end checkpoint write failed", {
