@@ -409,6 +409,7 @@ export interface ScoredMemory {
 	pinned: number;
 	project: string | null;
 	created_at: string;
+	access_count: number;
 	effScore: number;
 }
 
@@ -438,6 +439,7 @@ function fetchTraversalCandidates(
 							 m.pinned,
 							 m.project,
 							 m.created_at,
+							 COALESCE(m.access_count, 0) AS access_count,
 							 COALESCE(MAX(ea.importance), m.importance, 0.5) AS effScore
 						 FROM memories m
 						 LEFT JOIN entity_attributes ea
@@ -454,7 +456,8 @@ function fetchTraversalCandidates(
 							 m.tags,
 							 m.pinned,
 							 m.project,
-							 m.created_at`,
+							 m.created_at,
+							 m.access_count`,
 					)
 					.all(agentId, ...memoryIds) as ScoredMemory[],
 		).map((row) => ({
@@ -530,7 +533,8 @@ export function getAllScoredCandidates(
 			(db) =>
 				db
 					.prepare(
-						`SELECT id, content, type, importance, tags, pinned, project, created_at
+						`SELECT id, content, type, importance, tags, pinned, project, created_at,
+						        COALESCE(access_count, 0) AS access_count
 					 FROM memories WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?`,
 					)
 					.all(limit * 3) as Array<{
@@ -542,6 +546,7 @@ export function getAllScoredCandidates(
 					pinned: number;
 					project: string | null;
 					created_at: string;
+					access_count: number;
 				}>,
 		);
 
@@ -649,7 +654,8 @@ function getPredictedContextMemories(
 				db
 					.prepare(
 						`SELECT m.id, m.content, m.type, m.importance, m.tags,
-						        m.pinned, m.project, m.created_at
+						        m.pinned, m.project, m.created_at,
+						        COALESCE(m.access_count, 0) AS access_count
 						 FROM memories_fts
 						 JOIN memories m ON memories_fts.rowid = m.rowid
 						 WHERE memories_fts MATCH ?
@@ -666,6 +672,7 @@ function getPredictedContextMemories(
 					pinned: number;
 					project: string | null;
 					created_at: string;
+					access_count: number;
 				}>,
 		);
 
@@ -1087,17 +1094,29 @@ export async function handleSessionStart(
 		candidateSourceById,
 	);
 
-	// Build candidate feature vectors for predictor input
+	// Build candidate feature vectors matching FeatureVector shape (10D):
+	// [recencyDays, accessCount, importance, decayFactor, embeddingSimilarity,
+	//  entitySlot, aspectSlot, isConstraint, structuralDensity, ftsHitCount]
+	const nowMs = Date.now();
+	const DECAY_HALF_LIFE_DAYS = 30;
 	const candidateFeatures: ReadonlyArray<ReadonlyArray<number>> | null =
 		predictorConfig?.enabled
-			? candidateIdsForFeatures.map((id) => {
-					const sf = structuralById.get(id);
-					if (sf === null || sf === undefined) return [0, 0, 0, 0];
+			? mergedCandidates.map((c) => {
+					const sf = structuralById.get(c.id);
+					const createdMs = new Date(c.created_at).getTime();
+					const recencyDays = Math.max(0, (nowMs - createdMs) / 86_400_000);
+					const decayFactor = Math.exp((-Math.LN2 * recencyDays) / DECAY_HALF_LIFE_DAYS);
 					return [
-						sf.entitySlot ?? 0,
-						sf.aspectSlot ?? 0,
-						sf.isConstraint ?? 0,
-						sf.structuralDensity ?? 0,
+						recencyDays,
+						c.access_count,
+						c.importance,
+						decayFactor,
+						c.effScore, // embedding similarity proxy
+						sf?.entitySlot ?? 0,
+						sf?.aspectSlot ?? 0,
+						sf?.isConstraint ?? 0,
+						sf?.structuralDensity ?? 0,
+						0, // ftsHitCount: not available at session-start
 					];
 				})
 			: null;
@@ -1183,6 +1202,7 @@ export async function handleSessionStart(
 				predictorStatus,
 				predictorConfig.minTrainingSessions,
 				predictorState,
+				getDbAccessor(),
 			);
 			if (exited && !predictorState.coldStartExited) {
 				updatePredictorState(agentId, { coldStartExited: true });
@@ -1198,9 +1218,10 @@ export async function handleSessionStart(
 				predictorStatus,
 				getPredictorState(agentId), // re-read after possible update
 				predictorConfig,
+				getDbAccessor(),
 			);
 		} else {
-			predictorStatusLine = buildPredictorStatusLine(null, predictorState, predictorConfig);
+			predictorStatusLine = buildPredictorStatusLine(null, predictorState, predictorConfig, null);
 		}
 	}
 
