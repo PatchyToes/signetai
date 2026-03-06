@@ -35,6 +35,8 @@ pub fn normalize_content_for_storage(content: String) -> String {
 #[napi]
 pub fn derive_normalized_content(storage_content: String) -> String {
     let lowered = storage_content.to_lowercase();
+    // Parity: TS uses /[.,!?;:]+$/ regex. trim_end_matches char-by-char
+    // is equivalent here since input is already trimmed of whitespace.
     let trimmed = lowered.trim_end_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':'));
     trimmed.trim().to_string()
 }

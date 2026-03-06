@@ -9,6 +9,7 @@ const triples = {
 	"darwin-x64": "signet-native.darwin-x64.node",
 	"darwin-arm64": "signet-native.darwin-arm64.node",
 	"win32-x64": "signet-native.win32-x64-msvc.node",
+	"win32-arm64": "signet-native.win32-arm64-msvc.node",
 };
 
 function loadBinding() {

@@ -15,8 +15,8 @@
     "triples": {}
   },
   "scripts": {
-    "build": "cp index.d.ts index.d.ts.bak && napi build --release --platform && mv index.d.ts.bak index.d.ts",
-    "build:debug": "cp index.d.ts index.d.ts.bak && napi build --platform && mv index.d.ts.bak index.d.ts"
+    "build": "napi build --release --platform --dts generated.d.ts && rm -f generated.d.ts",
+    "build:debug": "napi build --platform --dts generated.d.ts && rm -f generated.d.ts"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1"
