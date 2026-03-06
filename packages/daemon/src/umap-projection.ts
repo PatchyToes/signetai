@@ -4,8 +4,19 @@
  * to [-210, 210], and caches the result in the umap_cache table.
  */
 
+import { createRequire } from "node:module";
 import { UMAP } from "umap-js";
 import type { ReadDb, WriteDb } from "./db-accessor";
+
+// Try to load native Rust implementation, fall back to pure TS
+let nativeSquaredDistance: ((a: Float64Array, b: Float64Array) => number) | null = null;
+try {
+	const esmRequire = createRequire(import.meta.url);
+	const native: typeof import("@signet/native") = esmRequire("@signet/native");
+	nativeSquaredDistance = native.squaredDistance;
+} catch {
+	// Native addon not available — using TypeScript fallback
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -81,6 +92,9 @@ interface ScoredNeighbor {
 }
 
 function squaredDistance(left: readonly number[], right: readonly number[]): number {
+	if (nativeSquaredDistance !== null) {
+		return nativeSquaredDistance(new Float64Array(left), new Float64Array(right));
+	}
 	let distance = 0;
 	for (let index = 0; index < left.length; index += 1) {
 		const diff = left[index] - right[index];

@@ -78,6 +78,34 @@ function updateFileVersion(filePath: string, targetVersion: string): boolean {
 	return true;
 }
 
+function listCargoFiles(): string[] {
+	const output = execSync("git ls-files 'packages/**/Cargo.toml'", {
+		encoding: "utf8",
+	});
+
+	return output
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+}
+
+function updateCargoVersion(filePath: string, targetVersion: string): boolean {
+	const raw = readFileSync(filePath, "utf8");
+	// Anchor to [package] section to avoid matching dependency version strings
+	const versionPattern = /(\[package\][^\[]*version\s*=\s*")([^"]+)(")/s;
+	if (!versionPattern.test(raw)) {
+		throw new Error(`Could not find [package] version in ${filePath}`);
+	}
+
+	const next = raw.replace(versionPattern, `$1${targetVersion}$3`);
+	if (next === raw) {
+		return false;
+	}
+
+	writeFileSync(filePath, next);
+	return true;
+}
+
 function getArg(name: string): string | null {
 	const index = process.argv.indexOf(name);
 	if (index === -1) {
@@ -139,16 +167,36 @@ function main() {
 		);
 	}
 
-	if (updated.length === 0) {
-		console.log(`All package versions already aligned at ${targetVersion}.`);
+	// Sync Cargo.toml files under packages/
+	const cargoUpdated: string[] = [];
+	const cargoFiles = listCargoFiles();
+	for (const file of cargoFiles) {
+		if (updateCargoVersion(file, targetVersion)) {
+			cargoUpdated.push(file);
+		}
+	}
+
+	if (updated.length === 0 && cargoUpdated.length === 0) {
+		console.log(`All versions already aligned at ${targetVersion}.`);
 		return;
 	}
 
-	console.log(
-		`Aligned ${updated.length} package.json files to ${targetVersion}:`,
-	);
-	for (const file of updated) {
-		console.log(`- ${file}`);
+	if (updated.length > 0) {
+		console.log(
+			`Aligned ${updated.length} package.json files to ${targetVersion}:`,
+		);
+		for (const file of updated) {
+			console.log(`- ${file}`);
+		}
+	}
+
+	if (cargoUpdated.length > 0) {
+		console.log(
+			`Aligned ${cargoUpdated.length} Cargo.toml files to ${targetVersion}:`,
+		);
+		for (const file of cargoUpdated) {
+			console.log(`- ${file}`);
+		}
 	}
 }
 
