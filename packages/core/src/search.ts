@@ -66,13 +66,10 @@ interface DatabaseWrapper {
 }
 
 /**
- * Convert a Blob/Buffer to Float32Array for vector operations
+ * Convert a Blob/Buffer to Float32Array for vector operations.
+ * Uses zero-copy typed array view — no FFI needed here.
  */
 function blobToVector(blob: Buffer | ArrayBuffer): Float32Array {
-	if (native !== null) {
-		const buf = blob instanceof ArrayBuffer ? Buffer.from(blob) : blob;
-		return new Float32Array(native.blobToVector(buf as Buffer));
-	}
 	if (blob instanceof ArrayBuffer) {
 		return new Float32Array(blob);
 	}

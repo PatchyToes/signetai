@@ -8,6 +8,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cosineSimilarity, runMigrations } from "@signet/core";
 import { vectorToBlob } from "./db-helpers";
@@ -204,7 +205,6 @@ describe("squaredDistance in projection edge building", () => {
 		// Replicate the exact native-first logic from umap-projection.ts
 		let nativeFn: ((a: Float64Array, b: Float64Array) => number) | null = null;
 		try {
-			const { createRequire } = require("node:module");
 			const esmRequire = createRequire(import.meta.url);
 			const native: typeof import("@signet/native") = esmRequire("@signet/native");
 			nativeFn = native.squaredDistance;
