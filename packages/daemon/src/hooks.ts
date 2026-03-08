@@ -108,6 +108,14 @@ function harnessSupportsNamedCrossAgentTools(harness: string): boolean {
 	return harness.trim().toLowerCase() === "codex";
 }
 
+function sanitizePeerPromptField(value: string | undefined): string {
+	if (!value) return "";
+	return value
+		.replace(/[\r\n`*#[\]<>]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -1316,10 +1324,14 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			injectParts.push("\n## Active Peer Sessions\n");
 			injectParts.push("Other Signet agent sessions are active right now:");
 			for (const peer of peerSessions) {
-				const sessionLabel = peer.sessionKey ? ` session=${peer.sessionKey}` : "";
-				const projectLabel = peer.project ? ` project=${peer.project}` : "";
+				const safeAgentId = sanitizePeerPromptField(peer.agentId) || "unknown-agent";
+				const safeHarness = sanitizePeerPromptField(peer.harness) || "unknown-harness";
+				const safeSessionKey = sanitizePeerPromptField(peer.sessionKey);
+				const safeProject = sanitizePeerPromptField(peer.project);
+				const sessionLabel = safeSessionKey ? ` session=${safeSessionKey}` : "";
+				const projectLabel = safeProject ? ` project=${safeProject}` : "";
 				injectParts.push(
-					`- ${peer.agentId} (${peer.harness})${projectLabel}${sessionLabel} [seen ${formatLastSeenShort(peer.lastSeenAt)}]`,
+					`- ${safeAgentId} (${safeHarness})${projectLabel}${sessionLabel} [seen ${formatLastSeenShort(peer.lastSeenAt)}]`,
 				);
 			}
 			if (harnessSupportsNamedCrossAgentTools(req.harness)) {

@@ -260,6 +260,7 @@ let authForgetLimiter = new AuthRateLimiter(60_000, 30);
 let authModifyLimiter = new AuthRateLimiter(60_000, 60);
 let authBatchForgetLimiter = new AuthRateLimiter(60_000, 5);
 let authAdminLimiter = new AuthRateLimiter(60_000, 10);
+let authCrossAgentMessageLimiter = new AuthRateLimiter(60_000, 120);
 
 function hasMemoriesSessionIdColumn(db: Database): boolean {
 	if (hasMemoriesSessionIdColumnCache !== null) {
@@ -1189,6 +1190,13 @@ app.use("/api/cross-agent/*", async (c, next) => {
 	}
 	return requirePermission("remember", authConfig)(c, next);
 });
+app.use("/api/cross-agent/messages", async (c, next) => {
+	if (c.req.method !== "POST") {
+		await next();
+		return;
+	}
+	return requireRateLimit("cross-agent-message", authCrossAgentMessageLimiter, authConfig)(c, next);
+});
 
 // Predictor reporting — read-only (uses analytics permission)
 app.use("/api/predictor/*", async (c, next) => {
@@ -1763,9 +1771,7 @@ function validateSessionAgentBinding(
 
 	const existing = getAgentPresenceForSession(normalizedSessionKey);
 	if (!existing) {
-		return options.requireExisting
-			? `${options.context} is not an active session`
-			: undefined;
+		return options.requireExisting ? `${options.context} is not an active session` : undefined;
 	}
 
 	if (existing.agentId !== agentId) {
@@ -4930,12 +4936,8 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 	}
 });
 
-const AGENT_MESSAGE_TYPES: readonly AgentMessageType[] = [
-	"assist_request",
-	"decision_update",
-	"info",
-	"question",
-];
+const AGENT_MESSAGE_TYPES: readonly AgentMessageType[] = ["assist_request", "decision_update", "info", "question"];
+const MAX_CROSS_AGENT_MESSAGE_CHARS = 65_536;
 
 function parseAgentMessageType(value: string | undefined): AgentMessageType | undefined {
 	if (!value) return undefined;
@@ -4959,12 +4961,10 @@ app.get("/api/cross-agent/presence", (c) => {
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
-	const sessionError = validateSessionAgentBinding(
-		c,
-		sessionKey,
-		scopedAgent.agentId,
-		{ requireExisting: true, context: "session_key" },
-	);
+	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+		requireExisting: true,
+		context: "session_key",
+	});
 	if (sessionError) {
 		return c.json({ error: sessionError }, 403);
 	}
@@ -4995,22 +4995,17 @@ app.post("/api/cross-agent/presence", async (c) => {
 	}
 
 	const runtimePathRaw = parseOptionalString(payload.runtimePath);
-	const runtimePath =
-		runtimePathRaw === "plugin" || runtimePathRaw === "legacy"
-			? runtimePathRaw
-			: undefined;
+	const runtimePath = runtimePathRaw === "plugin" || runtimePathRaw === "legacy" ? runtimePathRaw : undefined;
 	const requestedAgentId = parseOptionalString(payload.agentId);
 	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
 	const sessionKey = parseOptionalString(payload.sessionKey);
-	const sessionError = validateSessionAgentBinding(
-		c,
-		sessionKey,
-		scopedAgent.agentId,
-		{ requireExisting: false, context: "sessionKey" },
-	);
+	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+		requireExisting: false,
+		context: "sessionKey",
+	});
 	if (sessionError) {
 		return c.json({ error: sessionError }, 403);
 	}
@@ -5033,12 +5028,10 @@ app.delete("/api/cross-agent/presence/:sessionKey", (c) => {
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
-	const sessionError = validateSessionAgentBinding(
-		c,
-		sessionKey,
-		scopedAgent.agentId,
-		{ requireExisting: false, context: "sessionKey" },
-	);
+	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+		requireExisting: false,
+		context: "sessionKey",
+	});
 	if (sessionError) {
 		return c.json({ error: sessionError }, 403);
 	}
@@ -5057,12 +5050,10 @@ app.get("/api/cross-agent/messages", (c) => {
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
-	const sessionError = validateSessionAgentBinding(
-		c,
-		sessionKey,
-		scopedAgent.agentId,
-		{ requireExisting: true, context: "session_key" },
-	);
+	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+		requireExisting: true,
+		context: "session_key",
+	});
 	if (sessionError) {
 		return c.json({ error: sessionError }, 403);
 	}
@@ -5092,6 +5083,9 @@ app.post("/api/cross-agent/messages", async (c) => {
 	if (!content) {
 		return c.json({ error: "content is required" }, 400);
 	}
+	if (content.length > MAX_CROSS_AGENT_MESSAGE_CHARS) {
+		return c.json({ error: `content too large (max ${MAX_CROSS_AGENT_MESSAGE_CHARS} chars)` }, 400);
+	}
 
 	const deliveryPathRaw = parseOptionalString(payload.via);
 	const deliveryPath = deliveryPathRaw === "acp" ? "acp" : "local";
@@ -5099,10 +5093,7 @@ app.post("/api/cross-agent/messages", async (c) => {
 	const rawType = parseOptionalString(payload.type);
 	const parsedType = parseAgentMessageType(rawType);
 	if (rawType && !parsedType) {
-		return c.json(
-			{ error: `unsupported message type '${rawType}'` },
-			400,
-		);
+		return c.json({ error: `unsupported message type '${rawType}'` }, 400);
 	}
 	const type = parsedType ?? "info";
 	const broadcast = parseOptionalBoolean(payload.broadcast) ?? false;
@@ -5112,12 +5103,10 @@ app.post("/api/cross-agent/messages", async (c) => {
 		return c.json({ error: scopedSender.error }, 403);
 	}
 	const fromSessionKey = parseOptionalString(payload.fromSessionKey);
-	const fromSessionError = validateSessionAgentBinding(
-		c,
-		fromSessionKey,
-		scopedSender.agentId,
-		{ requireExisting: true, context: "fromSessionKey" },
-	);
+	const fromSessionError = validateSessionAgentBinding(c, fromSessionKey, scopedSender.agentId, {
+		requireExisting: true,
+		context: "fromSessionKey",
+	});
 	if (fromSessionError) {
 		return c.json({ error: fromSessionError }, 403);
 	}
@@ -5125,10 +5114,7 @@ app.post("/api/cross-agent/messages", async (c) => {
 	const toSessionKey = parseOptionalString(payload.toSessionKey);
 	const hasLocalTarget = broadcast || !!toAgentId || !!toSessionKey;
 	if (deliveryPath === "local" && !hasLocalTarget) {
-		return c.json(
-			{ error: "local target required (toAgentId, toSessionKey, or broadcast=true)" },
-			400,
-		);
+		return c.json({ error: "local target required (toAgentId, toSessionKey, or broadcast=true)" }, 400);
 	}
 
 	let deliveryStatus: "queued" | "delivered" | "failed" = "delivered";
@@ -5137,12 +5123,9 @@ app.post("/api/cross-agent/messages", async (c) => {
 
 	if (deliveryPath === "acp") {
 		const acpPayload = toRecord(payload.acp);
-		const baseUrl =
-			parseOptionalString(acpPayload?.baseUrl)
-			?? parseOptionalString(acpPayload?.url);
+		const baseUrl = parseOptionalString(acpPayload?.baseUrl) ?? parseOptionalString(acpPayload?.url);
 		const targetAgentName =
-			parseOptionalString(acpPayload?.targetAgentName)
-			?? parseOptionalString(acpPayload?.agentName);
+			parseOptionalString(acpPayload?.targetAgentName) ?? parseOptionalString(acpPayload?.agentName);
 
 		if (!baseUrl || !targetAgentName) {
 			return c.json(
@@ -5210,12 +5193,10 @@ app.get("/api/cross-agent/stream", (c) => {
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
-	const sessionError = validateSessionAgentBinding(
-		c,
-		sessionKey,
-		scopedAgent.agentId,
-		{ requireExisting: true, context: "session_key" },
-	);
+	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
+		requireExisting: true,
+		context: "session_key",
+	});
 	if (sessionError) {
 		return c.json({ error: sessionError }, 403);
 	}
@@ -5254,6 +5235,8 @@ app.get("/api/cross-agent/stream", (c) => {
 			});
 
 			const unsubscribe = subscribeCrossAgentEvents((event) => {
+				// Message visibility uses isMessageVisibleToAgent(includeBroadcast=true);
+				// includeSent allows showing self-authored messages even when not addressed here.
 				if (event.type === "message") {
 					if (
 						!isMessageVisibleToAgent(event.message, {
@@ -5268,11 +5251,9 @@ app.get("/api/cross-agent/stream", (c) => {
 					}
 				}
 
-				if (
-					event.type === "presence"
-					&& !includeSelf
-					&& event.presence.agentId === agentId
-				) {
+				// Presence visibility suppresses self-updates unless includeSelf=true.
+				// Without a sessionKey context we ignore same-agent presence events entirely.
+				if (event.type === "presence" && !includeSelf && event.presence.agentId === agentId) {
 					if (!sessionKey) {
 						return;
 					}

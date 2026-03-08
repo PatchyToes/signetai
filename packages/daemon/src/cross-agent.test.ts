@@ -56,6 +56,21 @@ describe("cross-agent presence", () => {
 		expect(removed).toBe(true);
 		expect(listAgentPresence().length).toBe(0);
 	});
+
+	it("keeps ephemeral presence keys distinct when fields include colons", () => {
+		upsertAgentPresence({
+			agentId: "foo:bar",
+			harness: "baz",
+			project: "/repo",
+		});
+		upsertAgentPresence({
+			agentId: "foo",
+			harness: "bar:baz",
+			project: "/repo",
+		});
+
+		expect(listAgentPresence().length).toBe(2);
+	});
 });
 
 describe("cross-agent messages", () => {
@@ -163,6 +178,31 @@ describe("cross-agent messages", () => {
 
 		unsubscribe();
 		expect(seen).toEqual(["presence", "message"]);
+	});
+
+	it("keeps session-targeted routing stable if session key is later reused", () => {
+		upsertAgentPresence({
+			sessionKey: "sess-reused",
+			agentId: "beta",
+			harness: "openclaw",
+		});
+		createAgentMessage({
+			fromAgentId: "alpha",
+			toSessionKey: "sess-reused",
+			content: "This message should stay with beta.",
+		});
+
+		removeAgentPresence("sess-reused");
+		upsertAgentPresence({
+			sessionKey: "sess-reused",
+			agentId: "gamma",
+			harness: "opencode",
+		});
+
+		const betaInbox = listAgentMessages({ agentId: "beta" });
+		const gammaInbox = listAgentMessages({ agentId: "gamma" });
+		expect(betaInbox.length).toBe(1);
+		expect(gammaInbox.length).toBe(0);
 	});
 });
 

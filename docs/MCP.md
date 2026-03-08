@@ -278,6 +278,8 @@ Supports local daemon delivery and optional ACP relay.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `content` | string | yes | Message body |
+| `from_agent_id` | string | no | Sender agent id |
+| `from_session_key` | string | no | Sender session key |
 | `to_agent_id` | string | no | Target agent id |
 | `to_session_key` | string | no | Target session key |
 | `broadcast` | boolean | no | Broadcast to all sessions |
@@ -285,6 +287,7 @@ Supports local daemon delivery and optional ACP relay.
 | `via` | enum | no | `local` (default) or `acp` |
 | `acp_base_url` | string | no | ACP server URL (required if `via=acp`) |
 | `acp_target_agent_name` | string | no | ACP target agent name (required if `via=acp`) |
+| `acp_timeout_ms` | number | no | ACP relay timeout in milliseconds (used when `via=acp`) |
 
 **Returns:** Stored message object including delivery status.
 

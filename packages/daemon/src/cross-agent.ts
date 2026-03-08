@@ -54,6 +54,7 @@ export interface AgentMessage {
 	readonly fromSessionKey?: string;
 	readonly toAgentId?: string;
 	readonly toSessionKey?: string;
+	readonly toSessionAgentId?: string;
 	readonly content: string;
 	readonly type: AgentMessageType;
 	readonly broadcast: boolean;
@@ -70,6 +71,7 @@ interface MutableAgentMessage {
 	fromSessionKey?: string;
 	toAgentId?: string;
 	toSessionKey?: string;
+	toSessionAgentId?: string;
 	content: string;
 	type: AgentMessageType;
 	broadcast: boolean;
@@ -178,7 +180,7 @@ function presenceKey(input: UpsertAgentPresenceInput): string {
 	const agentId = normalizeText(input.agentId) ?? "default";
 	const harness = normalizeText(input.harness) ?? "unknown";
 	const project = normalizeText(input.project) ?? "*";
-	return `ephemeral:${agentId}:${harness}:${project}`;
+	return `ephemeral:${encodeURIComponent(agentId)}:${encodeURIComponent(harness)}:${encodeURIComponent(project)}`;
 }
 
 function clonePresence(presence: MutableAgentPresence): AgentPresence {
@@ -203,6 +205,7 @@ function cloneMessage(message: MutableAgentMessage): AgentMessage {
 		fromSessionKey: message.fromSessionKey,
 		toAgentId: message.toAgentId,
 		toSessionKey: message.toSessionKey,
+		toSessionAgentId: message.toSessionAgentId,
 		content: message.content,
 		type: message.type,
 		broadcast: message.broadcast,
@@ -302,7 +305,13 @@ function includesMessageForAgent(
 		return true;
 	}
 
-	if (agentId && message.toSessionKey) {
+	if (agentId && message.toSessionAgentId === agentId) {
+		return true;
+	}
+
+	// Legacy fallback: when no captured recipient owner exists, resolve toSessionKey
+	// through the current presence map and treat that owner as authoritative.
+	if (agentId && message.toSessionKey && !message.toSessionAgentId) {
 		const owner = agentForSession(message.toSessionKey);
 		if (owner === agentId) return true;
 	}
@@ -329,6 +338,7 @@ export function isMessageVisibleToAgent(
 		fromSessionKey: message.fromSessionKey,
 		toAgentId: message.toAgentId,
 		toSessionKey: message.toSessionKey,
+		toSessionAgentId: message.toSessionAgentId,
 		content: message.content,
 		type: message.type,
 		broadcast: message.broadcast,
@@ -468,6 +478,7 @@ export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage
 
 	const toAgentId = normalizeText(input.toAgentId);
 	const toSessionKey = normalizeText(input.toSessionKey);
+	const toSessionAgentId = toSessionKey ? (toAgentId ?? agentForSession(toSessionKey)) : undefined;
 	const broadcast = input.broadcast === true;
 	const deliveryPath = input.deliveryPath ?? "local";
 	if (deliveryPath === "local" && !broadcast && !toAgentId && !toSessionKey) {
@@ -482,6 +493,7 @@ export function createAgentMessage(input: CreateAgentMessageInput): AgentMessage
 		fromSessionKey: normalizeText(input.fromSessionKey),
 		toAgentId,
 		toSessionKey,
+		toSessionAgentId,
 		content,
 		type: input.type ?? "info",
 		broadcast,
