@@ -69,6 +69,7 @@ import {
 	type AgentMessage,
 	type AgentMessageType,
 	createAgentMessage,
+	getAgentPresenceForSession,
 	isMessageVisibleToAgent,
 	listAgentMessages,
 	listAgentPresence,
@@ -1718,6 +1719,59 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
 		if (lower === "1" || lower === "true") return true;
 		if (lower === "0" || lower === "false") return false;
 	}
+	return undefined;
+}
+
+function shouldEnforceAuthScope(c: Context): boolean {
+	if (authConfig.mode === "local") return false;
+	const auth = c.get("auth");
+	if (authConfig.mode === "hybrid" && !auth?.claims) return false;
+	return true;
+}
+
+function resolveScopedAgentId(
+	c: Context,
+	requestedAgentId: string | undefined,
+	fallbackAgentId = "default",
+): { agentId: string; error?: string } {
+	const auth = c.get("auth");
+	const scopedAgentId = parseOptionalString(auth?.claims?.scope.agent);
+	const agentId = requestedAgentId ?? scopedAgentId ?? fallbackAgentId;
+
+	if (!shouldEnforceAuthScope(c)) {
+		return { agentId };
+	}
+
+	const decision = checkScope(auth?.claims ?? null, { agent: agentId }, authConfig.mode);
+	if (!decision.allowed) {
+		return { agentId, error: decision.reason ?? "scope violation" };
+	}
+
+	return { agentId };
+}
+
+function validateSessionAgentBinding(
+	c: Context,
+	sessionKey: string | undefined,
+	agentId: string,
+	options: { requireExisting: boolean; context: string },
+): string | undefined {
+	const normalizedSessionKey = parseOptionalString(sessionKey);
+	if (!normalizedSessionKey || !shouldEnforceAuthScope(c)) {
+		return undefined;
+	}
+
+	const existing = getAgentPresenceForSession(normalizedSessionKey);
+	if (!existing) {
+		return options.requireExisting
+			? `${options.context} is not an active session`
+			: undefined;
+	}
+
+	if (existing.agentId !== agentId) {
+		return `${options.context} belongs to a different agent`;
+	}
+
 	return undefined;
 }
 
@@ -4896,14 +4950,27 @@ function parseAgentMessageType(value: string | undefined): AgentMessageType | un
 // ============================================================================
 
 app.get("/api/cross-agent/presence", (c) => {
-	const includeSelf = parseOptionalBoolean(c.req.query("include_self")) ?? true;
+	const includeSelf = parseOptionalBoolean(c.req.query("include_self")) ?? false;
 	const limit = parseOptionalInt(c.req.query("limit")) ?? 50;
-	const agentId = parseOptionalString(c.req.query("agent_id"));
+	const requestedAgentId = parseOptionalString(c.req.query("agent_id"));
 	const sessionKey = parseOptionalString(c.req.query("session_key"));
 	const project = parseOptionalString(c.req.query("project"));
+	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const sessionError = validateSessionAgentBinding(
+		c,
+		sessionKey,
+		scopedAgent.agentId,
+		{ requireExisting: true, context: "session_key" },
+	);
+	if (sessionError) {
+		return c.json({ error: sessionError }, 403);
+	}
 
 	const sessions = listAgentPresence({
-		agentId,
+		agentId: scopedAgent.agentId,
 		sessionKey,
 		project,
 		includeSelf,
@@ -4932,10 +4999,25 @@ app.post("/api/cross-agent/presence", async (c) => {
 		runtimePathRaw === "plugin" || runtimePathRaw === "legacy"
 			? runtimePathRaw
 			: undefined;
+	const requestedAgentId = parseOptionalString(payload.agentId);
+	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const sessionKey = parseOptionalString(payload.sessionKey);
+	const sessionError = validateSessionAgentBinding(
+		c,
+		sessionKey,
+		scopedAgent.agentId,
+		{ requireExisting: false, context: "sessionKey" },
+	);
+	if (sessionError) {
+		return c.json({ error: sessionError }, 403);
+	}
 
 	const presence = upsertAgentPresence({
-		sessionKey: parseOptionalString(payload.sessionKey),
-		agentId: parseOptionalString(payload.agentId) ?? "default",
+		sessionKey,
+		agentId: scopedAgent.agentId,
 		harness,
 		project: parseOptionalString(payload.project),
 		runtimePath,
@@ -4947,20 +5029,46 @@ app.post("/api/cross-agent/presence", async (c) => {
 
 app.delete("/api/cross-agent/presence/:sessionKey", (c) => {
 	const sessionKey = c.req.param("sessionKey");
+	const scopedAgent = resolveScopedAgentId(c, undefined, "default");
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const sessionError = validateSessionAgentBinding(
+		c,
+		sessionKey,
+		scopedAgent.agentId,
+		{ requireExisting: false, context: "sessionKey" },
+	);
+	if (sessionError) {
+		return c.json({ error: sessionError }, 403);
+	}
 	const removed = removeAgentPresence(sessionKey);
 	return c.json({ removed });
 });
 
 app.get("/api/cross-agent/messages", (c) => {
-	const agentId = parseOptionalString(c.req.query("agent_id")) ?? "default";
+	const requestedAgentId = parseOptionalString(c.req.query("agent_id"));
 	const sessionKey = parseOptionalString(c.req.query("session_key"));
 	const since = parseOptionalString(c.req.query("since"));
 	const includeSent = parseOptionalBoolean(c.req.query("include_sent")) ?? false;
 	const includeBroadcast = parseOptionalBoolean(c.req.query("include_broadcast")) ?? true;
 	const limit = parseOptionalInt(c.req.query("limit")) ?? 100;
+	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const sessionError = validateSessionAgentBinding(
+		c,
+		sessionKey,
+		scopedAgent.agentId,
+		{ requireExisting: true, context: "session_key" },
+	);
+	if (sessionError) {
+		return c.json({ error: sessionError }, 403);
+	}
 
 	const items = listAgentMessages({
-		agentId,
+		agentId: scopedAgent.agentId,
 		sessionKey,
 		since,
 		includeSent,
@@ -4988,13 +5096,37 @@ app.post("/api/cross-agent/messages", async (c) => {
 	const deliveryPathRaw = parseOptionalString(payload.via);
 	const deliveryPath = deliveryPathRaw === "acp" ? "acp" : "local";
 
-	const type = parseAgentMessageType(parseOptionalString(payload.type)) ?? "info";
+	const rawType = parseOptionalString(payload.type);
+	const parsedType = parseAgentMessageType(rawType);
+	if (rawType && !parsedType) {
+		return c.json(
+			{ error: `unsupported message type '${rawType}'` },
+			400,
+		);
+	}
+	const type = parsedType ?? "info";
 	const broadcast = parseOptionalBoolean(payload.broadcast) ?? false;
+	const fromAgentId = parseOptionalString(payload.fromAgentId);
+	const scopedSender = resolveScopedAgentId(c, fromAgentId, "default");
+	if (scopedSender.error) {
+		return c.json({ error: scopedSender.error }, 403);
+	}
+	const fromSessionKey = parseOptionalString(payload.fromSessionKey);
+	const fromSessionError = validateSessionAgentBinding(
+		c,
+		fromSessionKey,
+		scopedSender.agentId,
+		{ requireExisting: true, context: "fromSessionKey" },
+	);
+	if (fromSessionError) {
+		return c.json({ error: fromSessionError }, 403);
+	}
 	const toAgentId = parseOptionalString(payload.toAgentId);
 	const toSessionKey = parseOptionalString(payload.toSessionKey);
-	if (!broadcast && !toAgentId && !toSessionKey) {
+	const hasLocalTarget = broadcast || !!toAgentId || !!toSessionKey;
+	if (deliveryPath === "local" && !hasLocalTarget) {
 		return c.json(
-			{ error: "target required (toAgentId, toSessionKey, or broadcast=true)" },
+			{ error: "local target required (toAgentId, toSessionKey, or broadcast=true)" },
 			400,
 		);
 	}
@@ -5028,26 +5160,28 @@ app.post("/api/cross-agent/messages", async (c) => {
 			baseUrl,
 			targetAgentName,
 			content,
-			fromAgentId: parseOptionalString(payload.fromAgentId) ?? "default",
-			fromSessionKey: parseOptionalString(payload.fromSessionKey),
+			fromAgentId: scopedSender.agentId,
+			fromSessionKey,
 			timeoutMs,
 			metadata,
 		});
 
 		deliveryStatus = relay.ok ? "delivered" : "failed";
 		deliveryError = relay.error;
-		deliveryReceipt = {
+		const receipt: Record<string, unknown> = {
 			status: relay.status,
-			runId: relay.runId,
-			response: relay.response,
 		};
+		if (relay.runId) {
+			receipt.runId = relay.runId;
+		}
+		deliveryReceipt = receipt;
 	}
 
 	let message: AgentMessage;
 	try {
 		message = createAgentMessage({
-			fromAgentId: parseOptionalString(payload.fromAgentId) ?? "default",
-			fromSessionKey: parseOptionalString(payload.fromSessionKey),
+			fromAgentId: scopedSender.agentId,
+			fromSessionKey,
 			toAgentId,
 			toSessionKey,
 			content,
@@ -5067,11 +5201,25 @@ app.post("/api/cross-agent/messages", async (c) => {
 });
 
 app.get("/api/cross-agent/stream", (c) => {
-	const agentId = parseOptionalString(c.req.query("agent_id")) ?? "default";
+	const requestedAgentId = parseOptionalString(c.req.query("agent_id"));
 	const sessionKey = parseOptionalString(c.req.query("session_key"));
 	const includeSelf = parseOptionalBoolean(c.req.query("include_self")) ?? false;
 	const includeSent = parseOptionalBoolean(c.req.query("include_sent")) ?? false;
 	const encoder = new TextEncoder();
+	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const sessionError = validateSessionAgentBinding(
+		c,
+		sessionKey,
+		scopedAgent.agentId,
+		{ requireExisting: true, context: "session_key" },
+	);
+	if (sessionError) {
+		return c.json({ error: sessionError }, 403);
+	}
+	const agentId = scopedAgent.agentId;
 
 	const stream = new ReadableStream({
 		start(controller) {
@@ -5143,6 +5291,11 @@ app.get("/api/cross-agent/stream", (c) => {
 			c.req.raw.signal.addEventListener("abort", () => {
 				clearInterval(keepAlive);
 				unsubscribe();
+				try {
+					controller.close();
+				} catch {
+					// Stream may already be closed by the runtime.
+				}
 			});
 		},
 	});

@@ -706,21 +706,15 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				"Scores from -1 (harmful) to 1 (directly helpful). 0 = unused.",
 			inputSchema: z.object({
 				session_key: z.string().describe("Current session key"),
-				ratings: z
-					.record(z.string(), z.number())
-					.describe("Map of memory ID to relevance score (-1 to 1)"),
+				ratings: z.record(z.string(), z.number()).describe("Map of memory ID to relevance score (-1 to 1)"),
 			}),
 			annotations: { readOnlyHint: false },
 		},
 		async ({ session_key, ratings }) => {
-			const result = await daemonFetch<{ ok: boolean; recorded: number }>(
-				baseUrl,
-				"/api/memory/feedback",
-				{
-					method: "POST",
-					body: { sessionKey: session_key, feedback: ratings },
-				},
-			);
+			const result = await daemonFetch<{ ok: boolean; recorded: number }>(baseUrl, "/api/memory/feedback", {
+				method: "POST",
+				body: { sessionKey: session_key, feedback: ratings },
+			});
 			if (!result.ok) {
 				return errorResult(`Feedback failed: ${result.error}`);
 			}
@@ -739,10 +733,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			inputSchema: z.object({
 				agent_id: z.string().optional().describe("Current agent id (default: default)"),
 				session_key: z.string().optional().describe("Current session key (excluded from peers)"),
-				include_self: z
-					.boolean()
-					.optional()
-					.describe("Include sessions owned by the current agent (default false)"),
+				include_self: z.boolean().optional().describe("Include sessions owned by the current agent (default false)"),
 				project: z.string().optional().describe("Optional project path filter"),
 				limit: z.number().optional().describe("Max sessions to return"),
 			}),
@@ -757,10 +748,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				params.set("limit", String(Math.max(1, Math.min(200, Math.round(limit)))));
 			}
 
-			const result = await daemonFetch<unknown>(
-				baseUrl,
-				`/api/cross-agent/presence?${params.toString()}`,
-			);
+			const result = await daemonFetch<unknown>(baseUrl, `/api/cross-agent/presence?${params.toString()}`);
 
 			if (!result.ok) {
 				return errorResult(`Peer list failed: ${result.error}`);
@@ -779,22 +767,34 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			description:
 				"Send a structured message to another Signet agent session. " +
 				"Supports local daemon delivery or ACP relay for cross-provider communication.",
-			inputSchema: z.object({
-				from_agent_id: z.string().optional().describe("Sender agent id"),
-				from_session_key: z.string().optional().describe("Sender session key"),
-				to_agent_id: z.string().optional().describe("Target agent id"),
-				to_session_key: z.string().optional().describe("Target session key"),
-				broadcast: z.boolean().optional().describe("Broadcast to all active sessions"),
-				type: z
-					.enum(["assist_request", "decision_update", "info", "question"])
-					.optional()
-					.describe("Message type"),
-				content: z.string().describe("Message content"),
-				via: z.enum(["local", "acp"]).optional().describe("Delivery path"),
-				acp_base_url: z.string().optional().describe("ACP server base URL"),
-				acp_target_agent_name: z.string().optional().describe("ACP target agent name"),
-				acp_timeout_ms: z.number().optional().describe("ACP request timeout"),
-			}),
+			inputSchema: z.union([
+				z.object({
+					from_agent_id: z.string().optional().describe("Sender agent id"),
+					from_session_key: z.string().optional().describe("Sender session key"),
+					to_agent_id: z.string().optional().describe("Target agent id"),
+					to_session_key: z.string().optional().describe("Target session key"),
+					broadcast: z.boolean().optional().describe("Broadcast to all active sessions"),
+					type: z.enum(["assist_request", "decision_update", "info", "question"]).optional().describe("Message type"),
+					content: z.string().describe("Message content"),
+					via: z.literal("local").optional().describe("Delivery path (default: local)"),
+					acp_base_url: z.string().optional().describe("ACP server base URL"),
+					acp_target_agent_name: z.string().optional().describe("ACP target agent name"),
+					acp_timeout_ms: z.number().optional().describe("ACP request timeout"),
+				}),
+				z.object({
+					from_agent_id: z.string().optional().describe("Sender agent id"),
+					from_session_key: z.string().optional().describe("Sender session key"),
+					to_agent_id: z.string().optional().describe("Target agent id"),
+					to_session_key: z.string().optional().describe("Target session key"),
+					broadcast: z.boolean().optional().describe("Broadcast to all active sessions"),
+					type: z.enum(["assist_request", "decision_update", "info", "question"]).optional().describe("Message type"),
+					content: z.string().describe("Message content"),
+					via: z.literal("acp").describe("Delivery path"),
+					acp_base_url: z.string().min(1).describe("ACP server base URL"),
+					acp_target_agent_name: z.string().min(1).describe("ACP target agent name"),
+					acp_timeout_ms: z.number().optional().describe("ACP request timeout"),
+				}),
+			]),
 			annotations: { readOnlyHint: false },
 		},
 		async ({
@@ -873,10 +873,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				params.set("include_broadcast", String(include_broadcast));
 			}
 
-			const result = await daemonFetch<unknown>(
-				baseUrl,
-				`/api/cross-agent/messages?${params.toString()}`,
-			);
+			const result = await daemonFetch<unknown>(baseUrl, `/api/cross-agent/messages?${params.toString()}`);
 
 			if (!result.ok) {
 				return errorResult(`Inbox read failed: ${result.error}`);

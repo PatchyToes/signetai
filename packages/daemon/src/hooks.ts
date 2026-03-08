@@ -104,6 +104,10 @@ function formatLastSeenShort(isoDate: string): string {
 	return `${days}d ago`;
 }
 
+function harnessSupportsNamedCrossAgentTools(harness: string): boolean {
+	return harness.trim().toLowerCase() === "codex";
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -1300,26 +1304,28 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	});
 	injectParts.push(`\n# Current Date & Time\n${now} (${tz})\n`);
 
-	const peerSessions = listAgentPresence({
-		agentId: req.agentId ?? "default",
-		sessionKey: req.sessionKey,
-		project: req.project,
-		includeSelf: false,
-		limit: 6,
-	});
-	if (peerSessions.length > 0) {
-		injectParts.push("\n## Active Peer Sessions\n");
-		injectParts.push("Other Signet agent sessions are active right now:");
-		for (const peer of peerSessions) {
-			const sessionLabel = peer.sessionKey ? ` session=${peer.sessionKey}` : "";
-			const projectLabel = peer.project ? ` project=${peer.project}` : "";
-			injectParts.push(
-				`- ${peer.agentId} (${peer.harness})${projectLabel}${sessionLabel} [seen ${formatLastSeenShort(peer.lastSeenAt)}]`,
-			);
+	if (req.project) {
+		const peerSessions = listAgentPresence({
+			agentId: req.agentId ?? "default",
+			sessionKey: req.sessionKey,
+			project: req.project,
+			includeSelf: false,
+			limit: 6,
+		});
+		if (peerSessions.length > 0) {
+			injectParts.push("\n## Active Peer Sessions\n");
+			injectParts.push("Other Signet agent sessions are active right now:");
+			for (const peer of peerSessions) {
+				const sessionLabel = peer.sessionKey ? ` session=${peer.sessionKey}` : "";
+				const projectLabel = peer.project ? ` project=${peer.project}` : "";
+				injectParts.push(
+					`- ${peer.agentId} (${peer.harness})${projectLabel}${sessionLabel} [seen ${formatLastSeenShort(peer.lastSeenAt)}]`,
+				);
+			}
+			if (harnessSupportsNamedCrossAgentTools(req.harness)) {
+				injectParts.push("Use `agent_message_send` to ask for help and `agent_message_inbox` to read replies.");
+			}
 		}
-		injectParts.push(
-			"Use `agent_message_send` to ask for help and `agent_message_inbox` to read replies.",
-		);
 	}
 
 	if (agentsMdContent) {

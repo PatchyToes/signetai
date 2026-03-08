@@ -267,6 +267,27 @@ describe("createMcpServer", () => {
 			expect(body.content).toContain("review this approach");
 		});
 
+		it("agent_message_send maps ACP fields when via=acp", async () => {
+			const cap: { method?: string; body?: string } = {};
+			mockFetch(200, { message: { id: "m-acp" } }, cap);
+
+			await callTool(server, "agent_message_send", {
+				from_agent_id: "alpha",
+				content: "Can you sanity-check this release?",
+				via: "acp",
+				acp_base_url: "https://acp.example.com",
+				acp_target_agent_name: "peer-helper",
+				acp_timeout_ms: 7000,
+			});
+
+			expect(cap.method).toBe("POST");
+			const body = JSON.parse(cap.body ?? "{}");
+			expect(body.via).toBe("acp");
+			expect(body.acp.baseUrl).toBe("https://acp.example.com");
+			expect(body.acp.targetAgentName).toBe("peer-helper");
+			expect(body.acp.timeoutMs).toBe(7000);
+		});
+
 		it("agent_message_inbox calls messages endpoint", async () => {
 			const cap: { url?: string } = {};
 			mockFetch(200, { items: [], count: 0 }, cap);

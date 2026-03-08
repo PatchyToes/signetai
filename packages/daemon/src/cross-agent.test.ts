@@ -98,6 +98,52 @@ describe("cross-agent messages", () => {
 		expect(inbox[0]?.broadcast).toBe(true);
 	});
 
+	it("allows ACP messages without local target identifiers", () => {
+		const message = createAgentMessage({
+			fromAgentId: "alpha",
+			content: "Escalating to external ACP helper.",
+			deliveryPath: "acp",
+			deliveryStatus: "queued",
+		});
+
+		expect(message.deliveryPath).toBe("acp");
+		expect(message.toAgentId).toBeUndefined();
+		expect(message.toSessionKey).toBeUndefined();
+	});
+
+	it("still requires target for local delivery", () => {
+		expect(() =>
+			createAgentMessage({
+				fromAgentId: "alpha",
+				content: "No recipient should fail.",
+				deliveryPath: "local",
+			}),
+		).toThrow("target required for local delivery");
+	});
+
+	it("deep-clones delivery receipts to avoid external mutation", () => {
+		const message = createAgentMessage({
+			fromAgentId: "alpha",
+			toAgentId: "beta",
+			content: "Receipt immutability check.",
+			deliveryReceipt: {
+				status: 200,
+				nested: { ok: true },
+			},
+		});
+
+		if (message.deliveryReceipt) {
+			message.deliveryReceipt.status = 999;
+			message.deliveryReceipt.nested = { ok: false };
+		}
+
+		const inbox = listAgentMessages({ agentId: "beta" });
+		expect(inbox[0]?.deliveryReceipt).toEqual({
+			status: 200,
+			nested: { ok: true },
+		});
+	});
+
 	it("emits events for presence and messages", () => {
 		const seen: string[] = [];
 		const unsubscribe = subscribeCrossAgentEvents((event) => {
@@ -135,7 +181,7 @@ describe("ACP relay", () => {
 		}) as unknown as typeof fetch;
 
 		const result = await relayMessageViaAcp({
-			baseUrl: "http://localhost:9000/",
+			baseUrl: "https://acp.example.com/",
 			targetAgentName: "helper-agent",
 			content: "Can you verify this deployment plan?",
 			fromAgentId: "alpha",
@@ -144,11 +190,55 @@ describe("ACP relay", () => {
 
 		globalThis.fetch = originalFetch;
 
-		expect(capture.url).toBe("http://localhost:9000/runs");
+		expect(capture.url).toBe("https://acp.example.com/runs");
 		const body = JSON.parse(capture.body ?? "{}");
 		expect(body.agent_name).toBe("helper-agent");
 		expect(body.input?.[0]?.parts?.[0]?.content).toContain("deployment plan");
 		expect(result.ok).toBe(true);
 		expect(result.runId).toBe("run-123");
+	});
+
+	it("rejects private ACP origins unless allowlisted", async () => {
+		const result = await relayMessageViaAcp({
+			baseUrl: "http://localhost:9000/",
+			targetAgentName: "helper-agent",
+			content: "test",
+		});
+
+		expect(result.ok).toBe(false);
+		expect(result.error).toContain("allowlisted");
+	});
+
+	it("allows allowlisted private ACP origins", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalAllowlist = process.env.SIGNET_ACP_ALLOWED_ORIGINS;
+		const capture: { url?: string } = {};
+		process.env.SIGNET_ACP_ALLOWED_ORIGINS = "http://localhost:9000";
+		globalThis.fetch = mock(async (input: string | URL | Request) => {
+			capture.url = typeof input === "string" ? input : input.toString();
+			return new Response(JSON.stringify({ run_id: "run-allowlisted" }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		let result: Awaited<ReturnType<typeof relayMessageViaAcp>> | null = null;
+		try {
+			result = await relayMessageViaAcp({
+				baseUrl: "http://localhost:9000/",
+				targetAgentName: "helper-agent",
+				content: "allowlisted",
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalAllowlist === undefined) {
+				process.env.SIGNET_ACP_ALLOWED_ORIGINS = undefined;
+			} else {
+				process.env.SIGNET_ACP_ALLOWED_ORIGINS = originalAllowlist;
+			}
+		}
+
+		expect(result?.ok).toBe(true);
+		expect(capture.url).toBe("http://localhost:9000/runs");
 	});
 });
