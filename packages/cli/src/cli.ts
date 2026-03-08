@@ -6095,6 +6095,10 @@ program
 	.option("--list", "List active sessions with bypass status")
 	.option("--off", "Disable bypass (re-enable Signet)")
 	.action(async (sessionKey: string | undefined, options: { list?: boolean; off?: boolean }) => {
+		if (options.off && !sessionKey) {
+			console.error(chalk.red("Error: a session-key is required when using --off"));
+			process.exit(1);
+		}
 		if (options.list || !sessionKey) {
 			const data = await fetchFromDaemon<{
 				sessions: Array<{ key: string; runtimePath: string; claimedAt: string; bypassed: boolean }>;
