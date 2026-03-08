@@ -327,7 +327,7 @@ hooks are silenced.
 | `session_key` | string | yes | Session key to toggle bypass for |
 | `enabled` | boolean | yes | `true` to enable bypass, `false` to disable |
 
-**Returns:** Object with `key` and `bypass` fields confirming the new state.
+**Returns:** Object with `key` and `bypassed` fields confirming the new state.
 
 **Example:**
 
