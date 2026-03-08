@@ -60,6 +60,7 @@ export const SignetPlugin: Plugin = async ({ directory }) => {
 	if (!enabled) return {};
 
 	const daemonUrl = readRuntimeEnv("SIGNET_DAEMON_URL") ?? DAEMON_URL_DEFAULT;
+	const agentId = readRuntimeEnv("SIGNET_AGENT_ID");
 
 	const client = createDaemonClient(daemonUrl);
 
@@ -71,6 +72,7 @@ export const SignetPlugin: Plugin = async ({ directory }) => {
 			{
 				harness: HARNESS,
 				project: directory,
+				agentId,
 				runtimePath: RUNTIME_PATH,
 			},
 			READ_TIMEOUT,

@@ -93,6 +93,9 @@ describe("createMcpServer", () => {
 		expect(names).toContain("memory_list");
 		expect(names).toContain("memory_modify");
 		expect(names).toContain("memory_forget");
+		expect(names).toContain("agent_peers");
+		expect(names).toContain("agent_message_send");
+		expect(names).toContain("agent_message_inbox");
 		expect(names).toContain("mcp_server_list");
 		expect(names).toContain("mcp_server_search");
 		expect(names).toContain("mcp_server_call");
@@ -104,7 +107,7 @@ describe("createMcpServer", () => {
 		expect(names).toContain("mcp_server_policy_set");
 		expect(names).toContain("secret_list");
 		expect(names).toContain("secret_exec");
-		expect(names.length).toBe(17);
+		expect(names.length).toBe(21);
 	});
 
 	describe("memory_search", () => {
@@ -231,6 +234,51 @@ describe("createMcpServer", () => {
 
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toContain("Forget failed");
+		});
+	});
+
+	describe("cross-agent tools", () => {
+		it("agent_peers calls presence endpoint with defaults", async () => {
+			const cap: { url?: string } = {};
+			mockFetch(200, { sessions: [], count: 0 }, cap);
+
+			await callTool(server, "agent_peers", {});
+			expect(cap.url).toContain("/api/cross-agent/presence?");
+			expect(cap.url).toContain("agent_id=default");
+			expect(cap.url).toContain("include_self=false");
+		});
+
+		it("agent_message_send posts message payload", async () => {
+			const cap: { method?: string; body?: string } = {};
+			mockFetch(200, { message: { id: "m1" } }, cap);
+
+			await callTool(server, "agent_message_send", {
+				from_agent_id: "alpha",
+				to_agent_id: "beta",
+				type: "assist_request",
+				content: "Can you review this approach?",
+			});
+
+			expect(cap.method).toBe("POST");
+			const body = JSON.parse(cap.body ?? "{}");
+			expect(body.fromAgentId).toBe("alpha");
+			expect(body.toAgentId).toBe("beta");
+			expect(body.type).toBe("assist_request");
+			expect(body.content).toContain("review this approach");
+		});
+
+		it("agent_message_inbox calls messages endpoint", async () => {
+			const cap: { url?: string } = {};
+			mockFetch(200, { items: [], count: 0 }, cap);
+
+			await callTool(server, "agent_message_inbox", {
+				agent_id: "beta",
+				limit: 25,
+			});
+
+			expect(cap.url).toContain("/api/cross-agent/messages?");
+			expect(cap.url).toContain("agent_id=beta");
+			expect(cap.url).toContain("limit=25");
 		});
 	});
 

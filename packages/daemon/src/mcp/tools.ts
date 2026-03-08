@@ -113,6 +113,9 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"memory_modify",
 	"memory_forget",
 	"memory_feedback",
+	"agent_peers",
+	"agent_message_send",
+	"agent_message_inbox",
 	"secret_list",
 	"secret_exec",
 	"mcp_server_list",
@@ -720,6 +723,163 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			);
 			if (!result.ok) {
 				return errorResult(`Feedback failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	// ------------------------------------------------------------------
+	// agent_peers — list active peer sessions
+	// ------------------------------------------------------------------
+	server.registerTool(
+		"agent_peers",
+		{
+			title: "List Peer Sessions",
+			description: "List currently active Signet peer agent sessions.",
+			inputSchema: z.object({
+				agent_id: z.string().optional().describe("Current agent id (default: default)"),
+				session_key: z.string().optional().describe("Current session key (excluded from peers)"),
+				include_self: z
+					.boolean()
+					.optional()
+					.describe("Include sessions owned by the current agent (default false)"),
+				project: z.string().optional().describe("Optional project path filter"),
+				limit: z.number().optional().describe("Max sessions to return"),
+			}),
+		},
+		async ({ agent_id, session_key, include_self, project, limit }) => {
+			const params = new URLSearchParams();
+			params.set("agent_id", agent_id ?? "default");
+			if (session_key) params.set("session_key", session_key);
+			params.set("include_self", String(include_self ?? false));
+			if (project) params.set("project", project);
+			if (typeof limit === "number" && Number.isFinite(limit)) {
+				params.set("limit", String(Math.max(1, Math.min(200, Math.round(limit)))));
+			}
+
+			const result = await daemonFetch<unknown>(
+				baseUrl,
+				`/api/cross-agent/presence?${params.toString()}`,
+			);
+
+			if (!result.ok) {
+				return errorResult(`Peer list failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	// ------------------------------------------------------------------
+	// agent_message_send — send message to another agent/session
+	// ------------------------------------------------------------------
+	server.registerTool(
+		"agent_message_send",
+		{
+			title: "Send Agent Message",
+			description:
+				"Send a structured message to another Signet agent session. " +
+				"Supports local daemon delivery or ACP relay for cross-provider communication.",
+			inputSchema: z.object({
+				from_agent_id: z.string().optional().describe("Sender agent id"),
+				from_session_key: z.string().optional().describe("Sender session key"),
+				to_agent_id: z.string().optional().describe("Target agent id"),
+				to_session_key: z.string().optional().describe("Target session key"),
+				broadcast: z.boolean().optional().describe("Broadcast to all active sessions"),
+				type: z
+					.enum(["assist_request", "decision_update", "info", "question"])
+					.optional()
+					.describe("Message type"),
+				content: z.string().describe("Message content"),
+				via: z.enum(["local", "acp"]).optional().describe("Delivery path"),
+				acp_base_url: z.string().optional().describe("ACP server base URL"),
+				acp_target_agent_name: z.string().optional().describe("ACP target agent name"),
+				acp_timeout_ms: z.number().optional().describe("ACP request timeout"),
+			}),
+			annotations: { readOnlyHint: false },
+		},
+		async ({
+			from_agent_id,
+			from_session_key,
+			to_agent_id,
+			to_session_key,
+			broadcast,
+			type,
+			content,
+			via,
+			acp_base_url,
+			acp_target_agent_name,
+			acp_timeout_ms,
+		}) => {
+			const body: Record<string, unknown> = {
+				fromAgentId: from_agent_id,
+				fromSessionKey: from_session_key,
+				toAgentId: to_agent_id,
+				toSessionKey: to_session_key,
+				broadcast: broadcast ?? false,
+				type,
+				content,
+				via: via ?? "local",
+			};
+
+			if ((via ?? "local") === "acp") {
+				body.acp = {
+					baseUrl: acp_base_url,
+					targetAgentName: acp_target_agent_name,
+					timeoutMs: acp_timeout_ms,
+				};
+			}
+
+			const result = await daemonFetch<unknown>(baseUrl, "/api/cross-agent/messages", {
+				method: "POST",
+				body,
+			});
+
+			if (!result.ok) {
+				return errorResult(`Send failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	// ------------------------------------------------------------------
+	// agent_message_inbox — read recent inbound messages
+	// ------------------------------------------------------------------
+	server.registerTool(
+		"agent_message_inbox",
+		{
+			title: "Read Agent Inbox",
+			description: "Read recent cross-agent messages for the current or specified agent.",
+			inputSchema: z.object({
+				agent_id: z.string().optional().describe("Recipient agent id (default: default)"),
+				session_key: z.string().optional().describe("Recipient session key"),
+				since: z.string().optional().describe("ISO timestamp filter"),
+				limit: z.number().optional().describe("Max messages to return"),
+				include_sent: z.boolean().optional().describe("Include messages sent by this agent"),
+				include_broadcast: z.boolean().optional().describe("Include broadcast messages"),
+			}),
+		},
+		async ({ agent_id, session_key, since, limit, include_sent, include_broadcast }) => {
+			const params = new URLSearchParams();
+			params.set("agent_id", agent_id ?? "default");
+			if (session_key) params.set("session_key", session_key);
+			if (since) params.set("since", since);
+			if (typeof limit === "number" && Number.isFinite(limit)) {
+				params.set("limit", String(Math.max(1, Math.min(500, Math.round(limit)))));
+			}
+			if (typeof include_sent === "boolean") {
+				params.set("include_sent", String(include_sent));
+			}
+			if (typeof include_broadcast === "boolean") {
+				params.set("include_broadcast", String(include_broadcast));
+			}
+
+			const result = await daemonFetch<unknown>(
+				baseUrl,
+				`/api/cross-agent/messages?${params.toString()}`,
+			);
+
+			if (!result.ok) {
+				return errorResult(`Inbox read failed: ${result.error}`);
 			}
 			return textResult(result.data);
 		},

@@ -65,6 +65,19 @@ import {
 	updateCursor,
 } from "./connectors/registry";
 import { normalizeAndHashContent } from "./content-normalization";
+import {
+	type AgentMessage,
+	type AgentMessageType,
+	createAgentMessage,
+	isMessageVisibleToAgent,
+	listAgentMessages,
+	listAgentPresence,
+	relayMessageViaAcp,
+	removeAgentPresence,
+	subscribeCrossAgentEvents,
+	touchAgentPresence,
+	upsertAgentPresence,
+} from "./cross-agent";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
 import {
@@ -1160,6 +1173,20 @@ app.use("/api/analytics", async (c, next) => {
 });
 app.use("/api/analytics/*", async (c, next) => {
 	return requirePermission("analytics", authConfig)(c, next);
+});
+
+// Cross-agent collaboration: read inbox/presence with recall, mutate with remember
+app.use("/api/cross-agent", async (c, next) => {
+	if (c.req.method === "GET") {
+		return requirePermission("recall", authConfig)(c, next);
+	}
+	return requirePermission("remember", authConfig)(c, next);
+});
+app.use("/api/cross-agent/*", async (c, next) => {
+	if (c.req.method === "GET") {
+		return requirePermission("recall", authConfig)(c, next);
+	}
+	return requirePermission("remember", authConfig)(c, next);
 });
 
 // Predictor reporting — read-only (uses analytics permission)
@@ -4605,6 +4632,15 @@ app.post("/api/hooks/session-start", async (c) => {
 			}
 		}
 
+		upsertAgentPresence({
+			sessionKey: parseOptionalString(body.sessionKey),
+			agentId: parseOptionalString(body.agentId) ?? "default",
+			harness: body.harness,
+			project: parseOptionalString(body.project),
+			runtimePath,
+			provider: body.harness,
+		});
+
 		stampHarness(body.harness);
 		const result = await handleSessionStart(body);
 		return c.json(result);
@@ -4634,6 +4670,30 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
+
+		const sessionKey = parseOptionalString(body.sessionKey);
+		const agentId = parseOptionalString(body.agentId) ?? "default";
+		if (sessionKey) {
+			const touched = touchAgentPresence(sessionKey);
+			if (!touched) {
+				upsertAgentPresence({
+					sessionKey,
+					agentId,
+					harness: body.harness,
+					project: parseOptionalString(body.project),
+					runtimePath,
+					provider: body.harness,
+				});
+			}
+		} else {
+			upsertAgentPresence({
+				agentId,
+				harness: body.harness,
+				project: parseOptionalString(body.project),
+				runtimePath,
+				provider: body.harness,
+			});
+		}
 
 		stampHarness(body.harness);
 		const result = await handleUserPromptSubmit(body);
@@ -4666,6 +4726,7 @@ app.post("/api/hooks/session-end", async (c) => {
 		const sessionKey = body.sessionKey || body.sessionId;
 		if (sessionKey) {
 			releaseSession(sessionKey);
+			removeAgentPresence(sessionKey);
 		}
 
 		return c.json(result);
@@ -4813,6 +4874,286 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 		logger.error("hooks", "Compaction complete failed", e as Error);
 		return c.json({ error: "Failed to save summary" }, 500);
 	}
+});
+
+const AGENT_MESSAGE_TYPES: readonly AgentMessageType[] = [
+	"assist_request",
+	"decision_update",
+	"info",
+	"question",
+];
+
+function parseAgentMessageType(value: string | undefined): AgentMessageType | undefined {
+	if (!value) return undefined;
+	for (const type of AGENT_MESSAGE_TYPES) {
+		if (type === value) return type;
+	}
+	return undefined;
+}
+
+// ============================================================================
+// Cross-Agent Collaboration API
+// ============================================================================
+
+app.get("/api/cross-agent/presence", (c) => {
+	const includeSelf = parseOptionalBoolean(c.req.query("include_self")) ?? true;
+	const limit = parseOptionalInt(c.req.query("limit")) ?? 50;
+	const agentId = parseOptionalString(c.req.query("agent_id"));
+	const sessionKey = parseOptionalString(c.req.query("session_key"));
+	const project = parseOptionalString(c.req.query("project"));
+
+	const sessions = listAgentPresence({
+		agentId,
+		sessionKey,
+		project,
+		includeSelf,
+		limit,
+	});
+
+	return c.json({
+		sessions,
+		count: sessions.length,
+	});
+});
+
+app.post("/api/cross-agent/presence", async (c) => {
+	const payload = await readOptionalJsonObject(c);
+	if (payload === null) {
+		return c.json({ error: "invalid request body" }, 400);
+	}
+
+	const harness = parseOptionalString(payload.harness);
+	if (!harness) {
+		return c.json({ error: "harness is required" }, 400);
+	}
+
+	const runtimePathRaw = parseOptionalString(payload.runtimePath);
+	const runtimePath =
+		runtimePathRaw === "plugin" || runtimePathRaw === "legacy"
+			? runtimePathRaw
+			: undefined;
+
+	const presence = upsertAgentPresence({
+		sessionKey: parseOptionalString(payload.sessionKey),
+		agentId: parseOptionalString(payload.agentId) ?? "default",
+		harness,
+		project: parseOptionalString(payload.project),
+		runtimePath,
+		provider: parseOptionalString(payload.provider) ?? harness,
+	});
+
+	return c.json({ presence });
+});
+
+app.delete("/api/cross-agent/presence/:sessionKey", (c) => {
+	const sessionKey = c.req.param("sessionKey");
+	const removed = removeAgentPresence(sessionKey);
+	return c.json({ removed });
+});
+
+app.get("/api/cross-agent/messages", (c) => {
+	const agentId = parseOptionalString(c.req.query("agent_id")) ?? "default";
+	const sessionKey = parseOptionalString(c.req.query("session_key"));
+	const since = parseOptionalString(c.req.query("since"));
+	const includeSent = parseOptionalBoolean(c.req.query("include_sent")) ?? false;
+	const includeBroadcast = parseOptionalBoolean(c.req.query("include_broadcast")) ?? true;
+	const limit = parseOptionalInt(c.req.query("limit")) ?? 100;
+
+	const items = listAgentMessages({
+		agentId,
+		sessionKey,
+		since,
+		includeSent,
+		includeBroadcast,
+		limit,
+	});
+
+	return c.json({
+		items,
+		count: items.length,
+	});
+});
+
+app.post("/api/cross-agent/messages", async (c) => {
+	const payload = await readOptionalJsonObject(c);
+	if (payload === null) {
+		return c.json({ error: "invalid request body" }, 400);
+	}
+
+	const content = parseOptionalString(payload.content);
+	if (!content) {
+		return c.json({ error: "content is required" }, 400);
+	}
+
+	const deliveryPathRaw = parseOptionalString(payload.via);
+	const deliveryPath = deliveryPathRaw === "acp" ? "acp" : "local";
+
+	const type = parseAgentMessageType(parseOptionalString(payload.type)) ?? "info";
+	const broadcast = parseOptionalBoolean(payload.broadcast) ?? false;
+	const toAgentId = parseOptionalString(payload.toAgentId);
+	const toSessionKey = parseOptionalString(payload.toSessionKey);
+	if (!broadcast && !toAgentId && !toSessionKey) {
+		return c.json(
+			{ error: "target required (toAgentId, toSessionKey, or broadcast=true)" },
+			400,
+		);
+	}
+
+	let deliveryStatus: "queued" | "delivered" | "failed" = "delivered";
+	let deliveryError: string | undefined;
+	let deliveryReceipt: Record<string, unknown> | undefined;
+
+	if (deliveryPath === "acp") {
+		const acpPayload = toRecord(payload.acp);
+		const baseUrl =
+			parseOptionalString(acpPayload?.baseUrl)
+			?? parseOptionalString(acpPayload?.url);
+		const targetAgentName =
+			parseOptionalString(acpPayload?.targetAgentName)
+			?? parseOptionalString(acpPayload?.agentName);
+
+		if (!baseUrl || !targetAgentName) {
+			return c.json(
+				{
+					error: "acp.baseUrl and acp.targetAgentName are required when via='acp'",
+				},
+				400,
+			);
+		}
+
+		const timeoutMs = parseOptionalInt(acpPayload?.timeoutMs);
+		const metadata = toRecord(acpPayload?.metadata) ?? undefined;
+
+		const relay = await relayMessageViaAcp({
+			baseUrl,
+			targetAgentName,
+			content,
+			fromAgentId: parseOptionalString(payload.fromAgentId) ?? "default",
+			fromSessionKey: parseOptionalString(payload.fromSessionKey),
+			timeoutMs,
+			metadata,
+		});
+
+		deliveryStatus = relay.ok ? "delivered" : "failed";
+		deliveryError = relay.error;
+		deliveryReceipt = {
+			status: relay.status,
+			runId: relay.runId,
+			response: relay.response,
+		};
+	}
+
+	let message: AgentMessage;
+	try {
+		message = createAgentMessage({
+			fromAgentId: parseOptionalString(payload.fromAgentId) ?? "default",
+			fromSessionKey: parseOptionalString(payload.fromSessionKey),
+			toAgentId,
+			toSessionKey,
+			content,
+			type,
+			broadcast,
+			deliveryPath,
+			deliveryStatus,
+			deliveryError,
+			deliveryReceipt,
+		});
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		return c.json({ error: msg }, 400);
+	}
+
+	return c.json({ message });
+});
+
+app.get("/api/cross-agent/stream", (c) => {
+	const agentId = parseOptionalString(c.req.query("agent_id")) ?? "default";
+	const sessionKey = parseOptionalString(c.req.query("session_key"));
+	const includeSelf = parseOptionalBoolean(c.req.query("include_self")) ?? false;
+	const includeSent = parseOptionalBoolean(c.req.query("include_sent")) ?? false;
+	const encoder = new TextEncoder();
+
+	const stream = new ReadableStream({
+		start(controller) {
+			const writeEvent = (event: unknown) => {
+				const data = `data: ${JSON.stringify(event)}\n\n`;
+				controller.enqueue(encoder.encode(data));
+			};
+
+			writeEvent({
+				type: "connected",
+				agentId,
+				sessionKey,
+				timestamp: new Date().toISOString(),
+			});
+
+			writeEvent({
+				type: "snapshot",
+				presence: listAgentPresence({
+					agentId,
+					sessionKey,
+					includeSelf,
+					limit: 50,
+				}),
+				messages: listAgentMessages({
+					agentId,
+					sessionKey,
+					includeSent,
+					includeBroadcast: true,
+					limit: 20,
+				}),
+				timestamp: new Date().toISOString(),
+			});
+
+			const unsubscribe = subscribeCrossAgentEvents((event) => {
+				if (event.type === "message") {
+					if (
+						!isMessageVisibleToAgent(event.message, {
+							agentId,
+							sessionKey,
+							includeBroadcast: true,
+						})
+					) {
+						if (!(includeSent && event.message.fromAgentId === agentId)) {
+							return;
+						}
+					}
+				}
+
+				if (
+					event.type === "presence"
+					&& !includeSelf
+					&& event.presence.agentId === agentId
+				) {
+					if (!sessionKey) {
+						return;
+					}
+					if (!event.presence.sessionKey || event.presence.sessionKey === sessionKey) {
+						return;
+					}
+				}
+
+				writeEvent(event);
+			});
+
+			const keepAlive = setInterval(() => {
+				controller.enqueue(encoder.encode(": keepalive\n\n"));
+			}, 15_000);
+
+			c.req.raw.signal.addEventListener("abort", () => {
+				clearInterval(keepAlive);
+				unsubscribe();
+			});
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			"Content-Type": "text/event-stream",
+			"Cache-Control": "no-cache",
+			Connection: "keep-alive",
+		},
+	});
 });
 
 // Get synthesis config

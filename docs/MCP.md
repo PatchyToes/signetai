@@ -250,6 +250,65 @@ Score interpretation: `1` = directly helpful, `0` = unused/neutral,
 are supported for backward compatibility, but the MCP tool is recorded
 immediately on the current turn.
 
+### agent_peers
+
+List currently active peer sessions for cross-agent coordination.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `agent_id` | string | no | Current agent id (default `default`) |
+| `session_key` | string | no | Current session key (used to exclude self session) |
+| `include_self` | boolean | no | Include this agent's sessions (default `false`) |
+| `project` | string | no | Optional project filter |
+| `limit` | number | no | Max sessions to return |
+
+**Returns:** Object with `sessions` array and `count`.
+
+**Daemon endpoint:** `GET /api/cross-agent/presence`
+
+### agent_message_send
+
+Send a message to another agent/session or broadcast to all active peers.
+Supports local daemon delivery and optional ACP relay.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `content` | string | yes | Message body |
+| `to_agent_id` | string | no | Target agent id |
+| `to_session_key` | string | no | Target session key |
+| `broadcast` | boolean | no | Broadcast to all sessions |
+| `type` | enum | no | `assist_request`, `decision_update`, `info`, `question` |
+| `via` | enum | no | `local` (default) or `acp` |
+| `acp_base_url` | string | no | ACP server URL (required if `via=acp`) |
+| `acp_target_agent_name` | string | no | ACP target agent name (required if `via=acp`) |
+
+**Returns:** Stored message object including delivery status.
+
+**Daemon endpoint:** `POST /api/cross-agent/messages`
+
+### agent_message_inbox
+
+Read recent inbound cross-agent messages for an agent/session.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `agent_id` | string | no | Recipient agent id (default `default`) |
+| `session_key` | string | no | Recipient session key |
+| `since` | string | no | ISO timestamp lower bound |
+| `limit` | number | no | Max messages to return |
+| `include_sent` | boolean | no | Include messages sent by this agent |
+| `include_broadcast` | boolean | no | Include broadcast messages |
+
+**Returns:** Object with `items` array and `count`.
+
+**Daemon endpoint:** `GET /api/cross-agent/messages`
+
 
 ### secret_list
 

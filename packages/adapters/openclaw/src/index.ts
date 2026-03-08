@@ -365,6 +365,7 @@ export async function onUserPromptSubmit(
 	harness: string,
 	options: {
 		daemonUrl?: string;
+		agentId?: string;
 		userMessage: string;
 		lastAssistantMessage?: string;
 		sessionKey?: string;
@@ -380,6 +381,7 @@ export async function onUserPromptSubmit(
 			lastAssistantMessage: options.lastAssistantMessage,
 			sessionKey: options.sessionKey,
 			project: options.project,
+			agentId: options.agentId,
 			runtimePath: RUNTIME_PATH,
 		},
 		timeout: READ_TIMEOUT,
@@ -1207,10 +1209,16 @@ const signetPlugin = {
 		api.on("before_agent_start", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
 			if (!cfg.enabled) return undefined;
 
-			const sessionKey = (ctx as Record<string, unknown> | undefined)?.sessionKey as string | undefined;
+			const sessionContext = ctx as Record<string, unknown> | undefined;
+			const sessionKey = typeof sessionContext?.sessionKey === "string"
+				? sessionContext.sessionKey
+				: undefined;
+			const agentId = typeof sessionContext?.agentId === "string"
+				? sessionContext.agentId
+				: undefined;
 
 			// Session start — claim session with daemon
-			await onSessionStart("openclaw", { ...opts, sessionKey });
+			await onSessionStart("openclaw", { ...opts, sessionKey, agentId });
 
 			// If there's a prompt, do memory injection
 			const rawPrompt = event.prompt as string | undefined;
@@ -1219,6 +1227,7 @@ const signetPlugin = {
 				const lastAssistantMessage = extractLastAssistantMessage(event);
 				const result = await onUserPromptSubmit("openclaw", {
 					...opts,
+					agentId,
 					userMessage: prompt,
 					lastAssistantMessage,
 					sessionKey,
