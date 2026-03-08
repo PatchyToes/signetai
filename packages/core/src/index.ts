@@ -98,6 +98,10 @@ export type {
 	MigrationResult,
 } from "./migration";
 export * from "./constants";
+export {
+	SIGNET_GIT_PROTECTED_PATHS,
+	mergeSignetGitignoreEntries,
+} from "./gitignore";
 
 // Portable export/import
 export {

@@ -28,7 +28,9 @@ import {
 	buildSignetBlock,
 	keywordSearch,
 	parseSimpleYaml,
+	SIGNET_GIT_PROTECTED_PATHS,
 	stripSignetBlock,
+	mergeSignetGitignoreEntries,
 	vectorSearch,
 	CONNECTOR_PROVIDERS,
 	type ConnectorConfig,
@@ -197,6 +199,7 @@ import {
 	startUpdateTimer,
 	stopUpdateTimer,
 } from "./update-system";
+import { createAgentsWatcherIgnoreMatcher } from "./watcher-ignore";
 
 // Paths
 const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
@@ -7207,8 +7210,40 @@ let commitPending = false;
 let commitTimer: ReturnType<typeof setTimeout> | null = null;
 const COMMIT_DEBOUNCE_MS = 5000; // Wait 5 seconds after last change before committing
 
+function ensureProtectedGitignore(dir: string): void {
+	const gitignorePath = join(dir, ".gitignore");
+	const existingContent = existsSync(gitignorePath)
+		? readFileSync(gitignorePath, "utf-8")
+		: "";
+	const nextContent = mergeSignetGitignoreEntries(existingContent);
+	if (nextContent !== existingContent) {
+		writeFileSync(gitignorePath, nextContent, "utf-8");
+	}
+}
+
+async function gitUntrackProtectedFiles(dir: string): Promise<void> {
+	return new Promise((resolve) => {
+		const proc = spawn(
+			"git",
+			[
+				"rm",
+				"--cached",
+				"--ignore-unmatch",
+				"--quiet",
+				"--",
+				...SIGNET_GIT_PROTECTED_PATHS,
+			],
+			{ cwd: dir, stdio: "pipe", windowsHide: true },
+		);
+		proc.on("close", () => resolve());
+		proc.on("error", () => resolve());
+	});
+}
+
 async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void> {
 	if (!isGitRepo(dir)) return;
+	ensureProtectedGitignore(dir);
+	await gitUntrackProtectedFiles(dir);
 
 	const fileList = changedFiles.map((f) => f.replace(dir + "/", "")).join(", ");
 	const now = new Date();
@@ -7403,7 +7438,7 @@ function startFileWatcher() {
 		{
 			persistent: true,
 			ignoreInitial: true,
-			ignored: [/\.db-wal$/, /\.db-shm$/, /\.db-journal$/],
+			ignored: createAgentsWatcherIgnoreMatcher(AGENTS_DIR),
 		},
 	);
 

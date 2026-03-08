@@ -24,7 +24,7 @@
     "build": "bun run build.ts",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "dev": "bun --watch src/daemon.ts",
-    "start": "bun src/daemon.ts",
+    "start": "cd ../core && bun run build && cd ../daemon && bun src/daemon.ts",
     "install:service": "bun src/daemon.ts --install",
     "uninstall:service": "bun src/daemon.ts --uninstall",
     "test": "bun test"

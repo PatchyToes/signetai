@@ -29,6 +29,7 @@ import {
 	type ImportResult,
 	type MigrationResult,
 	type SchemaInfo,
+	SIGNET_GIT_PROTECTED_PATHS,
 	type SetupDetection,
 	type SkillsResult,
 	detectExistingSetup as detectExistingSetupCore,
@@ -41,6 +42,7 @@ import {
 	hasValidIdentity,
 	importMemoryLogs,
 	loadSqliteVec,
+	mergeSignetGitignoreEntries,
 	parseSimpleYaml,
 	resolvePrimaryPackageManager,
 	runMigrations,
@@ -189,7 +191,39 @@ async function gitInit(dir: string): Promise<boolean> {
 	});
 }
 
+function ensureProtectedGitignore(dir: string): void {
+	const gitignorePath = join(dir, ".gitignore");
+	const existingContent = existsSync(gitignorePath)
+		? readFileSync(gitignorePath, "utf-8")
+		: "";
+	const nextContent = mergeSignetGitignoreEntries(existingContent);
+	if (nextContent !== existingContent) {
+		writeFileSync(gitignorePath, nextContent, "utf-8");
+	}
+}
+
+async function gitUntrackProtectedFiles(dir: string): Promise<void> {
+	return new Promise((resolve) => {
+		const proc = spawn(
+			"git",
+			[
+				"rm",
+				"--cached",
+				"--ignore-unmatch",
+				"--quiet",
+				"--",
+				...SIGNET_GIT_PROTECTED_PATHS,
+			],
+			{ cwd: dir, stdio: "pipe", windowsHide: true },
+		);
+		proc.on("close", () => resolve());
+		proc.on("error", () => resolve());
+	});
+}
+
 async function gitAddAndCommit(dir: string, message: string): Promise<boolean> {
+	ensureProtectedGitignore(dir);
+	await gitUntrackProtectedFiles(dir);
 	return new Promise((resolve) => {
 		// First, git add -A
 		const add = spawn("git", ["add", "-A"], { cwd: dir, stdio: "pipe", windowsHide: true });
