@@ -148,7 +148,7 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 		decayIntervalSessions: 10,
 	},
 	predictor: {
-		enabled: false,
+		enabled: true,
 		trainIntervalSessions: 10,
 		minTrainingSessions: 10,
 		scoreTimeoutMs: 120,
@@ -710,7 +710,7 @@ export function loadPipelineConfig(
 
 		predictor: {
 			enabled: resolveBool(
-				predictorRaw?.enabled, undefined, d.predictor?.enabled ?? false,
+				predictorRaw?.enabled, undefined, d.predictor?.enabled ?? true,
 			),
 			trainIntervalSessions: clampPositive(
 				predictorRaw?.trainIntervalSessions,
