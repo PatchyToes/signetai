@@ -59,6 +59,7 @@ Commands Overview
 | `signet git` | Git sync management for ~/.agents |
 | `signet hook` | Lifecycle hook commands |
 | `signet update` | Check, install, and manage auto-updates |
+| `signet bypass` | Per-session hook bypass toggle |
 | `signet embed` | Manage memory embeddings |
 
 ---
@@ -684,6 +685,35 @@ run the new version: `signet daemon restart`.
 
 ---
 
+`signet bypass`
+---
+
+Toggle per-session hook bypass. When bypass is enabled for a session, all
+Signet hooks return empty no-op responses — the daemon is still running,
+but it stays silent for that session. MCP tools (memory_search, memory_store,
+etc.) continue to work normally.
+
+```bash
+signet bypass                   # List active sessions with bypass status
+signet bypass --list            # Same as above
+signet bypass <session-key>     # Enable bypass for a session
+signet bypass --off <session-key>  # Disable bypass for a session
+```
+
+Subcommands:
+
+| Command | Description |
+|---------|-------------|
+| `signet bypass` | List active sessions and their bypass status |
+| `signet bypass --list` | Same as `signet bypass` with no arguments |
+| `signet bypass <session-key>` | Enable bypass for the given session |
+| `signet bypass --off <session-key>` | Disable bypass for the given session |
+
+You can also bypass hooks entirely at the process level using the
+`SIGNET_BYPASS` environment variable (see below).
+
+---
+
 `signet embed`
 ---
 
@@ -726,6 +756,7 @@ Environment Variables
 | `SIGNET_PORT` | Daemon HTTP port | `3850` |
 | `SIGNET_PATH` | Base agents directory | `~/.agents` |
 | `SIGNET_HOST` | Daemon bind address | `localhost` |
+| `SIGNET_BYPASS` | Skip all hook processing (exit immediately) | unset |
 
 ---
 

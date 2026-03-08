@@ -25,6 +25,46 @@ Hooks are HTTP endpoints exposed by the Signet [[daemon]]. Harnesses call them a
 
 ---
 
+## Per-Session Bypass
+
+Bypass silences all Signet hooks for a single session without stopping the
+daemon. This is useful when you want to work without automatic memory
+extraction but still have access to MCP tools like `memory_search` and
+`memory_store`.
+
+### Activation paths
+
+1. **Environment variable** — Set `SIGNET_BYPASS=1` before starting a session.
+   The CLI hook process exits immediately with code 0; the daemon is never
+   contacted.
+
+2. **Daemon API / MCP tool / Dashboard** — The session is tracked normally,
+   but the bypass flag is flipped. All hook endpoints return empty no-op
+   responses with `bypassed: true` in the response body.
+
+### Behavior when bypassed
+
+When bypass is active for a session, all seven hook endpoints return empty
+no-op responses with `bypassed: true`:
+
+- `session-start` — no memories or identity injected
+- `user-prompt-submit` — no per-prompt context loaded
+- `session-end` — no memory extraction (but the session claim is still
+  released so future sessions are not blocked)
+- `pre-compaction` — no summary guidelines
+- `compaction-complete` — summary is discarded
+- `remember` — memory is not saved
+- `recall` — no search results returned
+
+The `synthesis` and `synthesis/complete` hooks are **not** affected by bypass.
+They are scheduler-driven and have no session context.
+
+The `SIGNET_BYPASS=1` environment variable causes the CLI hook process to
+exit immediately — the daemon is never contacted, so no session is created
+and no network request is made.
+
+---
+
 ## Session Start Hook
 
 **`POST /api/hooks/session-start`**

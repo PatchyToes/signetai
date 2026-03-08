@@ -115,9 +115,13 @@ composite health score derived from diagnostics.
     "provider": "ollama",
     "model": "nomic-embed-text",
     "available": true
-  }
+  },
+  "bypassedSessions": 1
 }
 ```
+
+The `bypassedSessions` field reports how many active sessions currently have
+bypass enabled (see [[#Sessions]]).
 
 
 ### GET /api/features
@@ -1650,6 +1654,79 @@ overwriting.
 ```json
 { "success": true }
 ```
+
+
+Sessions
+--------
+
+The sessions API exposes active session state, including per-session bypass
+toggles. When bypass is enabled for a session, all hook endpoints return
+empty no-op responses with `bypassed: true` — but MCP tools (memory_search,
+memory_store, etc.) continue to work normally.
+
+### GET /api/sessions
+
+List all active sessions with their bypass status.
+
+**Response**
+
+```json
+{
+  "sessions": [
+    {
+      "key": "session-uuid",
+      "harness": "claude-code",
+      "runtimePath": "plugin",
+      "startedAt": "2026-03-08T10:00:00.000Z",
+      "bypass": false
+    }
+  ]
+}
+```
+
+### GET /api/sessions/:key
+
+Get a single session's status by its session key.
+
+**Response**
+
+```json
+{
+  "key": "session-uuid",
+  "harness": "claude-code",
+  "runtimePath": "plugin",
+  "startedAt": "2026-03-08T10:00:00.000Z",
+  "bypass": false
+}
+```
+
+Returns `404` if the session key is not found.
+
+### POST /api/sessions/:key/bypass
+
+Toggle bypass for a session. When enabled, all hook endpoints for this session
+return empty no-op responses with `bypassed: true`. MCP tools are not affected.
+
+**Request body**
+
+```json
+{
+  "enabled": true
+}
+```
+
+`enabled` is required.
+
+**Response**
+
+```json
+{
+  "key": "session-uuid",
+  "bypass": true
+}
+```
+
+Returns `404` if the session key is not found.
 
 
 Git

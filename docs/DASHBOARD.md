@@ -152,6 +152,19 @@ The predictor is disabled by default; the tab shows a "not enabled"
 placeholder until `predictor.enabled: true` is set in `agent.yaml`.
 
 
+**Pipeline — Active Sessions**
+
+The Pipeline tab includes a SessionList component that displays all
+active sessions with per-session bypass toggles. Each row shows the
+session key, harness name, runtime path, and a Switch control to
+enable or disable bypass. Toggling the switch calls
+`POST /api/sessions/:key/bypass` (see [[api#Sessions]]). When bypass
+is on, all hooks for that session return empty no-op responses — MCP
+tools still work normally.
+
+The session list auto-refreshes every 30 seconds and is only visible
+when at least one session is active.
+
 **Logs** — Real-time daemon log stream via Server-Sent Events
 (`/api/logs/stream`). A Live/Stop toggle controls the stream.
 Entries are color-coded by level (`debug`, `info`, `warn`, `error`)
