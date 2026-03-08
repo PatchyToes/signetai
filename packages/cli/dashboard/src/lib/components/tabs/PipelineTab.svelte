@@ -18,6 +18,7 @@
 	import { workspaceLayout, syncLayoutToStorage } from "$lib/stores/workspace-layout.svelte";
 
 
+
 	function handleSelectNode(id: string) {
 		selectNode(pipeline.selectedNodeId === id ? null : id);
 	}

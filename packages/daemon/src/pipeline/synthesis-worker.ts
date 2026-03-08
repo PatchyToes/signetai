@@ -153,7 +153,11 @@ async function runSynthesis(config: PipelineSynthesisConfig): Promise<SynthesisR
 		}
 
 		// Write MEMORY.md via shared helper (handles backup)
-		writeMemoryMd(result.text);
+		const writeResult = writeMemoryMd(result.text);
+		if (!writeResult.ok) {
+			logger.error("synthesis", `MEMORY.md write refused: ${writeResult.error}`);
+			return "failed";
+		}
 
 		logger.info("synthesis", "MEMORY.md synthesized", {
 			sessionFiles: synthesisData.fileCount,
@@ -320,6 +324,11 @@ export function startSynthesisWorker(
 			logger.info("synthesis", "Synthesis worker stopped");
 		},
 		async drain() {
+			// Cancel any pending tick to prevent new synthesis starting
+			if (timer) {
+				clearTimeout(timer);
+				timer = null;
+			}
 			if (!isSynthesizing) return "completed";
 			let timeoutId: ReturnType<typeof setTimeout> | null = null;
 			let timedOut = false;
