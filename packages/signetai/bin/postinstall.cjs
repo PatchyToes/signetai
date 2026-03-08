@@ -93,7 +93,9 @@ async function downloadPredictor() {
 			https.get(targetUrl, (res) => {
 				if (res.statusCode === 301 || res.statusCode === 302) {
 					res.resume();
-					get(res.headers.location, redirects + 1);
+					const location = res.headers.location;
+					if (typeof location !== "string") { resolve(); return; }
+					get(location, redirects + 1);
 					return;
 				}
 				if (res.statusCode !== 200) {

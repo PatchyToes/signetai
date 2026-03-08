@@ -710,7 +710,7 @@ export function loadPipelineConfig(
 
 		predictor: {
 			enabled: resolveBool(
-				predictorRaw?.enabled, undefined, d.predictor?.enabled ?? false,
+				predictorRaw?.enabled, undefined, d.predictor?.enabled ?? true,
 			),
 			trainIntervalSessions: clampPositive(
 				predictorRaw?.trainIntervalSessions,
