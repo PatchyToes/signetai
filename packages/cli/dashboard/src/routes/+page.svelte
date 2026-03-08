@@ -3,6 +3,7 @@ import { browser } from "$app/environment";
 import { type DaemonStatus, type Memory, getStatus } from "$lib/api";
 import AppSidebar from "$lib/components/app-sidebar.svelte";
 import ExtensionBanner from "$lib/components/ExtensionBanner.svelte";
+import UpgradeBanner from "$lib/components/UpgradeBanner.svelte";
 import GlobalCommandPalette from "$lib/components/command/GlobalCommandPalette.svelte";
 import { PAGE_HEADERS } from "$lib/components/layout/page-headers";
 import { Button } from "$lib/components/ui/button/index.js";
@@ -61,26 +62,33 @@ function toggleTheme() {
 	localStorage.setItem("signet-theme", theme);
 }
 
-// --- Config file selection ---
-let selectedFile = $state("");
-
-$effect(() => {
-	if (!selectedFile && data.configFiles?.length) {
-		selectedFile = data.configFiles[0].name;
-	}
-});
-
-function selectFile(name: string) {
-	selectedFile = name;
-	setTab("config");
-}
-
 // --- Memory display ---
 const memoryDocs = $derived(data.memories ?? []);
+const totalMemoryDocs = $derived(data.memoryStats?.total ?? memoryDocs.length);
 
 const displayMemories = $derived(
 	mem.similarSourceId ? mem.similarResults : mem.searched || hasActiveFilters() ? mem.results : memoryDocs,
 );
+
+const memoryDocumentsLabel = $derived.by(() => {
+	if (mem.similarSourceId || mem.searched || hasActiveFilters()) {
+		return `${displayMemories.length} documents`;
+	}
+	if (totalMemoryDocs > memoryDocs.length) {
+		return `${memoryDocs.length} recent of ${totalMemoryDocs}`;
+	}
+	return `${displayMemories.length} documents`;
+});
+
+const memoryFooterLabel = $derived.by(() => {
+	if (mem.similarSourceId || mem.searched || hasActiveFilters()) {
+		return `${displayMemories.length} memory documents`;
+	}
+	if (totalMemoryDocs > memoryDocs.length) {
+		return `${memoryDocs.length} recent of ${totalMemoryDocs} memory documents`;
+	}
+	return `${displayMemories.length} memory documents`;
+});
 
 // --- Filter reactivity ---
 $effect(() => {
@@ -176,11 +184,11 @@ onMount(() => {
 let keyboardNavActive = $state(false);
 let engineTabFocus = $state<"tabs" | "content">("tabs");
 let engineTabIndex = $state(0);
-const ENGINE_TABS = ["settings", "pipeline", "connectors", "logs"] as const;
+const ENGINE_TABS = ["settings", "pipeline", "predictor", "connectors", "logs"] as const;
 
 let memoryTabFocus = $state<"tabs" | "content">("tabs");
 let memoryTabIndex = $state(0);
-const MEMORY_TABS = ["memory", "timeline", "embeddings"] as const;
+const MEMORY_TABS = ["memory", "timeline", "knowledge", "embeddings"] as const;
 
 function focusEngineTab(index: number): void {
 	engineTabIndex = index;
@@ -523,13 +531,25 @@ function handlePageClick(e: MouseEvent) {
 							}}
 						>Timeline</button>
 						<button
-							data-memory-tab="embeddings"
-							class={activeTab === 'embeddings' ? tabActive : tabInactive}
+							data-memory-tab="knowledge"
+							class={activeTab === 'knowledge' ? tabActive : tabInactive}
 							onclick={() => {
 								memoryTabIndex = 2;
 								memoryTabFocus = "tabs";
+								setTab("knowledge");
+								const tabButton = document.querySelector('[data-memory-tab="knowledge"]');
+								if (tabButton instanceof HTMLElement) {
+									tabButton.focus();
+								}
+							}}
+						>Knowledge</button>
+						<button
+							data-memory-tab="embeddings"
+							class={activeTab === 'embeddings' ? tabActive : tabInactive}
+							onclick={() => {
+								memoryTabIndex = 3;
+								memoryTabFocus = "tabs";
 								setTab("embeddings");
-								// Focus the clicked tab button
 								const tabButton = document.querySelector('[data-memory-tab="embeddings"]');
 								if (tabButton instanceof HTMLElement) {
 									tabButton.focus();
@@ -570,13 +590,25 @@ function handlePageClick(e: MouseEvent) {
 							}}
 						>Pipeline</button>
 						<button
-							data-engine-tab="connectors"
-							class={activeTab === 'connectors' ? tabActive : tabInactive}
+							data-engine-tab="predictor"
+							class={activeTab === 'predictor' ? tabActive : tabInactive}
 							onclick={() => {
 								engineTabIndex = 2;
 								engineTabFocus = "tabs";
+								setTab("predictor");
+								const tabButton = document.querySelector('[data-engine-tab="predictor"]');
+								if (tabButton instanceof HTMLElement) {
+									tabButton.focus();
+								}
+							}}
+						>Predictor</button>
+						<button
+							data-engine-tab="connectors"
+							class={activeTab === 'connectors' ? tabActive : tabInactive}
+							onclick={() => {
+								engineTabIndex = 3;
+								engineTabFocus = "tabs";
 								setTab("connectors");
-								// Focus the clicked tab button
 								const tabButton = document.querySelector('[data-engine-tab="connectors"]');
 								if (tabButton instanceof HTMLElement) {
 									tabButton.focus();
@@ -587,7 +619,7 @@ function handlePageClick(e: MouseEvent) {
 							data-engine-tab="logs"
 							class={activeTab === 'logs' ? tabActive : tabInactive}
 							onclick={() => {
-								engineTabIndex = 3;
+								engineTabIndex = 4;
 								engineTabFocus = "tabs";
 								setTab("logs");
 								// Focus the clicked tab button
@@ -603,7 +635,7 @@ function handlePageClick(e: MouseEvent) {
 			<div class="flex items-center gap-3">
 				{#if activeTab === "memory"}
 					<span class="sig-label">
-						{displayMemories.length} documents
+						{memoryDocumentsLabel}
 					</span>
 					{#if mem.searching}
 						<span class="sig-label">
@@ -632,6 +664,10 @@ function handlePageClick(e: MouseEvent) {
 					<span class="sig-label">
 						Constellation
 					</span>
+				{:else if activeTab === "knowledge"}
+					<span class="sig-label">
+						Knowledge graph
+					</span>
 				{:else if activeTab === "tasks"}
 					<Button
 						variant="outline"
@@ -646,29 +682,13 @@ function handlePageClick(e: MouseEvent) {
 			</div>
 		</header>
 
+		<UpgradeBanner {daemonStatus} />
 		<ExtensionBanner />
 
 		<div class="flex flex-1 flex-col min-h-0 relative" data-tab-panel-active="true">
 			{#snippet skeletonError(error: unknown)}
 				<div class="flex flex-1 items-center justify-center sig-label text-[var(--sig-danger)]">
 					Failed to load tab: {error instanceof Error ? error.message : "unknown error"}
-				</div>
-			{/snippet}
-
-			{#snippet skeletonEditor()}
-				<div class="flex flex-1 min-h-0">
-					<div class="w-48 border-r border-[var(--sig-border)] p-3 space-y-2">
-						<Skeleton class="h-4 w-full" />
-						<Skeleton class="h-4 w-3/4" />
-						<Skeleton class="h-4 w-5/6" />
-						<Skeleton class="h-4 w-2/3" />
-					</div>
-					<div class="flex-1 p-4 space-y-2">
-						{#each Array(12) as _}
-							<Skeleton class="h-3.5 w-full" />
-						{/each}
-						<Skeleton class="h-3.5 w-2/3" />
-					</div>
 				</div>
 			{/snippet}
 
@@ -711,14 +731,16 @@ function handlePageClick(e: MouseEvent) {
 				</div>
 			{/snippet}
 
-			{#if activeTab === "config"}
-				{#await import("$lib/components/tabs/ConfigTab.svelte")}
-					{@render skeletonEditor()}
+			{#if activeTab === "home"}
+				{#await import("$lib/components/tabs/HomeTab.svelte")}
+					{@render skeletonCards()}
 				{:then module}
 					<module.default
-						configFiles={data.configFiles}
-						{selectedFile}
-						onselectfile={selectFile}
+						identity={data.identity}
+						memories={memoryDocs}
+						memoryStats={data.memoryStats}
+						harnesses={data.harnesses}
+						{daemonStatus}
 					/>
 				{:catch error}
 					{@render skeletonError(error)}
@@ -754,6 +776,14 @@ function handlePageClick(e: MouseEvent) {
 					</div>
 				{:then module}
 					<module.default onopenglobalsimilar={openGlobalSimilar} />
+				{:catch error}
+					{@render skeletonError(error)}
+				{/await}
+			{:else if activeTab === "knowledge"}
+				{#await import("$lib/components/tabs/KnowledgeTab.svelte")}
+					{@render skeletonCards()}
+				{:then module}
+					<module.default />
 				{:catch error}
 					{@render skeletonError(error)}
 				{/await}
@@ -797,8 +827,24 @@ function handlePageClick(e: MouseEvent) {
 				{:catch error}
 					{@render skeletonError(error)}
 				{/await}
+			{:else if activeTab === "predictor"}
+				{#await import("$lib/components/predictor/PredictorTab.svelte")}
+					{@render skeletonCards()}
+				{:then module}
+					<module.default />
+				{:catch error}
+					{@render skeletonError(error)}
+				{/await}
 			{:else if activeTab === "connectors"}
 				{#await import("$lib/components/tabs/ConnectorsTab.svelte")}
+					{@render skeletonList()}
+				{:then module}
+					<module.default />
+				{:catch error}
+					{@render skeletonError(error)}
+				{/await}
+			{:else if activeTab === "changelog"}
+				{#await import("$lib/components/tabs/ChangelogTab.svelte")}
 					{@render skeletonList()}
 				{:then module}
 					<module.default />
@@ -815,18 +861,18 @@ function handlePageClick(e: MouseEvent) {
 				bg-[var(--sig-surface)]
 				sig-eyebrow shrink-0"
 		>
-			{#if activeTab === "config"}
-				<span>{selectedFile}</span>
+			{#if activeTab === "home"}
+				<span>Agent overview</span>
+				<span>dashboard home</span>
+			{:else if activeTab === "settings"}
+				<span>Settings</span>
 				<span class="flex items-center gap-2">
 					<kbd class="px-1 py-px text-[10px] text-[var(--sig-text-muted)]
 						bg-[var(--sig-surface-raised)]"
-					>Cmd+S</kbd> save
+					>Ctrl+S</kbd> save
 				</span>
-			{:else if activeTab === "settings"}
-				<span>YAML settings</span>
-				<span>agent.yaml</span>
 			{:else if activeTab === "memory"}
-				<span>{displayMemories.length} memory documents</span>
+				<span>{memoryFooterLabel}</span>
 				<span>
 					{#if mem.searching}
 						semantic search in progress
@@ -851,6 +897,9 @@ function handlePageClick(e: MouseEvent) {
 			{:else if activeTab === "embeddings"}
 				<span>Constellation</span>
 				<span>UMAP</span>
+			{:else if activeTab === "knowledge"}
+				<span>structural graph browser</span>
+				<span>entities, traversal, predictor slices</span>
 			{:else if activeTab === "logs"}
 				<span>Log viewer</span>
 				<span>daemon logs</span>
@@ -860,9 +909,15 @@ function handlePageClick(e: MouseEvent) {
 			{:else if activeTab === "tasks"}
 				<span>{ts.tasks.length} scheduled tasks</span>
 				<span>cron scheduler</span>
+			{:else if activeTab === "predictor"}
+				<span>Predictor Model</span>
+				<span>predictive memory scorer</span>
 			{:else if activeTab === "connectors"}
 				<span>platform harnesses + data sources</span>
 				<span>connector health</span>
+			{:else if activeTab === "changelog"}
+				<span>project docs + release history</span>
+				<span>github.com/Signet-AI/signetai</span>
 			{/if}
 		</div>
 		{/if}

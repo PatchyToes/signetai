@@ -28,7 +28,9 @@ import {
 	buildSignetBlock,
 	keywordSearch,
 	parseSimpleYaml,
+	SIGNET_GIT_PROTECTED_PATHS,
 	stripSignetBlock,
+	mergeSignetGitignoreEntries,
 	vectorSearch,
 	CONNECTOR_PROVIDERS,
 	type ConnectorConfig,
@@ -65,18 +67,41 @@ import {
 import { normalizeAndHashContent } from "./content-normalization";
 import { closeDbAccessor, getDbAccessor, initDbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceId, syncVecInsert, vectorToBlob } from "./db-helpers";
-import { createProviderTracker, getDiagnostics } from "./diagnostics";
-import { fetchEmbedding, resolveEmbeddingBaseUrl, resolveEmbeddingApiKey, setNativeFallbackToOllama } from "./embedding-fetch";
+import {
+	type DiagnosticsReport,
+	type PredictorHealthParams,
+	createProviderTracker,
+	getDiagnostics,
+	getPredictorHealth,
+} from "./diagnostics";
+import {
+	fetchEmbedding,
+	resolveEmbeddingBaseUrl,
+	resolveEmbeddingApiKey,
+	setNativeFallbackToOllama,
+} from "./embedding-fetch";
+import { detectDrift } from "./predictor-comparison";
+import { getPredictorState } from "./predictor-state";
 import { buildEmbeddingHealth } from "./embedding-health";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
-import { closeLlmProvider, initLlmProvider } from "./llm";
+import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
 import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
 import { type LogEntry, logger } from "./logger";
+import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
 import {
-	type EmbeddingConfig,
-	loadMemoryConfig,
-} from "./memory-config";
+	getAttributesForAspectFiltered,
+	getKnowledgeGraphForConstellation,
+	getEntityAspectsWithCounts,
+	getEntityDependenciesDetailed,
+	getEntityHealth,
+	getPinnedEntities,
+	getKnowledgeEntityDetail,
+	getKnowledgeStats,
+	pinEntity,
+	listKnowledgeEntities,
+	unpinEntity,
+} from "./knowledge-graph";
 import { buildMemoryTimeline } from "./memory-timeline";
 import { type RecallParams, hybridRecall } from "./memory-search";
 import { ONEPASSWORD_SERVICE_ACCOUNT_SECRET, importOnePasswordSecrets, listOnePasswordVaults } from "./onepassword.js";
@@ -92,6 +117,9 @@ import {
 	stopPipeline,
 } from "./pipeline";
 import { getGraphBoostIds } from "./pipeline/graph-search";
+import { getTraversalStatus, invalidateTraversalCache } from "./pipeline/graph-traversal";
+import { getFeedbackTelemetry } from "./pipeline/aspect-feedback";
+import { type PredictorClient, createPredictorClient, resolvePredictorCheckpointPath } from "./predictor-client";
 import {
 	createClaudeCodeProvider,
 	createCodexProvider,
@@ -111,13 +139,30 @@ import {
 	deduplicateMemories,
 	getDedupStats,
 	getEmbeddingGapStats,
+	pruneChunkGroupEntities,
+	pruneSingletonExtractedEntities,
+	reclassifyEntities,
 	reembedMissingMemories,
 	releaseStaleLeases,
 	requeueDeadJobs,
 	resyncVectorIndex,
+	structuralBackfill,
 	triggerRetentionSweep,
 } from "./repair-actions";
-import { CRON_PRESETS, computeNextRun, isHarnessAvailable, resolveSkillPrompt, startSchedulerWorker, validateCron } from "./scheduler";
+import {
+	getComparisonsByEntity,
+	getComparisonsByProject,
+	listComparisons,
+	listTrainingRuns,
+} from "./predictor-comparisons";
+import {
+	CRON_PRESETS,
+	computeNextRun,
+	isHarnessAvailable,
+	resolveSkillPrompt,
+	startSchedulerWorker,
+	validateCron,
+} from "./scheduler";
 import { emitTaskStream, getTaskStreamSnapshot, subscribeTaskStream } from "./scheduler/task-stream";
 import { deleteSecret, execWithSecrets, getSecret, hasSecret, listSecrets, putSecret } from "./secrets.js";
 import {
@@ -128,6 +173,7 @@ import {
 	pruneCheckpoints,
 	redactCheckpointRow,
 } from "./session-checkpoints";
+import { parseFeedback, recordAgentFeedback } from "./session-memories";
 import { type TelemetryCollector, type TelemetryEventType, createTelemetryCollector } from "./telemetry";
 import { type TimelineSources, buildTimeline } from "./timeline";
 import {
@@ -153,6 +199,7 @@ import {
 	startUpdateTimer,
 	stopUpdateTimer,
 } from "./update-system";
+import { createAgentsWatcherIgnoreMatcher } from "./watcher-ignore";
 
 // Paths
 const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
@@ -174,8 +221,17 @@ const repairLimiter = createRateLimiter();
 // Telemetry — assigned in main(), read by cleanup()
 let telemetryRef: TelemetryCollector | undefined;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
+let predictorClientRef: PredictorClient | null = null;
+let skillReconcilerHandle: ReconcilerHandle | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
+let diagnosticsCache:
+	| {
+			readonly report: DiagnosticsReport;
+			readonly expiresAt: number;
+	  }
+	| null = null;
+const DIAGNOSTICS_CACHE_TTL_MS = 2000;
 
 // Prevents concurrent UMAP computations for the same dimension count
 const projectionInFlight = new Map<number, Promise<void>>();
@@ -202,6 +258,114 @@ function hasMemoriesSessionIdColumn(db: Database): boolean {
 		}>
 	).some((column) => column.name === "session_id");
 	return hasMemoriesSessionIdColumnCache;
+}
+
+/** Public accessor for the predictor client singleton (used by hooks). */
+export function getPredictorClient(): PredictorClient | null {
+	return predictorClientRef;
+}
+
+/** Record predictor latency from hooks (exposed for cross-module use). */
+export function recordPredictorLatency(operation: "predictor_score" | "predictor_train", ms: number): void {
+	analyticsCollector.recordLatency(operation, ms);
+}
+
+function invalidateDiagnosticsCache(): void {
+	diagnosticsCache = null;
+}
+
+function getCachedDiagnosticsReport(): DiagnosticsReport {
+	const now = Date.now();
+	if (diagnosticsCache !== null && diagnosticsCache.expiresAt > now) {
+		return diagnosticsCache.report;
+	}
+
+	const report = getDbAccessor().withReadDb((db) =>
+		getDiagnostics(db, providerTracker, getUpdateState(), buildPredictorHealthParams()),
+	);
+	diagnosticsCache = {
+		report,
+		expiresAt: now + DIAGNOSTICS_CACHE_TTL_MS,
+	};
+	return report;
+}
+
+/**
+ * Build predictor health params from current runtime state.
+ * Fail-open: if anything goes wrong reading state, returns disabled.
+ */
+function buildPredictorHealthParams(): PredictorHealthParams {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const predictorCfg = cfg.pipelineV2.predictor;
+	if (!predictorCfg?.enabled) {
+		return {
+			enabled: false,
+			sidecarAlive: false,
+			crashCount: 0,
+			crashDisabled: false,
+			modelVersion: 0,
+			trainingSessions: 0,
+			successRate: 0,
+			alpha: 1.0,
+			coldStartExited: false,
+			lastTrainedAt: null,
+		};
+	}
+
+	const client = getPredictorClient();
+	const agentId = "default";
+	const state = getPredictorState(agentId);
+
+	// Training session count from DB
+	let trainingSessions = 0;
+	let modelVersion = 0;
+	try {
+		const row = getDbAccessor().withReadDb(
+			(db) =>
+				db
+					.prepare(
+						`SELECT COUNT(*) as cnt, MAX(model_version) as ver
+				 FROM predictor_training_log
+				 WHERE agent_id = ?`,
+					)
+					.get(agentId) as { cnt: number; ver: number | null } | undefined,
+		);
+		trainingSessions = row?.cnt ?? 0;
+		modelVersion = row?.ver ?? 0;
+	} catch {
+		// table may not exist
+	}
+
+	// Latency from analytics collector
+	const latencySnapshot = analyticsCollector.getLatency();
+	const avgScoreLatencyMs = latencySnapshot.predictor_score.p50 > 0 ? latencySnapshot.predictor_score.p50 : undefined;
+
+	// Drift detection (fail-open: false on error)
+	let driftDetected = false;
+	try {
+		const accessor = getDbAccessor();
+		const driftWindow = predictorCfg.driftResetWindow ?? 20;
+		const driftResult = detectDrift(agentId, accessor, driftWindow);
+		driftDetected = driftResult.drifting;
+	} catch {
+		// table may not exist or accessor not ready
+	}
+
+	return {
+		enabled: true,
+		sidecarAlive: client !== null && client.isAlive(),
+		crashCount: client?.crashCount ?? 0,
+		crashDisabled: client?.crashDisabled ?? false,
+		modelVersion,
+		trainingSessions,
+		successRate: state.successRate,
+		alpha: state.alpha,
+		coldStartExited: state.coldStartExited,
+		lastTrainedAt: state.lastTrainingAt,
+		avgScoreLatencyMs,
+		scoreTimeoutMs: predictorCfg.scoreTimeoutMs,
+		driftDetected,
+	};
 }
 
 function getVersionFromPackageJson(packageJsonPath: string): string | null {
@@ -995,6 +1159,11 @@ app.use("/api/analytics", async (c, next) => {
 	return requirePermission("analytics", authConfig)(c, next);
 });
 app.use("/api/analytics/*", async (c, next) => {
+	return requirePermission("analytics", authConfig)(c, next);
+});
+
+// Predictor reporting — read-only (uses analytics permission)
+app.use("/api/predictor/*", async (c, next) => {
 	return requirePermission("analytics", authConfig)(c, next);
 });
 
@@ -1881,8 +2050,8 @@ app.post("/api/memory/remember", async (c) => {
 			getDbAccessor().withWriteTx((db) => {
 				db.prepare(
 					`INSERT INTO entities
-					 (id, name, canonical_name, entity_type, mentions, created_at, updated_at)
-					 VALUES (?, ?, ?, 'chunk_group', 0, ?, ?)`,
+					 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
+					 VALUES (?, ?, ?, 'chunk_group', 'default', 0, ?, ?)`,
 				).run(groupId, `chunk-group:${groupId}`, `chunk-group:${groupId}`, now, now);
 			});
 		} catch (e) {
@@ -2255,9 +2424,7 @@ app.get("/api/memory/:id", (c) => {
 	}
 
 	const row = getDbAccessor().withReadDb((db) => {
-		const sessionSelect = hasMemoriesSessionIdColumn(db)
-			? "session_id,"
-			: "NULL AS session_id,";
+		const sessionSelect = hasMemoriesSessionIdColumn(db) ? "session_id," : "NULL AS session_id,";
 
 		return db
 			.prepare(
@@ -2279,10 +2446,10 @@ app.get("/api/memory/:id", (c) => {
 		typeof row.session_id === "string"
 			? row.session_id
 			: typeof row.source_id === "string" &&
-				  typeof row.source_type === "string" &&
-				  row.source_type.startsWith("session")
-			? row.source_id
-			: undefined;
+					typeof row.source_type === "string" &&
+					row.source_type.startsWith("session")
+				? row.source_id
+				: undefined;
 
 	return c.json({
 		...row,
@@ -2672,6 +2839,30 @@ app.delete("/api/memory/:id", async (c) => {
 	return c.json({ error: "Unknown mutation result" }, 500);
 });
 
+// -----------------------------------------------------------------------
+// POST /api/memory/feedback — record agent relevance feedback for memories
+// -----------------------------------------------------------------------
+app.post("/api/memory/feedback", async (c) => {
+	const payload = toRecord(await c.req.json().catch(() => null));
+	if (!payload) {
+		return c.json({ error: "Invalid JSON body" }, 400);
+	}
+
+	const sessionKey = parseOptionalString(payload.sessionKey);
+	const feedback = payload.feedback;
+	if (!sessionKey || !feedback) {
+		return c.json({ error: "sessionKey and feedback required" }, 400);
+	}
+
+	const parsed = parseFeedback(feedback);
+	if (!parsed) {
+		return c.json({ error: "Invalid feedback format — expected map of ID to number (-1 to 1)" }, 400);
+	}
+
+	recordAgentFeedback(sessionKey, parsed);
+	return c.json({ ok: true, recorded: Object.keys(parsed).length });
+});
+
 app.post("/api/memory/forget", async (c) => {
 	const payload = toRecord(await c.req.json().catch(() => null));
 	if (!payload) {
@@ -2971,7 +3162,8 @@ app.post("/api/memory/recall", async (c) => {
 
 	const cfg = loadMemoryConfig(AGENTS_DIR);
 	try {
-		const result = await hybridRecall({ ...body, query }, cfg, fetchEmbedding);
+		const agentId = body.agentId ?? c.req.header("x-signet-agent-id") ?? "default";
+		const result = await hybridRecall({ ...body, query, agentId }, cfg, fetchEmbedding);
 		return c.json(result);
 	} catch (e) {
 		logger.error("memory", "Recall failed", e as Error);
@@ -3644,10 +3836,7 @@ type ConnectorSyncStartOutcome =
 	| { status: "unsupported"; provider: string }
 	| { status: "error"; error: string };
 
-function startConnectorSync(
-	connectorId: string,
-	mode: "incremental" | "full",
-): ConnectorSyncStartOutcome {
+function startConnectorSync(connectorId: string, mode: "incremental" | "full"): ConnectorSyncStartOutcome {
 	const accessor = getDbAccessor();
 	const connectorRow = getConnector(accessor, connectorId);
 	if (!connectorRow) {
@@ -3669,9 +3858,7 @@ function startConnectorSync(
 		parsed === null ||
 		!("provider" in parsed) ||
 		typeof (parsed as Record<string, unknown>).provider !== "string" ||
-		!(CONNECTOR_PROVIDERS as readonly string[]).includes(
-			(parsed as Record<string, unknown>).provider as string,
-		)
+		!(CONNECTOR_PROVIDERS as readonly string[]).includes((parsed as Record<string, unknown>).provider as string)
 	) {
 		return { status: "error", error: "Invalid connector config" };
 	}
@@ -3837,15 +4024,18 @@ app.post("/api/connectors/resync", async (c) => {
 		});
 	} catch (e) {
 		logger.error("connectors", "Failed to trigger bulk resync", e instanceof Error ? e : new Error(String(e)));
-		return c.json({
-			status: "error",
-			error: "Failed to trigger connector re-sync",
-			total: 0,
-			started: 0,
-			alreadySyncing: 0,
-			unsupported: 0,
-			failed: 0,
-		}, 500);
+		return c.json(
+			{
+				status: "error",
+				error: "Failed to trigger connector re-sync",
+				total: 0,
+				started: 0,
+				alreadySyncing: 0,
+				unsupported: 0,
+				failed: 0,
+			},
+			500,
+		);
 	}
 });
 
@@ -3963,8 +4153,10 @@ app.get("/api/connectors/:id/health", (c) => {
 });
 
 // Skills routes (extracted to routes/skills.ts)
-import { mountSkillsRoutes } from "./routes/skills.js";
+import { mountSkillsRoutes, setFetchEmbedding } from "./routes/skills.js";
+import { startReconciler, type ReconcilerHandle } from "./pipeline/skill-reconciler.js";
 mountSkillsRoutes(app);
+setFetchEmbedding(fetchEmbedding);
 
 // Marketplace routes (MCP servers catalog + routing)
 import { mountMarketplaceRoutes } from "./routes/marketplace.js";
@@ -3974,13 +4166,17 @@ mountMarketplaceRoutes(app);
 import { mountMarketplaceReviewsRoutes } from "./routes/marketplace-reviews.js";
 mountMarketplaceReviewsRoutes(app);
 
+// Changelog + roadmap routes (proxies GitHub raw content with local fallback)
+import { mountChangelogRoutes } from "./routes/changelog.js";
+mountChangelogRoutes(app);
+
 // ============================================================================
 // Harnesses API
 // ============================================================================
 
 app.get("/api/harnesses", async (c) => {
 	const configs = [
-		{ name: "Claude Code", id: "claude-code", path: join(homedir(), ".claude", "CLAUDE.md") },
+		{ name: "Claude Code", id: "claude-code", path: join(homedir(), ".claude", "settings.json") },
 		{
 			name: "OpenCode",
 			id: "opencode",
@@ -4325,11 +4521,13 @@ import {
 	handleSessionStart,
 	handleSynthesisRequest,
 	handleUserPromptSubmit,
+	resetPromptDedup,
 	writeMemoryMd,
 } from "./hooks.js";
 
 import {
 	type RuntimePath,
+	activeSessionCount,
 	claimSession,
 	getSessionPath,
 	releaseSession,
@@ -4408,7 +4606,7 @@ app.post("/api/hooks/session-start", async (c) => {
 		}
 
 		stampHarness(body.harness);
-		const result = handleSessionStart(body);
+		const result = await handleSessionStart(body);
 		return c.json(result);
 	} catch (e) {
 		logger.error("hooks", "Session start hook failed", e as Error);
@@ -4424,10 +4622,8 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 	try {
 		const body = (await c.req.json()) as UserPromptSubmitRequest;
 
-		const hasUserMessage =
-			typeof body.userMessage === "string" && body.userMessage.trim().length > 0;
-		const hasUserPrompt =
-			typeof body.userPrompt === "string" && body.userPrompt.trim().length > 0;
+		const hasUserMessage = typeof body.userMessage === "string" && body.userMessage.trim().length > 0;
+		const hasUserPrompt = typeof body.userPrompt === "string" && body.userPrompt.trim().length > 0;
 
 		if (!body.harness || (!hasUserMessage && !hasUserPrompt)) {
 			return c.json({ error: "harness and userMessage or userPrompt are required" }, 400);
@@ -4602,6 +4798,12 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 			harness: body.harness,
 			memoryId: summaryId,
 		});
+
+		// Compaction wipes conversation context — reset prompt-submit dedup
+		// so previously-injected memories are eligible for re-injection.
+		if (body.sessionKey) {
+			resetPromptDedup(body.sessionKey);
+		}
 
 		return c.json({
 			success: true,
@@ -5052,7 +5254,19 @@ app.post("/api/tasks", async (c) => {
 			 (id, name, prompt, cron_expression, harness, working_directory,
 			  enabled, next_run_at, skill_name, skill_mode, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-		).run(id, name, prompt, cronExpression, harness, workingDirectory || null, nextRunAt, skillName || null, skillMode || null, now, now);
+		).run(
+			id,
+			name,
+			prompt,
+			cronExpression,
+			harness,
+			workingDirectory || null,
+			nextRunAt,
+			skillName || null,
+			skillMode || null,
+			now,
+			now,
+		);
 	});
 
 	logger.info("scheduler", `Task created: ${name}`, { taskId: id });
@@ -5110,8 +5324,8 @@ app.patch("/api/tasks/:id", async (c) => {
 				: existing.next_run_at
 			: existing.next_run_at;
 
-	const skillName = body.skillName !== undefined ? (body.skillName || null) : existing.skill_name;
-	const skillMode = body.skillMode !== undefined ? (body.skillMode || null) : existing.skill_mode;
+	const skillName = body.skillName !== undefined ? body.skillName || null : existing.skill_name;
+	const skillMode = body.skillMode !== undefined ? body.skillMode || null : existing.skill_mode;
 
 	if (skillName && (skillName.includes("/") || skillName.includes(".."))) {
 		return c.json({ error: "Invalid skill name" }, 400);
@@ -5201,8 +5415,8 @@ app.post("/api/tasks/:id/run", async (c) => {
 
 	// Narrow task fields from raw SQL result
 	const taskPrompt = typeof task.prompt === "string" ? task.prompt : null;
-	const taskHarness = task.harness === "claude-code" || task.harness === "opencode" || task.harness === "codex"
-		? task.harness : null;
+	const taskHarness =
+		task.harness === "claude-code" || task.harness === "opencode" || task.harness === "codex" ? task.harness : null;
 	if (!taskPrompt || !taskHarness) {
 		return c.json({ error: "Task has invalid prompt or harness" }, 500);
 	}
@@ -5216,34 +5430,28 @@ app.post("/api/tasks/:id/run", async (c) => {
 	// Spawn in background (don't await)
 	import("./scheduler/spawn").then((mod) => {
 		mod
-			.spawnTask(
-				taskHarness,
-				effectivePrompt,
-				taskWorkingDir,
-				undefined,
-				{
-					onStdoutChunk: (chunk) => {
-						emitTaskStream({
-							type: "run-output",
-							taskId,
-							runId,
-							stream: "stdout",
-							chunk,
-							timestamp: new Date().toISOString(),
-						});
-					},
-					onStderrChunk: (chunk) => {
-						emitTaskStream({
-							type: "run-output",
-							taskId,
-							runId,
-							stream: "stderr",
-							chunk,
-							timestamp: new Date().toISOString(),
-						});
-					},
+			.spawnTask(taskHarness, effectivePrompt, taskWorkingDir, undefined, {
+				onStdoutChunk: (chunk) => {
+					emitTaskStream({
+						type: "run-output",
+						taskId,
+						runId,
+						stream: "stdout",
+						chunk,
+						timestamp: new Date().toISOString(),
+					});
 				},
-			)
+				onStderrChunk: (chunk) => {
+					emitTaskStream({
+						type: "run-output",
+						taskId,
+						runId,
+						stream: "stderr",
+						chunk,
+						timestamp: new Date().toISOString(),
+					});
+				},
+			})
 			.then((result) => {
 				const completedAt = new Date().toISOString();
 				const status =
@@ -5310,13 +5518,31 @@ app.get("/api/status", (c) => {
 
 	let health: { score: number; status: string } | undefined;
 	try {
-		const report = getDbAccessor().withReadDb((db) => getDiagnostics(db, providerTracker, getUpdateState()));
+		const report = getCachedDiagnosticsReport();
 		health = report.composite;
 	} catch {
 		// DB not ready yet — omit health
 	}
 
 	const us = getUpdateState();
+
+	// Read agent.created from agent.yaml for agentCreatedAt
+	let agentCreatedAt: string | null = null;
+	try {
+		for (const p of [join(AGENTS_DIR, "agent.yaml"), join(AGENTS_DIR, "AGENT.yaml")]) {
+			if (existsSync(p)) {
+				const yaml = parseSimpleYaml(readFileSync(p, "utf-8"));
+				const agent = yaml.agent as Record<string, unknown> | undefined;
+				if (agent?.created) {
+					agentCreatedAt = String(agent.created);
+				}
+				break;
+			}
+		}
+	} catch {
+		/* ignore parse errors */
+	}
+
 	return c.json({
 		status: "running",
 		version: CURRENT_VERSION,
@@ -5328,6 +5554,8 @@ app.get("/api/status", (c) => {
 		agentsDir: AGENTS_DIR,
 		memoryDb: existsSync(MEMORY_DB),
 		pipelineV2: config.pipelineV2,
+		activeSessions: activeSessionCount(),
+		agentCreatedAt,
 		...(health ? { health } : {}),
 		update: {
 			currentVersion: us.currentVersion,
@@ -5352,17 +5580,61 @@ app.get("/api/status", (c) => {
 });
 
 // ============================================================================
+// Home greeting
+// ============================================================================
+
+let greetingCache: { greeting: string; cachedAt: string; expires: number } | null = null;
+
+app.get("/api/home/greeting", async (c) => {
+	const now = Date.now();
+	if (greetingCache && now < greetingCache.expires) {
+		return c.json({ greeting: greetingCache.greeting, cachedAt: greetingCache.cachedAt });
+	}
+
+	// Read SOUL.md for voice context
+	const soulPath = join(AGENTS_DIR, "SOUL.md");
+	let soulContent = "";
+	try {
+		soulContent = readFileSync(soulPath, "utf-8").slice(0, 500);
+	} catch {
+		/* no soul file */
+	}
+
+	const hour = new Date().getHours();
+	const timeOfDay = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+
+	// Try LLM greeting
+	try {
+		const provider = getLlmProvider();
+		if (provider) {
+			const prompt = `Given this agent personality description:\n\n${soulContent}\n\nGenerate a brief ${timeOfDay} greeting in this character's voice. Max 15 words. No emojis. No quotes around the greeting.`;
+			const text = await provider.generate(prompt, { timeoutMs: 10000, maxTokens: 50 });
+			const greeting = text.trim().replace(/^["']|["']$/g, "");
+			greetingCache = { greeting, cachedAt: new Date().toISOString(), expires: now + 3600000 };
+			return c.json({ greeting: greetingCache.greeting, cachedAt: greetingCache.cachedAt });
+		}
+	} catch {
+		/* LLM unavailable */
+	}
+
+	// Fallback
+	const fallback = `good ${timeOfDay}`;
+	greetingCache = { greeting: fallback, cachedAt: new Date().toISOString(), expires: now + 3600000 };
+	return c.json({ greeting: greetingCache.greeting, cachedAt: greetingCache.cachedAt });
+});
+
+// ============================================================================
 // Diagnostics & Repair (Phase F)
 // ============================================================================
 
 app.get("/api/diagnostics", (c) => {
-	const report = getDbAccessor().withReadDb((db) => getDiagnostics(db, providerTracker, getUpdateState()));
+	const report = getCachedDiagnosticsReport();
 	return c.json(report);
 });
 
 app.get("/api/diagnostics/:domain", (c) => {
 	const domain = c.req.param("domain");
-	const report = getDbAccessor().withReadDb((db) => getDiagnostics(db, providerTracker, getUpdateState()));
+	const report = getCachedDiagnosticsReport();
 
 	const domainData = report[domain as keyof typeof report];
 	if (!domainData || typeof domainData === "string") {
@@ -5400,16 +5672,14 @@ app.get("/api/pipeline/status", (c) => {
 			return out;
 		};
 
-		const diagnostics = getDiagnostics(db, providerTracker, getUpdateState());
-
 		return {
 			queues: {
 				memory: toCountMap(memoryRows),
 				summary: toCountMap(summaryRows),
 			},
-			diagnostics,
 		};
 	});
+	const diagnostics = getCachedDiagnosticsReport();
 
 	const pipelineV2 = cfg.pipelineV2;
 	const mode = !pipelineV2.enabled
@@ -5420,13 +5690,58 @@ app.get("/api/pipeline/status", (c) => {
 				? "shadow"
 				: "controlled-write";
 
+	// Predictor sidecar snapshot for pipeline overview
+	const predictorHealth = diagnostics.predictor;
+	const predictorSnapshot = {
+		running: predictorHealth.status !== "disabled" && predictorHealth.sidecarAlive,
+		modelReady: predictorHealth.coldStartExited,
+		coldStartExited: predictorHealth.coldStartExited,
+		successRate: predictorHealth.successRate,
+		alpha: predictorHealth.alpha,
+	};
+
 	return c.json({
 		workers: getPipelineWorkerStatus(),
 		queues: dbData.queues,
-		diagnostics: dbData.diagnostics,
+		diagnostics,
 		latency: analyticsCollector.getLatency(),
 		errorSummary: analyticsCollector.getErrorSummary(),
 		mode,
+		feedback: getFeedbackTelemetry(),
+		traversal: {
+			enabled: pipelineV2.graph.enabled && (pipelineV2.traversal?.enabled ?? true),
+			lastRun: getTraversalStatus(),
+		},
+		predictor: predictorSnapshot,
+	});
+});
+
+app.get("/api/predictor/status", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const predictorCfg = cfg.pipelineV2.predictor;
+
+	if (!predictorCfg?.enabled) {
+		return c.json({ enabled: false, status: null });
+	}
+
+	const client = getPredictorClient();
+	if (client === null) {
+		return c.json({
+			enabled: true,
+			alive: false,
+			crashCount: 0,
+			crashDisabled: false,
+			status: null,
+		});
+	}
+
+	const status = await client.status();
+	return c.json({
+		enabled: true,
+		alive: client.isAlive(),
+		crashCount: client.crashCount,
+		crashDisabled: client.crashDisabled,
+		status,
 	});
 });
 
@@ -5574,6 +5889,91 @@ app.post("/api/repair/deduplicate", async (c) => {
 	return c.json(result, repairHttpStatus(result));
 });
 
+app.post("/api/repair/reclassify-entities", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const ctx = resolveRepairContext(c);
+	let batchSize = 50;
+	let dryRun = false;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = body.batchSize;
+		if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
+	} catch {
+		// no body or invalid JSON — use defaults
+	}
+	let provider: import("@signet/core").LlmProvider | null = null;
+	try {
+		provider = getLlmProvider();
+	} catch {
+		// provider not initialized
+	}
+	const result = await reclassifyEntities(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, provider, {
+		batchSize,
+		dryRun,
+	});
+	return c.json(result, repairHttpStatus(result));
+});
+
+app.post("/api/repair/prune-chunk-groups", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const ctx = resolveRepairContext(c);
+	let batchSize = 500;
+	let dryRun = false;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = body.batchSize;
+		if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
+	} catch {
+		// no body or invalid JSON — use defaults
+	}
+	const result = pruneChunkGroupEntities(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, {
+		batchSize,
+		dryRun,
+	});
+	return c.json(result, repairHttpStatus(result));
+});
+
+app.post("/api/repair/prune-singleton-entities", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const ctx = resolveRepairContext(c);
+	let batchSize = 200;
+	let dryRun = false;
+	let maxMentions = 1;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = body.batchSize;
+		if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
+		if (typeof body?.maxMentions === "number") maxMentions = body.maxMentions;
+	} catch {
+		// no body or invalid JSON — use defaults
+	}
+	const result = pruneSingletonExtractedEntities(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, {
+		batchSize,
+		dryRun,
+		maxMentions,
+	});
+	return c.json(result, repairHttpStatus(result));
+});
+
+app.post("/api/repair/structural-backfill", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const ctx = resolveRepairContext(c);
+	let batchSize = 100;
+	let dryRun = false;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = body.batchSize;
+		if (typeof body?.dryRun === "boolean") dryRun = body.dryRun;
+	} catch {
+		// no body or invalid JSON — use defaults
+	}
+	const result = structuralBackfill(getDbAccessor(), cfg.pipelineV2, ctx, repairLimiter, {
+		batchSize,
+		dryRun,
+	});
+	return c.json(result, repairHttpStatus(result));
+});
+
 // ============================================================================
 // Session Checkpoints (Continuity Protocol)
 // ============================================================================
@@ -5604,6 +6004,140 @@ app.get("/api/checkpoints/:sessionKey", (c) => {
 	const rows = getCheckpointsBySession(getDbAccessor(), sessionKey);
 	const redacted = rows.map(redactCheckpointRow);
 	return c.json({ checkpoints: redacted, count: redacted.length });
+});
+
+// ============================================================================
+// Knowledge Graph
+// ============================================================================
+
+app.get("/api/knowledge/entities", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const limitParam = Number.parseInt(c.req.query("limit") ?? "50", 10);
+	const offsetParam = Number.parseInt(c.req.query("offset") ?? "0", 10);
+	const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+	const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0;
+
+	return c.json({
+		items: listKnowledgeEntities(getDbAccessor(), {
+			agentId,
+			type: c.req.query("type") ?? undefined,
+			query: c.req.query("q") ?? undefined,
+			limit,
+			offset,
+		}),
+		limit,
+		offset,
+	});
+});
+
+app.post("/api/knowledge/entities/:id/pin", async (c) => {
+	return requirePermission("modify", authConfig)(c, async () => {
+		const agentId = c.req.query("agent_id") ?? "default";
+		pinEntity(getDbAccessor(), c.req.param("id"), agentId);
+		const entity = getKnowledgeEntityDetail(getDbAccessor(), c.req.param("id"), agentId);
+		if (!entity?.entity.pinnedAt) {
+			return c.json({ error: "Entity not found" }, 404);
+		}
+		return c.json({ pinned: true, pinnedAt: entity.entity.pinnedAt });
+	});
+});
+
+app.delete("/api/knowledge/entities/:id/pin", async (c) => {
+	return requirePermission("modify", authConfig)(c, async () => {
+		const agentId = c.req.query("agent_id") ?? "default";
+		unpinEntity(getDbAccessor(), c.req.param("id"), agentId);
+		return c.json({ pinned: false });
+	});
+});
+
+app.get("/api/knowledge/entities/pinned", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	return c.json(getPinnedEntities(getDbAccessor(), agentId));
+});
+
+app.get("/api/knowledge/entities/health", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const minComparisonsParam = Number.parseInt(c.req.query("min_comparisons") ?? "3", 10);
+	return c.json(
+		getEntityHealth(
+			getDbAccessor(),
+			agentId,
+			c.req.query("since") ?? undefined,
+			Number.isFinite(minComparisonsParam) ? Math.max(minComparisonsParam, 1) : 3,
+		),
+	);
+});
+
+app.get("/api/knowledge/entities/:id", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const entity = getKnowledgeEntityDetail(getDbAccessor(), c.req.param("id"), agentId);
+	if (!entity) {
+		return c.json({ error: "Entity not found" }, 404);
+	}
+	return c.json(entity);
+});
+
+app.get("/api/knowledge/entities/:id/aspects", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	return c.json({
+		items: getEntityAspectsWithCounts(getDbAccessor(), c.req.param("id"), agentId),
+	});
+});
+
+app.get("/api/knowledge/entities/:id/aspects/:aspectId/attributes", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const limitParam = Number.parseInt(c.req.query("limit") ?? "50", 10);
+	const offsetParam = Number.parseInt(c.req.query("offset") ?? "0", 10);
+	const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+	const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0;
+	const kind = c.req.query("kind");
+	const status = c.req.query("status");
+
+	return c.json({
+		items: getAttributesForAspectFiltered(getDbAccessor(), {
+			entityId: c.req.param("id"),
+			aspectId: c.req.param("aspectId"),
+			agentId,
+			kind: kind === "attribute" || kind === "constraint" ? kind : undefined,
+			status: status === "active" || status === "superseded" || status === "deleted" ? status : undefined,
+			limit,
+			offset,
+		}),
+		limit,
+		offset,
+	});
+});
+
+app.get("/api/knowledge/entities/:id/dependencies", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const directionQuery = c.req.query("direction");
+	const direction =
+		directionQuery === "incoming" || directionQuery === "outgoing" || directionQuery === "both"
+			? directionQuery
+			: "both";
+	return c.json({
+		items: getEntityDependenciesDetailed(getDbAccessor(), {
+			entityId: c.req.param("id"),
+			agentId,
+			direction,
+		}),
+	});
+});
+
+app.get("/api/knowledge/stats", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	return c.json(getKnowledgeStats(getDbAccessor(), agentId));
+});
+
+app.get("/api/knowledge/traversal/status", (c) => {
+	return c.json({
+		status: getTraversalStatus(),
+	});
+});
+
+app.get("/api/knowledge/constellation", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	return c.json(getKnowledgeGraphForConstellation(getDbAccessor(), agentId));
 });
 
 // ============================================================================
@@ -5638,7 +6172,9 @@ app.get("/api/analytics/logs", (c) => {
 });
 
 app.get("/api/analytics/memory-safety", (c) => {
-	const mutationHealth = getDbAccessor().withReadDb((db) => getDiagnostics(db, providerTracker, getUpdateState()));
+	const mutationHealth = getDbAccessor().withReadDb((db) =>
+		getDiagnostics(db, providerTracker, getUpdateState(), buildPredictorHealthParams()),
+	);
 	const recentMutationErrors = analyticsCollector.getErrors({
 		stage: "mutation",
 		limit: 50,
@@ -5721,6 +6257,121 @@ app.get("/api/analytics/continuity/latest", (c) => {
 	return c.json({ scores });
 });
 
+app.get("/api/predictor/comparisons/by-project", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const since = c.req.query("since") ?? undefined;
+	return c.json({
+		items: getComparisonsByProject(getDbAccessor(), agentId, since),
+	});
+});
+
+app.get("/api/predictor/comparisons/by-entity", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const since = c.req.query("since") ?? undefined;
+	return c.json({
+		items: getComparisonsByEntity(getDbAccessor(), agentId, since),
+	});
+});
+
+app.get("/api/predictor/comparisons", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const limitParam = Number.parseInt(c.req.query("limit") ?? "50", 10);
+	const offsetParam = Number.parseInt(c.req.query("offset") ?? "0", 10);
+	const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+	const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0;
+
+	const result = listComparisons(getDbAccessor(), {
+		agentId,
+		project: c.req.query("project") ?? undefined,
+		entityId: c.req.query("entity_id") ?? undefined,
+		since: c.req.query("since") ?? undefined,
+		until: c.req.query("until") ?? undefined,
+		limit,
+		offset,
+	});
+
+	return c.json({
+		total: result.total,
+		limit,
+		offset,
+		items: result.rows,
+	});
+});
+
+app.get("/api/predictor/training", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const limitParam = Number.parseInt(c.req.query("limit") ?? "20", 10);
+	const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 20;
+
+	return c.json({
+		items: listTrainingRuns(getDbAccessor(), agentId, limit),
+	});
+});
+
+app.get("/api/predictor/training-pairs-count", (c) => {
+	const count = getDbAccessor().withReadDb(
+		(db) => (db.prepare("SELECT COUNT(*) as c FROM predictor_training_pairs").get() as { c: number }).c,
+	);
+	return c.json({ count });
+});
+
+app.post("/api/predictor/train", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const predictorCfg = cfg.pipelineV2.predictor;
+	if (!predictorCfg?.enabled) {
+		return c.json({ error: "Predictor is not enabled" }, 400);
+	}
+	const client = getPredictorClient();
+	if (!client || !client.isAlive()) {
+		return c.json({ error: "Predictor sidecar is not running" }, 503);
+	}
+
+	let body: Record<string, unknown> = {};
+	try {
+		body = await c.req.json();
+	} catch {
+		/* no body */
+	}
+	const limit = typeof body.limit === "number" ? body.limit : 5000;
+	const epochs = typeof body.epochs === "number" ? body.epochs : 3;
+
+	const dbPath = join(AGENTS_DIR, "memory", "memories.db");
+	const checkpointPath = resolvePredictorCheckpointPath(predictorCfg);
+	const result = await client.trainFromDb({
+		db_path: dbPath,
+		checkpoint_path: checkpointPath,
+		limit,
+		epochs,
+	});
+	if (!result) {
+		return c.json({ error: "Training did not return a result" }, 500);
+	}
+
+	const checkpointSaved = result.checkpoint_saved || (await client.saveCheckpoint(checkpointPath));
+
+	// Record the run in the training log and update state
+	const agentId = "default";
+	const { recordTrainingRun } = await import("./predictor-comparisons");
+	const { updatePredictorState } = await import("./predictor-state");
+	recordTrainingRun(getDbAccessor(), {
+		agentId,
+		modelVersion: result.step,
+		loss: result.loss,
+		sampleCount: result.samples_used,
+		durationMs: result.duration_ms,
+		canaryScoreVariance: result.canary_score_variance,
+		canaryTopkChurn: result.canary_topk_stability,
+	});
+	updatePredictorState(agentId, { lastTrainingAt: new Date().toISOString() });
+	invalidateDiagnosticsCache();
+
+	return c.json({
+		...result,
+		checkpoint_path: checkpointPath,
+		checkpoint_saved: checkpointSaved,
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Telemetry endpoints
 // ---------------------------------------------------------------------------
@@ -5786,6 +6437,90 @@ app.get("/api/telemetry/export", (c) => {
 
 	const lines = events.map((e) => JSON.stringify(e)).join("\n");
 	return c.text(lines, 200, { "Content-Type": "application/x-ndjson" });
+});
+
+app.get("/api/telemetry/training-export", async (c) => {
+	const { exportTrainingPairs } = await import("./predictor-training-pairs");
+	const agentId = c.req.query("agent_id") ?? "default";
+	const since = c.req.query("since");
+	const rawLimit = Number.parseInt(c.req.query("limit") ?? "1000", 10);
+	const limit = Math.min(Math.max(1, rawLimit), 10000);
+	const format = c.req.query("format") ?? "ndjson";
+
+	const pairs = exportTrainingPairs(getDbAccessor(), agentId, { since, limit });
+
+	if (format === "csv") {
+		const header = [
+			"id",
+			"agent_id",
+			"session_key",
+			"memory_id",
+			"recency_days",
+			"access_count",
+			"importance",
+			"decay_factor",
+			"embedding_similarity",
+			"entity_slot",
+			"aspect_slot",
+			"is_constraint",
+			"structural_density",
+			"fts_hit_count",
+			"agent_relevance_score",
+			"continuity_score",
+			"fts_overlap_score",
+			"combined_label",
+			"was_injected",
+			"predictor_rank",
+			"baseline_rank",
+			"created_at",
+		].join(",");
+
+		// RFC 4180: escape fields containing commas, quotes, or newlines
+		function csvEscape(value: unknown): string {
+			const str = value === null || value === undefined ? "" : String(value);
+			if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
+				return `"${str.replace(/"/g, '""')}"`;
+			}
+			return str;
+		}
+
+		const rows = pairs.map((p) =>
+			[
+				p.id,
+				p.agentId,
+				p.sessionKey,
+				p.memoryId,
+				p.features.recencyDays,
+				p.features.accessCount,
+				p.features.importance,
+				p.features.decayFactor,
+				p.features.embeddingSimilarity ?? "",
+				p.features.entitySlot ?? "",
+				p.features.aspectSlot ?? "",
+				p.features.isConstraint ? 1 : 0,
+				p.features.structuralDensity ?? "",
+				p.features.ftsHitCount,
+				p.label.agentRelevanceScore ?? "",
+				p.label.continuityScore ?? "",
+				p.label.ftsOverlapScore ?? "",
+				p.label.combined,
+				p.wasInjected ? 1 : 0,
+				p.predictorRank ?? "",
+				p.baselineRank ?? "",
+				p.createdAt,
+			]
+				.map(csvEscape)
+				.join(","),
+		);
+
+		return c.text([header, ...rows].join("\n"), 200, {
+			"Content-Type": "text/csv",
+		});
+	}
+
+	// Default: NDJSON
+	const ndjsonLines = pairs.map((p) => JSON.stringify(p)).join("\n");
+	return c.text(ndjsonLines, 200, { "Content-Type": "application/x-ndjson" });
 });
 
 app.get("/api/timeline/:id", (c) => {
@@ -6475,8 +7210,40 @@ let commitPending = false;
 let commitTimer: ReturnType<typeof setTimeout> | null = null;
 const COMMIT_DEBOUNCE_MS = 5000; // Wait 5 seconds after last change before committing
 
+function ensureProtectedGitignore(dir: string): void {
+	const gitignorePath = join(dir, ".gitignore");
+	const existingContent = existsSync(gitignorePath)
+		? readFileSync(gitignorePath, "utf-8")
+		: "";
+	const nextContent = mergeSignetGitignoreEntries(existingContent);
+	if (nextContent !== existingContent) {
+		writeFileSync(gitignorePath, nextContent, "utf-8");
+	}
+}
+
+async function gitUntrackProtectedFiles(dir: string): Promise<void> {
+	return new Promise((resolve) => {
+		const proc = spawn(
+			"git",
+			[
+				"rm",
+				"--cached",
+				"--ignore-unmatch",
+				"--quiet",
+				"--",
+				...SIGNET_GIT_PROTECTED_PATHS,
+			],
+			{ cwd: dir, stdio: "pipe", windowsHide: true },
+		);
+		proc.on("close", () => resolve());
+		proc.on("error", () => resolve());
+	});
+}
+
 async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void> {
 	if (!isGitRepo(dir)) return;
+	ensureProtectedGitignore(dir);
+	await gitUntrackProtectedFiles(dir);
 
 	const fileList = changedFiles.map((f) => f.replace(dir + "/", "")).join(", ");
 	const now = new Date();
@@ -6610,17 +7377,6 @@ ${fileList}
 
 	const composed = withBlock + identityExtras;
 
-	// Sync to Claude Code (~/.claude/CLAUDE.md)
-	const claudeDir = join(homedir(), ".claude");
-	if (existsSync(claudeDir)) {
-		try {
-			writeFileSync(join(claudeDir, "CLAUDE.md"), buildHeader("CLAUDE.md") + composed);
-			logger.sync.harness("claude-code", "~/.claude/CLAUDE.md");
-		} catch (e) {
-			logger.sync.failed("claude-code", e as Error);
-		}
-	}
-
 	// Sync to OpenCode (~/.config/opencode/AGENTS.md)
 	const opencodeDir = join(homedir(), ".config", "opencode");
 	if (existsSync(opencodeDir)) {
@@ -6682,7 +7438,7 @@ function startFileWatcher() {
 		{
 			persistent: true,
 			ignoreInitial: true,
-			ignored: [/\.db-wal$/, /\.db-shm$/, /\.db-journal$/],
+			ignored: createAgentsWatcherIgnoreMatcher(AGENTS_DIR),
 		},
 	);
 
@@ -7193,6 +7949,22 @@ async function cleanup() {
 		telemetryRef = undefined;
 	}
 
+	// Stop skill reconciler
+	if (skillReconcilerHandle) {
+		skillReconcilerHandle.stop();
+		skillReconcilerHandle = null;
+	}
+
+	// Stop predictor sidecar before pipeline/DB teardown
+	if (predictorClientRef) {
+		try {
+			await predictorClientRef.stop();
+		} catch {
+			// best-effort
+		}
+		predictorClientRef = null;
+	}
+
 	// Stop embedding tracker before pipeline/DB teardown
 	if (embeddingTrackerHandle) {
 		try {
@@ -7280,6 +8052,9 @@ async function main() {
 	// Initialise singleton DB accessor (opens write connection, sets pragmas,
 	// runs migrations). This is the sole schema authority.
 	initDbAccessor(MEMORY_DB);
+
+	// Migrations may have created traversal tables — clear the cache
+	invalidateTraversalCache();
 
 	// Write PID file
 	writeFileSync(PID_FILE, process.pid.toString());
@@ -7376,10 +8151,10 @@ async function main() {
 							model: memoryCfg.pipelineV2.extraction.model || "gpt-5.3-codex",
 							defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 						})
-				: createOllamaProvider({
-						model: memoryCfg.pipelineV2.extraction.model || "qwen3:4b",
-						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-					});
+					: createOllamaProvider({
+							model: memoryCfg.pipelineV2.extraction.model || "qwen3:4b",
+							defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+						});
 	initLlmProvider(llmProvider);
 
 	// Create synthesis provider — separate from extraction because synthesis
@@ -7505,6 +8280,68 @@ async function main() {
 		);
 	}
 
+	// One-time structural backfill: populate entity_aspects/attributes for
+	// existing entities that predate the knowledge architecture migrations.
+	// Runs in the background, rate-limited, so it doesn't block startup.
+	if (memoryCfg.pipelineV2.graph.enabled && memoryCfg.pipelineV2.structural.enabled) {
+		const backfillCtx: RepairContext = {
+			reason: "post-upgrade structural backfill",
+			actor: "daemon",
+			actorType: "daemon",
+		};
+		setTimeout(() => {
+			try {
+				const result = structuralBackfill(getDbAccessor(), memoryCfg.pipelineV2, backfillCtx, repairLimiter, {
+					batchSize: 50,
+				});
+				if (result.affected > 0) {
+					logger.info("pipeline", "Structural backfill completed", {
+						affected: result.affected,
+						message: result.message,
+					});
+				}
+			} catch (err) {
+				logger.warn("pipeline", "Structural backfill failed (non-fatal)", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}, 10_000); // 10s delay — let the pipeline warm up first
+	}
+
+	// Spawn predictor sidecar if enabled
+	if (memoryCfg.pipelineV2.predictor?.enabled) {
+		const predictorCfg = memoryCfg.pipelineV2.predictor;
+		try {
+			const client = createPredictorClient(predictorCfg, "default", memoryCfg.embedding.dimensions);
+			await client.start();
+			predictorClientRef = client;
+			logger.info("predictor", "Predictor sidecar started");
+		} catch (err) {
+			// Fail open: predictor is optional
+			logger.warn("predictor", "Failed to start predictor sidecar (non-fatal)", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	// Start skill reconciler if procedural memory is enabled
+	if (memoryCfg.pipelineV2.procedural.enabled) {
+		skillReconcilerHandle = startReconciler({
+			accessor: getDbAccessor(),
+			pipelineConfig: memoryCfg.pipelineV2,
+			embeddingConfig: memoryCfg.embedding,
+			fetchEmbedding,
+			getProvider: () => {
+				try {
+					return getLlmProvider();
+				} catch {
+					return null;
+				}
+			},
+			agentsDir: AGENTS_DIR,
+		});
+	}
+
 	// Initialize checkpoint flush queue for continuity protocol
 	initCheckpointFlush(getDbAccessor());
 
@@ -7533,7 +8370,9 @@ async function main() {
 		const daemonScript = process.argv[1] ?? "";
 		if (!daemonScript) {
 			logger.warn("daemon", "Cannot self-restart: process.argv[1] is empty, falling back to clean exit");
-			setTimeout(() => { process.exit(0); }, 500);
+			setTimeout(() => {
+				process.exit(0);
+			}, 500);
 			return;
 		}
 
@@ -7555,7 +8394,9 @@ async function main() {
 		replacement.unref();
 
 		logger.info("daemon", "Replacement daemon spawned, exiting current process");
-		setTimeout(() => { process.exit(0); }, 500);
+		setTimeout(() => {
+			process.exit(0);
+		}, 500);
 	});
 	initFeatureFlags(AGENTS_DIR);
 	startUpdateTimer();
@@ -7574,16 +8415,32 @@ async function main() {
 			});
 			logger.info("daemon", "Daemon ready");
 
-			// Write health stamp for CLI verification
+			// Detect version upgrade and log what's new
+			const healthStampPath = join(DAEMON_DIR, "last-healthy-start");
 			try {
+				let previousVersion: string | null = null;
+				if (existsSync(healthStampPath)) {
+					const prev = JSON.parse(readFileSync(healthStampPath, "utf-8"));
+					previousVersion = typeof prev.version === "string" ? prev.version : null;
+				}
 				writeFileSync(
-					join(DAEMON_DIR, "last-healthy-start"),
+					healthStampPath,
 					JSON.stringify({
 						version: CURRENT_VERSION,
 						startedAt: new Date().toISOString(),
 						pid: process.pid,
 					}),
 				);
+				if (previousVersion && previousVersion !== CURRENT_VERSION && CURRENT_VERSION !== "0.0.0") {
+					logger.info("daemon", `Upgraded from ${previousVersion} to ${CURRENT_VERSION}`, {
+						previousVersion,
+						currentVersion: CURRENT_VERSION,
+					});
+					logger.info(
+						"daemon",
+						"What's new: knowledge graph, session continuity, constellation entity overlay, predictive scorer (opt-in)",
+					);
+				}
 			} catch {
 				// Best effort — DAEMON_DIR might not exist yet in edge cases
 			}

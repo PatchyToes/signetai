@@ -9,10 +9,19 @@
  * - Real-time streaming for dashboard
  */
 
-import { EventEmitter } from "events";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { EventEmitter } from "node:events";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Types
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -34,6 +43,7 @@ export type LogCategory =
 	| "summary-worker" // Session summary worker
 	| "synthesis" // MEMORY.md synthesis worker
 	| "session-memories" // Session memory tracking
+	| "predictor" // Predictive memory scorer
 	| "system" // System events
 	| "update"; // Auto-update cycle
 
@@ -82,6 +92,7 @@ class Logger extends EventEmitter {
 	private currentLogFile: string;
 	private buffer: LogEntry[] = [];
 	private flushTimer: ReturnType<typeof setInterval> | null = null;
+	private fileOutputEnabled = true;
 	private static readonly LOG_FILE_PATTERN = /^signet-(\d{4}-\d{2}-\d{2})(?:-(.+))?\.log$/;
 
 	constructor(config: Partial<LoggerConfig> = {}) {
@@ -93,8 +104,13 @@ class Logger extends EventEmitter {
 	}
 
 	private ensureLogDir() {
-		if (!existsSync(this.config.logDir)) {
-			mkdirSync(this.config.logDir, { recursive: true });
+		try {
+			if (!existsSync(this.config.logDir)) {
+				mkdirSync(this.config.logDir, { recursive: true });
+			}
+		} catch (e) {
+			this.fileOutputEnabled = false;
+			console.error("Failed to initialize log directory, disabling file logging:", e);
 		}
 	}
 
@@ -137,6 +153,9 @@ class Logger extends EventEmitter {
 	}
 
 	private listLogFilesNewestFirst(): Array<{ name: string; path: string }> {
+		if (!this.fileOutputEnabled || !existsSync(this.config.logDir)) {
+			return [];
+		}
 		return readdirSync(this.config.logDir)
 			.filter((f) => this.parseLogFileName(f) !== null)
 			.map((f) => ({
@@ -200,10 +219,14 @@ class Logger extends EventEmitter {
 	private flush() {
 		if (this.buffer.length === 0) return;
 
-		const lines =
-			this.buffer
-				.map((entry) => (this.config.jsonFormat ? this.formatJson(entry) : this.formatConsole(entry)))
-				.join("\n") + "\n";
+		const lines = `${this.buffer
+			.map((entry) => (this.config.jsonFormat ? this.formatJson(entry) : this.formatConsole(entry)))
+			.join("\n")}\n`;
+
+		if (!this.fileOutputEnabled) {
+			this.buffer = [];
+			return;
+		}
 
 		try {
 			// Check if date changed (new log file)
@@ -215,7 +238,9 @@ class Logger extends EventEmitter {
 			appendFileSync(this.currentLogFile, lines);
 			this.buffer = [];
 		} catch (e) {
-			console.error("Failed to write logs:", e);
+			this.fileOutputEnabled = false;
+			this.buffer = [];
+			console.error("Failed to write logs, disabling file logging:", e);
 		}
 	}
 
@@ -225,6 +250,7 @@ class Logger extends EventEmitter {
 	}
 
 	private checkRotation() {
+		if (!this.fileOutputEnabled) return;
 		try {
 			if (!existsSync(this.currentLogFile)) return;
 
@@ -243,7 +269,6 @@ class Logger extends EventEmitter {
 
 		try {
 			// Rename current to rotated
-			const { renameSync } = require("fs");
 			renameSync(this.currentLogFile, rotatedName);
 
 			// Clean up old files
@@ -254,6 +279,7 @@ class Logger extends EventEmitter {
 	}
 
 	private cleanOldLogs() {
+		if (!this.fileOutputEnabled) return;
 		try {
 			const files = this.listLogFilesNewestFirst();
 

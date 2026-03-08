@@ -88,6 +88,11 @@ export interface AgentManifest {
 		};
 	};
 
+	// Home dashboard configuration (optional)
+	home?: {
+		spotlightEntity?: string;
+	};
+
 	// Legacy fields
 	auth?: {
 		method: "none" | "erc8128" | "gpg" | "did";
@@ -125,6 +130,7 @@ export const PIPELINE_FLAGS = [
 	"shadowMode",
 	"mutationsFrozen",
 	"graph.enabled",
+	"traversal.enabled",
 	"reranker.enabled",
 	"autonomous.enabled",
 	"autonomous.frozen",
@@ -153,6 +159,17 @@ export interface PipelineGraphConfig {
 	readonly enabled: boolean;
 	readonly boostWeight: number;
 	readonly boostTimeoutMs: number;
+}
+
+export interface PipelineTraversalConfig {
+	readonly enabled: boolean;
+	readonly maxAspectsPerEntity: number;
+	readonly maxAttributesPerAspect: number;
+	readonly maxDependencyHops: number;
+	readonly minDependencyStrength: number;
+	readonly timeoutMs: number;
+	readonly boostWeight: number;
+	readonly constraintBudgetChars: number;
 }
 
 export interface PipelineRerankerConfig {
@@ -223,6 +240,7 @@ export interface PipelineV2Config {
 	readonly extraction: PipelineExtractionConfig;
 	readonly worker: PipelineWorkerConfig;
 	readonly graph: PipelineGraphConfig;
+	readonly traversal?: PipelineTraversalConfig;
 	readonly reranker: PipelineRerankerConfig;
 	readonly autonomous: PipelineAutonomousConfig;
 	readonly repair: PipelineRepairConfig;
@@ -232,6 +250,31 @@ export interface PipelineV2Config {
 	readonly continuity: PipelineContinuityConfig;
 	readonly embeddingTracker: PipelineEmbeddingTrackerConfig;
 	readonly synthesis: PipelineSynthesisConfig;
+	readonly procedural: PipelineProceduralConfig;
+	readonly structural: PipelineStructuralConfig;
+	readonly feedback: PipelineFeedbackConfig;
+	readonly predictor?: PredictorConfig;
+	readonly predictorPipeline: PipelinePredictorConfig;
+}
+
+export interface PipelinePredictorConfig {
+	readonly agentFeedback: boolean;
+	readonly trainingTelemetry: boolean;
+}
+
+export interface PredictorConfig {
+	readonly enabled: boolean;
+	readonly trainIntervalSessions: number;
+	readonly minTrainingSessions: number;
+	readonly scoreTimeoutMs: number;
+	readonly trainTimeoutMs: number;
+	readonly crashDisableThreshold: number;
+	readonly rrfK: number;
+	readonly explorationRate: number;
+	readonly driftResetWindow: number;
+	readonly binaryPath?: string;
+	readonly binaryArgs?: ReadonlyArray<string>;
+	readonly checkpointPath?: string;
 }
 
 export interface PipelineEmbeddingTrackerConfig {
@@ -249,6 +292,34 @@ export interface PipelineSynthesisConfig {
 	readonly idleGapMinutes: number;
 }
 
+export interface PipelineProceduralConfig {
+	readonly enabled: boolean;
+	readonly decayRate: number;
+	readonly minImportance: number;
+	readonly importanceOnInstall: number;
+	readonly enrichOnInstall: boolean;
+	readonly enrichMinDescription: number;
+	readonly reconcileIntervalMs: number;
+}
+
+export interface PipelineStructuralConfig {
+	readonly enabled: boolean;
+	readonly classifyBatchSize: number;
+	readonly dependencyBatchSize: number;
+	readonly pollIntervalMs: number;
+}
+
+export interface PipelineFeedbackConfig {
+	readonly enabled: boolean;
+	readonly ftsWeightDelta: number;
+	readonly maxAspectWeight: number;
+	readonly minAspectWeight: number;
+	readonly decayEnabled: boolean;
+	readonly decayRate: number;
+	readonly staleDays: number;
+	readonly decayIntervalSessions: number;
+}
+
 // -- Status/union constants --
 
 export const MEMORY_TYPES = [
@@ -264,32 +335,13 @@ export const MEMORY_TYPES = [
 ] as const;
 export type MemoryType = (typeof MEMORY_TYPES)[number];
 
-export const EXTRACTION_STATUSES = [
-	"none",
-	"pending",
-	"completed",
-	"failed",
-] as const;
+export const EXTRACTION_STATUSES = ["none", "pending", "completed", "failed"] as const;
 export type ExtractionStatus = (typeof EXTRACTION_STATUSES)[number];
 
-export const JOB_STATUSES = [
-	"pending",
-	"leased",
-	"completed",
-	"failed",
-	"dead",
-] as const;
+export const JOB_STATUSES = ["pending", "leased", "completed", "failed", "dead"] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
-export const HISTORY_EVENTS = [
-	"created",
-	"updated",
-	"deleted",
-	"recovered",
-	"merged",
-	"none",
-	"split",
-] as const;
+export const HISTORY_EVENTS = ["created", "updated", "deleted", "recovered", "merged", "none", "split"] as const;
 export type HistoryEvent = (typeof HISTORY_EVENTS)[number];
 
 export const DECISION_ACTIONS = ["add", "update", "delete", "none"] as const;
@@ -300,12 +352,7 @@ export type DecisionAction = (typeof DECISION_ACTIONS)[number];
 export const TASK_HARNESSES = ["claude-code", "opencode", "codex"] as const;
 export type TaskHarness = (typeof TASK_HARNESSES)[number];
 
-export const TASK_RUN_STATUSES = [
-	"pending",
-	"running",
-	"completed",
-	"failed",
-] as const;
+export const TASK_RUN_STATUSES = ["pending", "running", "completed", "failed"] as const;
 export type TaskRunStatus = (typeof TASK_RUN_STATUSES)[number];
 
 export interface ScheduledTask {
@@ -432,8 +479,11 @@ export interface Entity {
 	name: string;
 	canonicalName?: string;
 	entityType: string;
+	agentId: string;
 	description?: string;
 	mentions?: number;
+	pinned?: boolean;
+	pinnedAt?: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -469,8 +519,10 @@ export interface ExtractedFact {
 
 export interface ExtractedEntity {
 	readonly source: string;
+	readonly sourceType?: string;
 	readonly relationship: string;
 	readonly target: string;
+	readonly targetType?: string;
 	readonly confidence: number;
 }
 
@@ -490,4 +542,70 @@ export interface DecisionProposal {
 export interface DecisionResult {
 	readonly proposals: readonly DecisionProposal[];
 	readonly warnings: readonly string[];
+}
+
+// -- Knowledge Architecture types --
+
+export const ENTITY_TYPES = ["person", "project", "system", "tool", "concept", "skill", "task", "unknown"] as const;
+export type EntityType = (typeof ENTITY_TYPES)[number];
+
+export const ATTRIBUTE_KINDS = ["attribute", "constraint"] as const;
+export type AttributeKind = (typeof ATTRIBUTE_KINDS)[number];
+
+export const ATTRIBUTE_STATUSES = ["active", "superseded", "deleted"] as const;
+export type AttributeStatus = (typeof ATTRIBUTE_STATUSES)[number];
+
+export const DEPENDENCY_TYPES = ["uses", "requires", "owned_by", "blocks", "informs"] as const;
+export type DependencyType = (typeof DEPENDENCY_TYPES)[number];
+
+export const TASK_STATUSES = ["open", "in_progress", "blocked", "done", "cancelled"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+export interface EntityAspect {
+	readonly id: string;
+	readonly entityId: string;
+	readonly agentId: string;
+	readonly name: string;
+	readonly canonicalName: string;
+	readonly weight: number;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
+export interface EntityAttribute {
+	readonly id: string;
+	readonly aspectId: string;
+	readonly agentId: string;
+	readonly memoryId: string | null;
+	readonly kind: AttributeKind;
+	readonly content: string;
+	readonly normalizedContent: string;
+	readonly confidence: number;
+	readonly importance: number;
+	readonly status: AttributeStatus;
+	readonly supersededBy: string | null;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
+export interface EntityDependency {
+	readonly id: string;
+	readonly sourceEntityId: string;
+	readonly targetEntityId: string;
+	readonly agentId: string;
+	readonly aspectId: string | null;
+	readonly dependencyType: DependencyType;
+	readonly strength: number;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
+export interface TaskMeta {
+	readonly entityId: string;
+	readonly agentId: string;
+	readonly status: TaskStatus;
+	readonly expiresAt: string | null;
+	readonly retentionUntil: string | null;
+	readonly completedAt: string | null;
+	readonly updatedAt: string;
 }

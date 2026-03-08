@@ -1,6 +1,26 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Feature vector layout per candidate:
+/// [0]  log(age_days)
+/// [1]  importance
+/// [2]  log(access_count + 1)
+/// [3]  tod_sin
+/// [4]  tod_cos
+/// [5]  dow_sin
+/// [6]  dow_cos
+/// [7]  moy_sin
+/// [8]  moy_cos
+/// [9]  log(max(0, session_gap_days) + 1)
+/// [10] is_embedded
+/// [11] is_superseded
+/// [12] entity_slot (normalized 0-1)
+/// [13] aspect_slot (normalized 0-1)
+/// [14] is_constraint
+/// [15] log(structural_density + 1)
+/// [16] is_ka_traversal
+pub const FEATURE_DIM: usize = 17;
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -109,13 +129,24 @@ pub struct StatusResult {
     pub training_pairs: usize,
     pub model_version: u64,
     pub last_trained: Option<String>,
+    pub native_dimensions: usize,
+    pub feature_dimensions: usize,
+}
+
+fn default_limit() -> usize {
+    5000
+}
+fn default_epochs() -> usize {
+    3
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TrainFromDbParams {
     pub db_path: String,
     pub checkpoint_path: Option<String>,
+    #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default = "default_epochs")]
     pub epochs: usize,
     #[serde(default = "default_temperature")]
     pub temperature: f64,

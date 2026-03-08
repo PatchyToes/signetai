@@ -1,16 +1,18 @@
+import type { TabId } from "$lib/stores/navigation.svelte";
+
 export interface PageHeaderDefinition {
 	readonly title: string;
 	readonly eyebrow: string;
 }
 
 export const PAGE_HEADERS = {
-	config: {
-		title: "Config",
-		eyebrow: "Identity markdown workspace",
+	home: {
+		title: "Home",
+		eyebrow: "Agent overview",
 	},
 	settings: {
-		title: "Engine",
-		eyebrow: "Runtime and harness controls",
+		title: "Settings",
+		eyebrow: "Configuration and identity",
 	},
 	memory: {
 		title: "Memory",
@@ -19,6 +21,10 @@ export const PAGE_HEADERS = {
 	timeline: {
 		title: "Memory",
 		eyebrow: "Era evolution timeline",
+	},
+	knowledge: {
+		title: "Memory",
+		eyebrow: "Knowledge graph and traversal view",
 	},
 	embeddings: {
 		title: "Memory",
@@ -48,4 +54,12 @@ export const PAGE_HEADERS = {
 		title: "Engine",
 		eyebrow: "Harness and data source health",
 	},
-} as const satisfies Record<string, PageHeaderDefinition>;
+	predictor: {
+		title: "Engine",
+		eyebrow: "Predictive memory scorer",
+	},
+	changelog: {
+		title: "Project",
+		eyebrow: "Repository overview and release history",
+	},
+} as const satisfies Record<TabId, PageHeaderDefinition>;
