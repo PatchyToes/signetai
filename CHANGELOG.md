@@ -2,6 +2,17 @@
 
 All notable changes to Signet are documented here.
 
+## [0.45.1] - 2026-03-08
+
+### Bug Fixes
+
+- **dashboard**: address PR review feedback on page shell decomposition
+
+### Refactoring
+
+- **dashboard**: decompose +page.svelte into focused layout components
+
+
 ## [0.45.0] - 2026-03-08
 
 ### Bug Fixes
