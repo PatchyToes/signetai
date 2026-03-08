@@ -2,6 +2,29 @@
 
 All notable changes to Signet are documented here.
 
+## [0.43.1] - 2026-03-08
+
+### Features
+
+- comprehensive keyboard navigation for dashboard
+
+### Bug Fixes
+
+- remove duplicate handleGlobalKey in MarketplaceTab, SecretsTab ArrowLeft sidebar return
+- SettingsTab defaultPrevented guard + SecretsTab item ArrowUp sidebar return
+- address remaining Greptile review findings
+- address keyboard navigation review comments (wave 6)
+- MarketplaceTab filter nav broken, dead focusout, MemoryTab no-op Escape
+- ArrowLeft from any task in first column returns to sidebar
+- sort 1Password focus targets by data-focus-index
+- add missing Escape content→tabs transition for memory group
+- address fourth wave of keyboard navigation review comments
+- address third wave of keyboard navigation review comments
+- use closest for doc-card detection and listitem role for secret rows
+- address second wave of keyboard navigation review comments
+- address all keyboard navigation review comments
+
+
 ## [0.43.0] - 2026-03-08
 
 ### Bug Fixes
