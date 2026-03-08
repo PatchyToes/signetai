@@ -1,3 +1,10 @@
+---
+title: "Procedural Memory"
+description: "Knowledge of how to act — workflows, repeatable processes, and task sequences."
+order: 22
+section: "Core Concepts"
+---
+
 # Procedural Memory
 
 Procedural memory is the knowledge of how to act — workflows, repeatable processes,

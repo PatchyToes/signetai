@@ -1,3 +1,9 @@
+---
+title: "Agent Relevance Feedback"
+description: "Spec addendum for agent-driven training signal quality in the predictive memory scorer."
+status: "approved"
+---
+
 # Agent Relevance Feedback -- Spec Addendum
 
 **Parent spec**: `predictive-memory-scorer.md`

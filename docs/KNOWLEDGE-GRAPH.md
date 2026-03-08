@@ -1,3 +1,10 @@
+---
+title: "Knowledge Graph"
+description: "Structural memory layer organizing entities, aspects, attributes, and dependencies."
+order: 3
+section: "Core Concepts"
+---
+
 # Knowledge Graph
 
 The knowledge graph is the structural layer of Signet's memory system. It organizes

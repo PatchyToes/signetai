@@ -1,19 +1,4 @@
 {
-  "docs/agents": {
-    "title": "Agents",
-    "url": "/docs/agents/",
-    "tags": [],
-    "links": [
-      "docs/cli",
-      "docs/daemon",
-      "docs/api",
-      "docs/dashboard",
-      "docs/pipeline",
-      "docs/auth",
-      "docs/architecture"
-    ],
-    "collection": "docs"
-  },
   "docs/analytics": {
     "title": "Analytics",
     "url": "/docs/analytics/",
@@ -144,6 +129,18 @@
     ],
     "collection": "docs"
   },
+  "docs/desire-paths": {
+    "title": "Desire Paths",
+    "url": "/docs/desire-paths/",
+    "tags": [],
+    "links": [
+      "docs/memory",
+      "docs/knowledge-graph",
+      "docs/dashboard",
+      "docs/pipeline"
+    ],
+    "collection": "docs"
+  },
   "docs/diagnostics": {
     "title": "Diagnostics",
     "url": "/docs/diagnostics/",
@@ -211,6 +208,13 @@
     ],
     "collection": "docs"
   },
+  "docs/knowledge-graph": {
+    "title": "Knowledge Graph",
+    "url": "/docs/knowledge-graph/",
+    "tags": [],
+    "links": [],
+    "collection": "docs"
+  },
   "docs/mcp": {
     "title": "MCP Server",
     "url": "/docs/mcp/",
@@ -259,6 +263,13 @@
     ],
     "collection": "docs"
   },
+  "docs/procedural-memory": {
+    "title": "Procedural Memory",
+    "url": "/docs/procedural-memory/",
+    "tags": [],
+    "links": [],
+    "collection": "docs"
+  },
   "docs/quickstart": {
     "title": "Quickstart",
     "url": "/docs/quickstart/",
@@ -272,17 +283,11 @@
     ],
     "collection": "docs"
   },
-  "docs/readme": {
-    "title": "README",
-    "url": "/docs/readme/",
+  "docs/research-paper-outline": {
+    "title": "Research Paper Outline",
+    "url": "/docs/research-paper-outline/",
     "tags": [],
-    "links": [
-      "docs/memory",
-      "docs/pipeline",
-      "docs/api",
-      "docs/analytics",
-      "docs/sdk"
-    ],
+    "links": [],
     "collection": "docs"
   },
   "docs/roadmap": {
@@ -360,17 +365,6 @@
     "links": [
       "docs/daemon",
       "docs/dashboard"
-    ],
-    "collection": "docs"
-  },
-  "docs/vision": {
-    "title": "Vision",
-    "url": "/docs/vision/",
-    "tags": [],
-    "links": [
-      "docs/secrets",
-      "docs/memory",
-      "docs/skills"
     ],
     "collection": "docs"
   },
@@ -471,8 +465,7 @@
       "docs/pipeline",
       "blog/knowledge-architecture",
       "docs/knowledge-architecture",
-      "blog/why-local-first-memory",
-      "docs/vision"
+      "blog/why-local-first-memory"
     ],
     "collection": "blog"
   }

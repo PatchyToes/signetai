@@ -1,3 +1,9 @@
+---
+title: "Marketplace Reviews Cloudflare Staging Plan"
+description: "Staging strategy for Signet Reviews scaffolding on Cloudflare Pages."
+status: "planning"
+---
+
 # Marketplace Reviews Cloudflare Staging Plan
 
 ## Context
