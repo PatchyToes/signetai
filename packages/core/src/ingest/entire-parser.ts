@@ -147,6 +147,7 @@ export function hasEntireBranch(repoPath: string): boolean {
 			encoding: "utf-8",
 			timeout: 10_000,
 			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		return true;
 	} catch {
@@ -199,6 +200,7 @@ export function parseEntireRepo(
 			encoding: "utf-8",
 			timeout: 30_000,
 			maxBuffer: 10 * 1024 * 1024,
+			windowsHide: true,
 		});
 		fileList = output.trim().split("\n").filter(Boolean);
 	} catch (err) {
@@ -630,6 +632,7 @@ function gitShow(gitPath: string, repoPath: string, filePath: string): string {
 		encoding: "utf-8",
 		timeout: 15_000,
 		maxBuffer: 10 * 1024 * 1024,
+		windowsHide: true,
 	});
 }
 

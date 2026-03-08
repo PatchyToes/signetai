@@ -84,6 +84,7 @@ async function runCommand(
 		const proc = spawn(cmd, args, {
 			stdio: ["pipe", "pipe", "pipe"],
 			shell: isWindows,
+			windowsHide: true,
 		});
 		proc.stdout?.on("data", (d) => {
 			stdout += d.toString();

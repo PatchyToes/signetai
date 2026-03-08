@@ -538,6 +538,7 @@ async function runLegacyEmbeddingsExport(
 			cwd: AGENTS_DIR,
 			stdio: "pipe",
 			timeout: withVectors ? 120000 : 30000,
+			windowsHide: true,
 		});
 
 		let stdout = "";
@@ -4011,6 +4012,7 @@ app.post("/api/harnesses/regenerate", async (c) => {
 		const proc = spawn("python3", [script], {
 			timeout: 10000,
 			cwd: AGENTS_DIR,
+			windowsHide: true,
 		});
 
 		let stdout = "";
@@ -5947,7 +5949,7 @@ async function runCommand(
 	options?: { input?: string; cwd?: string },
 ): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolve) => {
-		const proc = spawn(cmd, args, { cwd: options?.cwd, stdio: "pipe" });
+		const proc = spawn(cmd, args, { cwd: options?.cwd, stdio: "pipe", windowsHide: true });
 		let stdout = "";
 		let stderr = "";
 
@@ -6143,7 +6145,7 @@ async function resolveGitCredentials(dir: string, remote: string): Promise<GitCr
 // Run a git command with optional authenticated remote
 function runGitCommand(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
-		const proc = spawn("git", args, { cwd, stdio: "pipe" });
+		const proc = spawn("git", args, { cwd, stdio: "pipe", windowsHide: true });
 		let stdout = "";
 		let stderr = "";
 		proc.stdout?.on("data", (d) => {
@@ -6478,7 +6480,7 @@ async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void>
 
 	return new Promise((resolve) => {
 		// git add -A
-		const add = spawn("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+		const add = spawn("git", ["add", "-A"], { cwd: dir, stdio: "pipe", windowsHide: true });
 		add.on("close", (addCode) => {
 			if (addCode !== 0) {
 				logger.warn("git", "Git add failed");
@@ -6489,6 +6491,7 @@ async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void>
 			const status = spawn("git", ["status", "--porcelain"], {
 				cwd: dir,
 				stdio: "pipe",
+				windowsHide: true,
 			});
 			let statusOutput = "";
 			status.stdout?.on("data", (d) => {
@@ -6503,6 +6506,7 @@ async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void>
 				const commit = spawn("git", ["commit", "-m", message], {
 					cwd: dir,
 					stdio: "pipe",
+					windowsHide: true,
 				});
 				commit.on("close", (commitCode) => {
 					if (commitCode === 0) {
@@ -7536,6 +7540,7 @@ async function main() {
 		const replacement = spawn(process.execPath, [daemonScript], {
 			detached: true,
 			stdio: "ignore",
+			windowsHide: true,
 			env: {
 				...process.env,
 				SIGNET_PORT: String(PORT),

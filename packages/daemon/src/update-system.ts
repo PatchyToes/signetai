@@ -531,6 +531,7 @@ export async function runUpdate(
 
 			const proc = spawn(installCommand.command, installCommand.args, {
 				stdio: "pipe",
+				windowsHide: true,
 			});
 			let stdout = "";
 			let stderr = "";

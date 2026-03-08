@@ -24,6 +24,7 @@ export function findGit(): string | null {
 		const result = execFileSync("/usr/bin/which", ["git"], {
 			encoding: "utf-8",
 			timeout: 5000,
+			windowsHide: true,
 		});
 		const path = result.trim();
 		if (path && existsSync(path)) return path;

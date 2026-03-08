@@ -289,6 +289,7 @@ async function startDirect(port: number = 3850): Promise<number> {
 	const proc = spawn(runtime, [daemonPath], {
 		detached: true,
 		stdio: "ignore",
+		windowsHide: true,
 		env: {
 			...process.env,
 			SIGNET_PORT: port.toString(),

@@ -30,7 +30,7 @@ const isDaemonCommand = needsBun;
 // Check if Bun is available
 function hasBun() {
 	try {
-		const result = spawnSync("bun", ["--version"], { stdio: "pipe" });
+		const result = spawnSync("bun", ["--version"], { stdio: "pipe", windowsHide: true });
 		return result.status === 0;
 	} catch {
 		return false;

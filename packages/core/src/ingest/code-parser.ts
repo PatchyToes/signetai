@@ -452,6 +452,7 @@ function parseGitLog(repoPath: string, maxCommits: number): ParsedSection[] {
 			encoding: "utf-8",
 			timeout: 15_000,
 			maxBuffer: 1024 * 1024,
+			windowsHide: true,
 		});
 
 		if (logOutput.trim()) {
@@ -490,6 +491,7 @@ function parseGitLog(repoPath: string, maxCommits: number): ParsedSection[] {
 			encoding: "utf-8",
 			timeout: 10_000,
 			maxBuffer: 1024 * 1024,
+			windowsHide: true,
 		});
 
 		if (shortlogOutput.trim()) {
@@ -512,6 +514,7 @@ function parseGitLog(repoPath: string, maxCommits: number): ParsedSection[] {
 			encoding: "utf-8",
 			timeout: 10_000,
 			maxBuffer: 1024 * 1024,
+			windowsHide: true,
 		});
 
 		if (branchOutput.trim()) {

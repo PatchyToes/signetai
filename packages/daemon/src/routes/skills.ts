@@ -511,6 +511,7 @@ export function mountSkillsRoutes(app: Hono): void {
 			const proc = spawn(skillsCommand.command, skillsCommand.args, {
 				env: { ...process.env },
 				timeout: 60000,
+				windowsHide: true,
 			});
 
 			let stdout = "";

@@ -236,6 +236,7 @@ export async function execWithSecrets(command: string, secretRefs: Record<string
 		const proc = spawn("sh", ["-c", command], {
 			env: { ...process.env, ...resolved },
 			stdio: "pipe",
+			windowsHide: true,
 		});
 
 		let stdout = "";
