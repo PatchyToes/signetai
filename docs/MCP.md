@@ -313,6 +313,33 @@ Read recent inbound cross-agent messages for an agent/session.
 **Daemon endpoint:** `GET /api/cross-agent/messages`
 
 
+### session_bypass
+
+Toggle per-session hook bypass. When enabled, all hook endpoints for the
+target session return empty no-op responses with `bypassed: true`. MCP tools
+(memory_search, memory_store, etc.) continue to work normally — only automatic
+hooks are silenced.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `session_key` | string | yes | Session key to toggle bypass for |
+| `enabled` | boolean | yes | `true` to enable bypass, `false` to disable |
+
+**Returns:** Object with `key` and `bypassed` fields confirming the new state.
+
+**Example:**
+
+```json
+{
+  "session_key": "session-uuid",
+  "enabled": true
+}
+```
+
+**Daemon endpoint:** `POST /api/sessions/:key/bypass`
+
 ### secret_list
 
 List available secret names. Returns names only — raw secret values are

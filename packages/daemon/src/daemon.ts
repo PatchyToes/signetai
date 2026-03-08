@@ -4615,10 +4615,15 @@ import {
 import {
 	type RuntimePath,
 	activeSessionCount,
+	bypassSession,
 	claimSession,
+	getActiveSessions,
+	getBypassedSessionKeys,
 	getSessionPath,
+	isSessionBypassed,
 	releaseSession,
 	startSessionCleanup,
+	unbypassSession,
 } from "./session-tracker.js";
 
 /** Read the runtime path from header or body, preferring header. */
@@ -4664,6 +4669,13 @@ function isInternalCall(c: Context): boolean {
 	return c.req.header("x-signet-no-hooks") === "1";
 }
 
+// Check whether the session is bypassed (hooks return no-op responses)
+function checkBypass(body?: { sessionKey?: string; sessionId?: string }): boolean {
+	const key = body?.sessionKey ?? body?.sessionId;
+	if (!key) return false;
+	return isSessionBypassed(key);
+}
+
 // Session start hook - provides context/memories for injection
 app.post("/api/hooks/session-start", async (c) => {
 	if (isInternalCall(c)) {
@@ -4702,6 +4714,11 @@ app.post("/api/hooks/session-start", async (c) => {
 		});
 
 		stampHarness(body.harness);
+
+		if (checkBypass(body)) {
+			return c.json({ inject: "", memories: [], bypassed: true });
+		}
+
 		const result = await handleSessionStart(body);
 		return c.json(result);
 	} catch (e) {
@@ -4756,6 +4773,11 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 		}
 
 		stampHarness(body.harness);
+
+		if (checkBypass(body)) {
+			return c.json({ inject: "", memoryCount: 0, bypassed: true });
+		}
+
 		const result = await handleUserPromptSubmit(body);
 		return c.json(result);
 	} catch (e) {
@@ -4780,16 +4802,26 @@ app.post("/api/hooks/session-end", async (c) => {
 		if (runtimePath) body.runtimePath = runtimePath;
 
 		stampHarness(body.harness);
-		const result = await handleSessionEnd(body);
 
-		// Release session claim on end
 		const sessionKey = body.sessionKey || body.sessionId;
+
+		if (sessionKey && isSessionBypassed(sessionKey)) {
+			// Still release session claim and agent presence on end
+			releaseSession(sessionKey);
+			removeAgentPresence(sessionKey);
+			return c.json({ memoriesSaved: 0, bypassed: true });
+		}
+
+	try {
+		const result = await handleSessionEnd(body);
+		return c.json(result);
+	} finally {
+		// Always release session claim and agent presence, even if extraction throws
 		if (sessionKey) {
 			releaseSession(sessionKey);
 			removeAgentPresence(sessionKey);
 		}
-
-		return c.json(result);
+	}
 	} catch (e) {
 		logger.error("hooks", "Session end hook failed", e as Error);
 		return c.json({ error: "Hook execution failed" }, 500);
@@ -4813,6 +4845,10 @@ app.post("/api/hooks/remember", async (c) => {
 
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
+
+		if (checkBypass(body)) {
+			return c.json({ success: true, memories: [], bypassed: true });
+		}
 
 		const result = handleRemember(body);
 		return c.json(result);
@@ -4840,6 +4876,10 @@ app.post("/api/hooks/recall", async (c) => {
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
 
+		if (checkBypass(body)) {
+			return c.json({ memories: [], count: 0, bypassed: true });
+		}
+
 		const result = handleRecall(body);
 		return c.json(result);
 	} catch (e) {
@@ -4862,6 +4902,10 @@ app.post("/api/hooks/pre-compaction", async (c) => {
 
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
+
+		if (checkBypass(body)) {
+			return c.json({ instructions: "", bypassed: true });
+		}
 
 		const result = handlePreCompaction(body);
 		return c.json(result);
@@ -4888,6 +4932,10 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 		const runtimePath = resolveRuntimePath(c, body);
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
+
+		if (checkBypass(body)) {
+			return c.json({ success: true, bypassed: true });
+		}
 
 		// Save the summary as a memory
 		if (!existsSync(MEMORY_DB)) {
@@ -5384,6 +5432,53 @@ app.get("/api/synthesis/status", (c) => {
 		lastRunAt: lastRunAt > 0 ? new Date(lastRunAt).toISOString() : null,
 		config,
 	});
+});
+
+// ============================================================================
+// Session API
+// ============================================================================
+
+// List active sessions with bypass status
+app.get("/api/sessions", (c) => {
+	const sessions = getActiveSessions();
+	return c.json({ sessions, count: sessions.length });
+});
+
+// Get single session status
+app.get("/api/sessions/:key", (c) => {
+	const key = c.req.param("key");
+	const sessions = getActiveSessions();
+	const session = sessions.find((s) => s.key === key);
+	if (!session) {
+		return c.json({ error: "Session not found" }, 404);
+	}
+	return c.json(session);
+});
+
+// Toggle bypass for a session
+app.post("/api/sessions/:key/bypass", async (c) => {
+	const key = c.req.param("key");
+	const sessions = getActiveSessions();
+	const session = sessions.find((s) => s.key === key);
+	if (!session) {
+		return c.json({ error: "Session not found" }, 404);
+	}
+
+	const body = await readOptionalJsonObject(c);
+	if (!body || typeof body.enabled !== "boolean") {
+		return c.json({ error: "enabled (boolean) is required" }, 400);
+	}
+	const enabled = body.enabled === true;
+
+	if (enabled) {
+		const ok = bypassSession(key);
+		if (!ok) {
+			return c.json({ error: "Session not found or already released" }, 404);
+		}
+	} else {
+		unbypassSession(key);
+	}
+	return c.json({ key, bypassed: enabled });
 });
 
 // ============================================================================
@@ -6036,6 +6131,7 @@ app.get("/api/status", (c) => {
 		memoryDb: existsSync(MEMORY_DB),
 		pipelineV2: config.pipelineV2,
 		activeSessions: activeSessionCount(),
+		bypassedSessions: getBypassedSessionKeys().size,
 		agentCreatedAt,
 		...(health ? { health } : {}),
 		update: {
