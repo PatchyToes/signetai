@@ -2,6 +2,19 @@
 
 All notable changes to Signet are documented here.
 
+## [0.50.1] - 2026-03-09
+
+### Features
+
+- **tray**: embed dashboard via frontendDist, complete Phase 1
+- **tray**: evolve system tray into full desktop application
+
+### Bug Fixes
+
+- **tray**: address PR #172 round 2 feedback
+- **tray**: address PR #172 review feedback
+
+
 ## [0.50.0] - 2026-03-09
 
 ### Bug Fixes
