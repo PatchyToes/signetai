@@ -38,5 +38,6 @@ export function up(db: MigrationDb): void {
 		CREATE INDEX IF NOT EXISTS idx_summaries_agent ON session_summaries(agent_id);
 		CREATE INDEX IF NOT EXISTS idx_summaries_latest ON session_summaries(latest_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_summary_children_child ON session_summary_children(child_id);
+		CREATE INDEX IF NOT EXISTS idx_summaries_session_key ON session_summaries(session_key);
 	`);
 }

@@ -33,7 +33,8 @@ export function up(db: MigrationDb): void {
 			archived_at TEXT NOT NULL,
 			archived_reason TEXT,
 			cold_source_id TEXT,
-			agent_id TEXT NOT NULL DEFAULT 'default'
+			agent_id TEXT NOT NULL DEFAULT 'default',
+			original_row_json TEXT
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_cold_agent ON memories_cold(agent_id);

@@ -167,26 +167,54 @@ export function archiveToCold(
 	}
 
 	const placeholders = memoryIds.map(() => "?").join(", ");
+	const now = new Date().toISOString();
 
-	db.prepare(`
+	// Fetch full rows so we can store a complete JSON snapshot (truly lossless —
+	// captures all columns regardless of future schema additions).
+	const rows = db
+		.prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
+		.all(...memoryIds) as Array<Record<string, unknown>>;
+
+	const stmt = db.prepare(`
 		INSERT OR IGNORE INTO memories_cold (
 			id, type, category, content, confidence, importance,
 			source_id, source_type, tags, who, why, project,
 			content_hash, normalized_content, extraction_status,
 			embedding_model, extraction_model, update_count,
 			original_created_at, archived_at, archived_reason,
-			cold_source_id, agent_id
+			cold_source_id, agent_id, original_row_json
 		)
-		SELECT
-			id, type, category, content, confidence, importance,
-			source_id, source_type, tags, who, why, project,
-			content_hash, normalized_content, extraction_status,
-			embedding_model, extraction_model, update_count,
-			created_at, datetime('now'), ?,
-			?, agent_id
-		FROM memories
-		WHERE id IN (${placeholders})
-	`).run(reason, coldSourceId ?? null, ...memoryIds);
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`);
+
+	for (const row of rows) {
+		stmt.run(
+			row.id,
+			row.type,
+			row.category,
+			row.content,
+			row.confidence,
+			row.importance,
+			row.source_id,
+			row.source_type,
+			row.tags,
+			row.who,
+			row.why,
+			row.project,
+			row.content_hash,
+			row.normalized_content,
+			row.extraction_status,
+			row.embedding_model,
+			row.extraction_model,
+			row.update_count,
+			row.created_at,
+			now,
+			reason,
+			coldSourceId ?? null,
+			typeof row.agent_id === "string" ? row.agent_id : "default",
+			JSON.stringify(row),
+		);
+	}
 }
 
 function purgeTombstones(db: WriteDb, cutoff: string, limit: number): number {
