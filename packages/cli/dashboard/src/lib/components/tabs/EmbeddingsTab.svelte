@@ -2057,6 +2057,7 @@ $effect(() => {
 				<button
 					class="pointer-events-auto flex items-center gap-2 px-3 py-1.5 min-w-[180px] border border-[rgba(255,255,255,0.1)] text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] cursor-pointer bg-transparent"
 					onclick={() => legendOpen = !legendOpen}
+					aria-expanded={legendOpen}
 				>
 					Legend
 					<span class="text-[8px]">{legendOpen ? "▼" : "▲"}</span>

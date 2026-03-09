@@ -126,6 +126,7 @@ function getColumnTasks(key: string): ScheduledTask[] {
 						<TaskCard
 							{task}
 							columnKey="disabled"
+							isSelected={false}
 							onclick={() => onopendetail(task.id, -1, -1)}
 							ontrigger={() => ontrigger(task.id)}
 							ontoggle={(enabled) => ontoggle(task.id, enabled)}
@@ -183,6 +184,7 @@ function getColumnTasks(key: string): ScheduledTask[] {
 		width: 6px;
 		height: 6px;
 		flex-shrink: 0;
+		border-radius: 50%;
 	}
 
 	.column-label {

@@ -27,16 +27,16 @@
 	function healthHue(score: number | null): string {
 		if (score === null) return "color-mix(in srgb, var(--sig-surface) 2%, transparent)";
 		if (score >= 0.8) return "color-mix(in srgb, var(--sig-success) 8%, transparent)";
-		if (score >= 0.6) return "color-mix(in srgb, var(--sig-warning) 8%, transparent)";
-		if (score >= 0.4) return "color-mix(in srgb, var(--sig-warning) 10%, transparent)";
+		if (score >= 0.6) return "color-mix(in srgb, var(--sig-warning, #d4a017) 8%, transparent)";
+		if (score >= 0.4) return "color-mix(in srgb, var(--sig-warning, #d4a017) 10%, transparent)";
 		return "color-mix(in srgb, var(--sig-danger) 10%, transparent)";
 	}
 
 	function healthBorder(score: number | null): string {
 		if (score === null) return "var(--sig-border)";
 		if (score >= 0.8) return "color-mix(in srgb, var(--sig-success) 25%, var(--sig-border))";
-		if (score >= 0.6) return "color-mix(in srgb, var(--sig-warning) 25%, var(--sig-border))";
-		if (score >= 0.4) return "color-mix(in srgb, var(--sig-warning) 25%, var(--sig-border))";
+		if (score >= 0.6) return "color-mix(in srgb, var(--sig-warning, #d4a017) 25%, var(--sig-border))";
+		if (score >= 0.4) return "color-mix(in srgb, var(--sig-warning, #d4a017) 25%, var(--sig-border))";
 		return "color-mix(in srgb, var(--sig-danger) 25%, var(--sig-border))";
 	}
 
