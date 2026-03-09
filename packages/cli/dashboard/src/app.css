@@ -9,59 +9,78 @@
 	--radius: 0.5rem;
 
 	/* shadcn semantic tokens */
-	--background: #08080a;
+	--background: #060608;
 	--foreground: #d4d4d8;
-	--card: #0e0e12;
+	--card: #0a0a0e;
 	--card-foreground: #d4d4d8;
-	--popover: #0e0e12;
+	--popover: #0a0a0e;
 	--popover-foreground: #d4d4d8;
 	--primary: #f0f0f2;
-	--primary-foreground: #08080a;
-	--secondary: #151519;
+	--primary-foreground: #060608;
+	--secondary: #111115;
 	--secondary-foreground: #d4d4d8;
-	--muted: #151519;
-	--muted-foreground: #6b6b76;
-	--accent: #151519;
+	--muted: #111115;
+	--muted-foreground: #5a5a66;
+	--accent: #111115;
 	--accent-foreground: #d4d4d8;
 	--destructive: #8a4a48;
 	--destructive-foreground: #f0f0f2;
-	--border: rgba(255, 255, 255, 0.06);
-	--input: rgba(255, 255, 255, 0.12);
-	--ring: #6b6b76;
+	--border: rgba(255, 255, 255, 0.05);
+	--input: rgba(255, 255, 255, 0.10);
+	--ring: #5a5a66;
 
 	/* shadcn sidebar tokens */
-	--sidebar: #0b0b0f;
+	--sidebar: #08080c;
 	--sidebar-foreground: #d4d4d8;
 	--sidebar-primary: #f0f0f2;
-	--sidebar-primary-foreground: #08080a;
-	--sidebar-accent: rgba(255, 255, 255, 0.08);
+	--sidebar-primary-foreground: #060608;
+	--sidebar-accent: rgba(255, 255, 255, 0.06);
 	--sidebar-accent-foreground: #d4d4d8;
-	--sidebar-border: rgba(255, 255, 255, 0.06);
-	--sidebar-ring: #6b6b76;
+	--sidebar-border: rgba(255, 255, 255, 0.05);
+	--sidebar-ring: #5a5a66;
 
 	/* Signet extended tokens */
-	--sig-bg: #08080a;
-	--sig-surface: #0e0e12;
-	--sig-surface-raised: #151519;
-	--sig-border: rgba(255, 255, 255, 0.06);
-	--sig-border-strong: rgba(255, 255, 255, 0.12);
-	--sig-text: #d4d4d8;
+	--sig-bg: #060608;
+	--sig-surface: #0a0a0e;
+	--sig-surface-raised: #111115;
+	--sig-border: rgba(255, 255, 255, 0.1);
+	--sig-border-strong: rgba(255, 255, 255, 0.15);
+	--sig-text: #c8c8d0;
 	--sig-text-bright: #f0f0f2;
-	--sig-text-muted: #6b6b76;
+	--sig-text-muted: #5a5a66;
 	--sig-accent: #8a8a96;
 	--sig-accent-hover: #c0c0c8;
 	--sig-danger: #8a4a48;
 	--sig-success: #4a7a5e;
 	--sig-dither: #f0f0f2;
-	--sig-grain-opacity: 0.04;
+	--sig-grain-opacity: 0.05;
+
+	/* Pinterest-inspired accent system — neon yellow-green (Aphex Twin / data grids) */
+	--sig-highlight: #c8ff00;
+	--sig-highlight-muted: rgba(200, 255, 0, 0.12);
+	--sig-highlight-dim: rgba(200, 255, 0, 0.06);
+	--sig-highlight-text: #d4ff2a;
+	/* Electric blue — data visualization / constellation patterns */
+	--sig-electric: #3b82f6;
+	--sig-electric-muted: rgba(59, 130, 246, 0.12);
+	--sig-electric-dim: rgba(59, 130, 246, 0.06);
+	/* Blueprint / schematic overlay */
+	--sig-blueprint: rgba(59, 130, 246, 0.04);
+	--sig-grid-line: rgba(255, 255, 255, 0.025);
+	/* Glow effects */
+	--sig-glow-highlight: 0 0 20px rgba(200, 255, 0, 0.15);
+	--sig-glow-electric: 0 0 20px rgba(59, 130, 246, 0.15);
+	/* Scanline opacity */
+	--sig-scanline-opacity: 0.015;
+
 	--sig-icon-fg: #f8fafc;
-	--sig-icon-border: rgba(255, 255, 255, 0.26);
-	--sig-icon-bg-1: #2563eb;
-	--sig-icon-bg-2: #7c3aed;
-	--sig-icon-bg-3: #059669;
-	--sig-icon-bg-4: #d97706;
-	--sig-icon-bg-5: #dc2626;
-	--sig-icon-bg-6: #0891b2;
+	--sig-icon-border: rgba(255, 255, 255, 0.22);
+	--sig-icon-bg-1: #3b5998;
+	--sig-icon-bg-2: #6b4c8a;
+	--sig-icon-bg-3: #4a7c6f;
+	--sig-icon-bg-4: #8a6d3b;
+	--sig-icon-bg-5: #7c4a4a;
+	--sig-icon-bg-6: #4a6e7c;
 
 	/* Log category colors (dark theme) */
 	--sig-log-category-watcher: #60a5fa;
@@ -70,7 +89,7 @@
 	--sig-log-category-system: #9ca3af;
 	--sig-log-category-embedding-tracker: #f472b6;
 	--sig-log-category-document-worker: #fb923c;
-	--sig-log-category-maintenance: #facc15;
+	--sig-log-category-maintenance: #c8ff00;
 	--sig-log-category-git: #2dd4bf;
 	--sig-log-category-scheduler: #c084fc;
 	--sig-log-category-retention: #f87171;
@@ -130,8 +149,8 @@
 	--sig-bg: #e4dfd8;
 	--sig-surface: #dbd5cd;
 	--sig-surface-raised: #d1cbc2;
-	--sig-border: rgba(0, 0, 0, 0.06);
-	--sig-border-strong: rgba(0, 0, 0, 0.12);
+	--sig-border: rgba(0, 0, 0, 0.1);
+	--sig-border-strong: rgba(0, 0, 0, 0.18);
 	--sig-text: #2a2a2e;
 	--sig-text-bright: #0a0a0c;
 	--sig-text-muted: #7a756e;
@@ -141,14 +160,29 @@
 	--sig-success: #4a7a5e;
 	--sig-dither: #0a0a0c;
 	--sig-grain-opacity: 0.06;
+
+	/* Pinterest accent system — deeper/saturated for light backgrounds */
+	--sig-highlight: #6b8f00;
+	--sig-highlight-muted: rgba(107, 143, 0, 0.10);
+	--sig-highlight-dim: rgba(107, 143, 0, 0.05);
+	--sig-highlight-text: #4a6600;
+	--sig-electric: #2563eb;
+	--sig-electric-muted: rgba(37, 99, 235, 0.10);
+	--sig-electric-dim: rgba(37, 99, 235, 0.05);
+	--sig-blueprint: rgba(37, 99, 235, 0.03);
+	--sig-grid-line: rgba(0, 0, 0, 0.03);
+	--sig-glow-highlight: 0 0 16px rgba(107, 143, 0, 0.12);
+	--sig-glow-electric: 0 0 16px rgba(37, 99, 235, 0.12);
+	--sig-scanline-opacity: 0.01;
+
 	--sig-icon-fg: #111827;
 	--sig-icon-border: rgba(0, 0, 0, 0.22);
-	--sig-icon-bg-1: #93c5fd;
-	--sig-icon-bg-2: #c4b5fd;
-	--sig-icon-bg-3: #86efac;
-	--sig-icon-bg-4: #fcd34d;
-	--sig-icon-bg-5: #fca5a5;
-	--sig-icon-bg-6: #67e8f9;
+	--sig-icon-bg-1: #8fa8c8;
+	--sig-icon-bg-2: #b0a0c4;
+	--sig-icon-bg-3: #8abfa8;
+	--sig-icon-bg-4: #c4a870;
+	--sig-icon-bg-5: #c49090;
+	--sig-icon-bg-6: #8ab4c4;
 
 	/* Log category colors (light theme) */
 	--sig-log-category-watcher: #2563eb;
@@ -157,7 +191,7 @@
 	--sig-log-category-system: #6b7280;
 	--sig-log-category-embedding-tracker: #db2777;
 	--sig-log-category-document-worker: #ea580c;
-	--sig-log-category-maintenance: #ca8a04;
+	--sig-log-category-maintenance: #6b8f00;
 	--sig-log-category-git: #0d9488;
 	--sig-log-category-scheduler: #9333ea;
 	--sig-log-category-retention: #dc2626;
@@ -236,7 +270,7 @@ body {
 	min-height: 100vh;
 }
 
-/* Grain overlay */
+/* Grain overlay — enhanced with denser noise */
 body::before {
 	content: "";
 	position: fixed;
@@ -244,13 +278,31 @@ body::before {
 	z-index: 9999;
 	pointer-events: none;
 	opacity: var(--sig-grain-opacity);
-	background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='5' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+	background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.5' numOctaves='6' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 	background-repeat: repeat;
-	background-size: 256px;
+	background-size: 200px;
+}
+
+/* Scanline overlay — retro CRT effect from Pinterest tech aesthetic */
+body::after {
+	content: "";
+	position: fixed;
+	inset: 0;
+	z-index: 9998;
+	pointer-events: none;
+	opacity: var(--sig-scanline-opacity);
+	background-image: repeating-linear-gradient(
+		0deg,
+		transparent,
+		transparent 2px,
+		rgba(0, 0, 0, 0.3) 2px,
+		rgba(0, 0, 0, 0.3) 4px
+	);
+	background-size: 100% 4px;
 }
 
 ::selection {
-	background: var(--sig-border-strong);
+	background: var(--sig-highlight-muted);
 	color: var(--sig-text-bright);
 }
 
@@ -490,6 +542,110 @@ h3 {
 	color: var(--sig-text-muted);
 }
 
+/* === Pinterest-inspired design utilities === */
+
+/* Neon highlight text — Aphex Twin / data grid accent */
+.sig-highlight-text {
+	color: var(--sig-highlight-text);
+}
+
+/* Highlighted badge with neon glow */
+.sig-highlight-badge {
+	font-family: var(--font-mono);
+	font-size: 9px;
+	border-radius: 0.5rem;
+	padding: 1px 6px;
+	background: var(--sig-highlight-muted);
+	color: var(--sig-highlight-text);
+	border: 1px solid var(--sig-highlight-dim);
+}
+
+/* Electric blue badge — data viz accent */
+.sig-electric-badge {
+	font-family: var(--font-mono);
+	font-size: 9px;
+	border-radius: 0.5rem;
+	padding: 1px 6px;
+	background: var(--sig-electric-muted);
+	color: var(--sig-electric);
+	border: 1px solid var(--sig-electric-dim);
+}
+
+/* Dense data display — technical readout style (retro tech / forma 04) */
+.sig-data {
+	font-family: var(--font-mono);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	line-height: 1.8;
+	color: var(--sig-text);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Subtle glow container — neon accent glow */
+.sig-glow {
+	box-shadow: var(--sig-glow-highlight);
+}
+
+/* Electric glow variant */
+.sig-glow-blue {
+	box-shadow: var(--sig-glow-electric);
+}
+
+/* Constellation dot — for node graph / data viz points */
+.sig-node {
+	width: 4px;
+	height: 4px;
+	border-radius: 50%;
+	background: var(--sig-highlight);
+	box-shadow: 0 0 6px var(--sig-highlight);
+}
+
+/* Crosshair marker — technical / schematic reference point */
+.sig-crosshair {
+	position: relative;
+}
+.sig-crosshair::before,
+.sig-crosshair::after {
+	content: "";
+	position: absolute;
+	background: var(--sig-grid-line);
+}
+.sig-crosshair::before {
+	width: 1px;
+	height: 100%;
+	left: 50%;
+}
+.sig-crosshair::after {
+	width: 100%;
+	height: 1px;
+	top: 50%;
+}
+
+/* Retro tech section divider — PlayStation/Sony inspired */
+.sig-divider {
+	border: none;
+	height: 1px;
+	background: linear-gradient(
+		90deg,
+		transparent 0%,
+		var(--sig-border-strong) 20%,
+		var(--sig-highlight-dim) 50%,
+		var(--sig-border-strong) 80%,
+		transparent 100%
+	);
+}
+
+/* Data readout number — large monospace numeric display */
+.sig-readout {
+	font-family: var(--font-mono);
+	font-size: 28px;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	line-height: 1;
+	color: var(--sig-text-bright);
+	font-variant-numeric: tabular-nums;
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
 	*,
@@ -508,5 +664,38 @@ h3 {
 	}
 	50% {
 		opacity: 0.5;
+	}
+}
+
+/* Neon flicker — subtle CRT-style flicker for accent elements */
+@keyframes sig-flicker {
+	0%, 97%, 100% {
+		opacity: 1;
+	}
+	98% {
+		opacity: 0.85;
+	}
+	99% {
+		opacity: 0.95;
+	}
+}
+
+/* Slow glow pulse — for constellation nodes and status indicators */
+@keyframes sig-glow-pulse {
+	0%, 100% {
+		box-shadow: 0 0 4px var(--sig-highlight);
+	}
+	50% {
+		box-shadow: 0 0 12px var(--sig-highlight), 0 0 24px var(--sig-highlight-dim);
+	}
+}
+
+/* Blueprint grid scroll — subtle parallax for schematic backgrounds */
+@keyframes sig-grid-drift {
+	0% {
+		background-position: -1px -1px;
+	}
+	100% {
+		background-position: 23px 23px;
 	}
 }

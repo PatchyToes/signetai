@@ -173,9 +173,10 @@ let rendered = $derived.by(() => {
 	.md-viewer-toolbar {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		height: 36px;
-		padding: 0 var(--space-md);
+		flex-wrap: wrap;
+		gap: 4px 8px;
+		min-height: 36px;
+		padding: 4px var(--space-md);
 		border-bottom: 1px solid var(--sig-border);
 		background: var(--sig-surface);
 		flex-shrink: 0;
@@ -212,6 +213,7 @@ let rendered = $derived.by(() => {
 
 	.md-viewer-actions {
 		display: flex;
+		margin-left: auto;
 		align-items: center;
 		gap: 6px;
 	}

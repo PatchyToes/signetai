@@ -18,6 +18,7 @@ import ExternalLink from "@lucide/svelte/icons/external-link";
 import Github from "@lucide/svelte/icons/github";
 import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 import { onMount } from "svelte";
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
 
 type ViewId = "readme" | "roadmap" | "changelog";
 
@@ -109,7 +110,8 @@ const loadedDocs = $derived([readme, roadmap, changelog].filter(Boolean).length)
 const activeDoc = $derived(docFor(activeView));
 </script>
 
-<div class="flex h-full min-h-0 flex-col overflow-hidden">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Changelog" />
 	<div
 		class="shrink-0 border-b border-[var(--sig-border)] bg-[var(--sig-surface)]
 			px-4 py-3"

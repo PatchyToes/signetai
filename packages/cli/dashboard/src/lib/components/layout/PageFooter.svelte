@@ -40,8 +40,7 @@ const staticFooter = $derived(PAGE_FOOTERS[activeTab]);
 {#if activeTab !== "skills"}
 <div
 	class="flex items-center justify-between h-[26px] px-4
-		border-t border-[var(--sig-border)]
-		bg-[var(--sig-surface)]
+		bg-[var(--sig-bg)]
 		sig-eyebrow shrink-0"
 >
 	{#if activeTab === "settings"}

@@ -32,9 +32,10 @@
 </script>
 
 <Card
-	class="flex flex-col overflow-hidden rounded-none
-		border-[var(--sig-border)] bg-[var(--sig-surface)] py-0
+	class="flex flex-col overflow-hidden rounded-none h-full
+		border-[var(--sig-border)] py-0
 		shadow-none"
+	style="background: var(--sig-surface);"
 >
 	<CardHeader class="px-3 py-2.5">
 		<div class="flex items-center gap-2">
@@ -53,7 +54,7 @@
 		</div>
 	</CardHeader>
 
-	<CardContent class="px-3 pb-3 pt-0">
+	<CardContent class="flex-1 flex flex-col px-3 pb-3 pt-0">
 		{#if items.length === 0}
 			<p
 				class="font-[family-name:var(--font-mono)] text-[10px]
@@ -81,7 +82,7 @@
 		{/if}
 
 		<button
-			class="mt-2 sig-meta text-[var(--sig-accent)] transition-opacity hover:opacity-80"
+			class="mt-auto pt-2 sig-meta text-[var(--sig-accent)] transition-opacity hover:opacity-80"
 			onclick={() => setTab("changelog")}
 		>
 			View all &rarr;

@@ -51,9 +51,10 @@ let lastRunLabel = $derived(formatRelativeTime(task.last_run_at));
 	data-column={columnKey}
 >
 	<Card.Root
-		class="bg-[var(--sig-surface-raised)] border-[var(--sig-border)]
+		class="border-[var(--sig-border)]
 			transition-all duration-150
 			{!task.enabled ? 'opacity-50' : ''}"
+		style="background: radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 2%, transparent), transparent 40%), linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 99%, black) 0%, var(--sig-surface) 65%);"
 	>
 		<Card.Content class="p-3 space-y-2">
 			<div class="flex items-start justify-between gap-2">

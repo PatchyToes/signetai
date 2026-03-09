@@ -4,6 +4,11 @@
 	import * as Card from "$lib/components/ui/card/index.js";
 	import * as Collapsible from "$lib/components/ui/collapsible/index.js";
 	import { onMount } from "svelte";
+	import PageBanner from "$lib/components/layout/PageBanner.svelte";
+	import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+	import { ENGINE_TAB_ITEMS } from "$lib/components/layout/page-headers";
+	import { nav } from "$lib/stores/navigation.svelte";
+	import { focusEngineTab } from "$lib/stores/tab-group-focus.svelte";
 	import PredictorStatusBar from "./PredictorStatusBar.svelte";
 	import PredictorColumn from "./PredictorColumn.svelte";
 	import ConvergenceChart from "./ConvergenceChart.svelte";
@@ -356,7 +361,16 @@
 </script>
 
 <!-- Observatory layout: CSS grid, no page scroll -->
-<div class="grid h-full overflow-y-auto p-4 gap-3" style="grid-template-rows: auto auto 1fr auto;">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Predictor">
+		<TabGroupBar
+			group="engine"
+			tabs={ENGINE_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusEngineTab(index)}
+		/>
+	</PageBanner>
+	<div class="grid flex-1 min-h-0 overflow-y-auto gap-3 p-3" style="grid-template-rows: auto auto auto 1fr auto;">
 	{#if loading && !status && !fetchError}
 		<div class="flex items-center justify-center col-span-full row-span-full">
 			<span class="sig-label text-[var(--sig-text-muted)]">loading predictor data...</span>
@@ -574,4 +588,5 @@
 			</Collapsible.Root>
 		</div>
 	{/if}
+	</div>
 </div>

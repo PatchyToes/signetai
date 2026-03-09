@@ -338,7 +338,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 								<Button
 									variant="outline"
 									size="sm"
-									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-danger)] text-[var(--sig-danger)] hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)]"
+									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text)] transition-all duration-150 hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)] hover:border-[var(--sig-danger)] hover:shadow-[0_0_12px_rgba(220,38,38,0.35)] hover:scale-[1.02]"
 									onclick={(event: MouseEvent) => {
 										event.stopPropagation();
 										void removeMarketplaceMcpServer(server.id);
@@ -401,7 +401,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 								<Button
 									variant="outline"
 									size="sm"
-									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-danger)] text-[var(--sig-danger)] hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)]"
+									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text)] transition-all duration-150 hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)] hover:border-[var(--sig-danger)] hover:shadow-[0_0_12px_rgba(220,38,38,0.35)] hover:scale-[1.02]"
 									onclick={(event: MouseEvent) => {
 										event.stopPropagation();
 										const serverId = installedServerByCatalogId.get(entry.id);
@@ -417,7 +417,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 								<Button
 									variant="outline"
 									size="sm"
-									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text-bright)]"
+									class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text)] transition-all duration-150 hover:bg-[var(--sig-surface-raised)] hover:text-[var(--sig-text-bright)] hover:border-[var(--sig-text-muted)] hover:shadow-[0_0_12px_rgba(255,255,255,0.1)] hover:scale-[1.02]"
 										onclick={(event: MouseEvent) => {
 											event.stopPropagation();
 											openInstallSheet(entry);
@@ -619,7 +619,22 @@ async function removeFromDetail(serverId: string): Promise<void> {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 		gap: 8px;
-		padding: 0;
+		padding: var(--space-md);
+		border: 1px solid var(--sig-border-strong);
+		border-radius: 8px;
+		background:
+			repeating-conic-gradient(
+				rgba(255, 255, 255, 0.02) 0% 25%,
+				transparent 0% 50%
+			) 0 0 / 10px 10px,
+			repeating-conic-gradient(
+				transparent 0% 25%,
+				rgba(0, 0, 0, 0.03) 0% 50%
+			) 5px 5px / 10px 10px,
+			repeating-conic-gradient(
+				var(--sig-surface) 0% 25%,
+				color-mix(in srgb, var(--sig-surface) 96%, black) 0% 50%
+			) 0 0 / 10px 10px;
 	}
 
 	.catalog-card {
@@ -629,27 +644,30 @@ async function removeFromDetail(serverId: string): Promise<void> {
 		padding: 9px;
 		border: 1px solid var(--sig-border);
 		background:
-			radial-gradient(circle at 12% -24%, color-mix(in srgb, var(--sig-accent) 8%, transparent), transparent 52%),
-			linear-gradient(220deg, color-mix(in srgb, var(--sig-surface-raised) 92%, black) 0%, var(--sig-surface-raised) 72%);
+			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 8%, transparent), transparent 45%),
+			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 94%, black) 0%, var(--sig-surface) 65%);
 		cursor: pointer;
-		transition: border-color 0.15s;
+		transition: border-color 0.15s, background 0.15s;
 		min-height: 140px;
 		width: 100%;
 		text-align: left;
 	}
 
 	.catalog-card:hover {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
+		background:
+			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 11%, transparent), transparent 45%),
+			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 91%, black) 0%, var(--sig-surface) 65%);
 	}
 
 	.catalog-card:focus {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	.catalog-card:focus-visible {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	.catalog-top {
@@ -661,7 +679,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 	.catalog-name {
 		font-family: var(--font-display);
 		font-size: 12px;
-		color: var(--sig-text-bright);
+		color: var(--sig-highlight);
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}

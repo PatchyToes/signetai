@@ -104,7 +104,19 @@
 		justify-content: space-between;
 		gap: var(--space-md);
 		padding: var(--space-sm) var(--space-md);
-		background: var(--sig-surface);
+		background:
+			repeating-conic-gradient(
+				rgba(255, 255, 255, 0.02) 0% 25%,
+				transparent 0% 50%
+			) 0 0 / 10px 10px,
+			repeating-conic-gradient(
+				transparent 0% 25%,
+				rgba(0, 0, 0, 0.03) 0% 50%
+			) 5px 5px / 10px 10px,
+			repeating-conic-gradient(
+				var(--sig-surface) 0% 25%,
+				color-mix(in srgb, var(--sig-surface) 96%, black) 0% 50%
+			) 0 0 / 10px 10px;
 		border: 1px solid var(--sig-border);
 		border-radius: var(--radius);
 	}
@@ -136,7 +148,7 @@
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: var(--sig-text-bright);
+		color: var(--sig-highlight);
 		margin: 0;
 		line-height: 1.1;
 	}
@@ -183,7 +195,7 @@
 		font-family: var(--font-mono);
 		font-size: 10px;
 		font-weight: 600;
-		color: var(--sig-text-bright);
+		color: var(--sig-highlight);
 	}
 
 	.chip-label {

@@ -5,7 +5,6 @@ import AppSidebar from "$lib/components/app-sidebar.svelte";
 import ExtensionBanner from "$lib/components/ExtensionBanner.svelte";
 import UpgradeBanner from "$lib/components/UpgradeBanner.svelte";
 import GlobalCommandPalette from "$lib/components/command/GlobalCommandPalette.svelte";
-import PageHeader from "$lib/components/layout/PageHeader.svelte";
 import PageFooter from "$lib/components/layout/PageFooter.svelte";
 import TabContentLoader from "$lib/components/layout/TabContentLoader.svelte";
 import * as Sidebar from "$lib/components/ui/sidebar/index.js";
@@ -211,19 +210,8 @@ $effect(() => {
 		onprefetchembeddings={prefetchEmbeddingsTab}
 	/>
 	<main data-page-content="true" class="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden
-		m-2 ml-0 rounded-lg border border-[var(--sig-border)] md:border-l-0
+		mr-2 rounded-br-lg border border-[var(--sig-border-strong)] border-l-0 border-t-0 border-b-0
 		bg-[var(--sig-surface)]">
-
-		<PageHeader
-			{activeTab}
-			{memoryDocumentsLabel}
-			memorySearching={mem.searching}
-			memoryHasResults={!!(mem.searched || hasActiveFilters() || mem.similarSourceId)}
-			onresetmemory={clearAll}
-			onnewtask={() => openForm()}
-			onmemoryselect={handleMemorySelect}
-			onengineselect={handleEngineSelect}
-		/>
 
 		<UpgradeBanner {daemonStatus} />
 		<ExtensionBanner />

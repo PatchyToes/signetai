@@ -271,7 +271,7 @@
 		display: flex;
 		align-items: center;
 		gap: var(--space-xs);
-		shrink: 0;
+		flex-shrink: 0;
 	}
 
 	.importance-dot {
@@ -299,7 +299,7 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 2px;
-		shrink: 0;
+		flex-shrink: 0;
 	}
 
 	.tag-badge {
@@ -314,7 +314,7 @@
 		display: flex;
 		gap: 2px;
 		margin-top: auto;
-		shrink: 0;
+		flex-shrink: 0;
 	}
 
 	:global(.action-btn) {

@@ -16,6 +16,9 @@ import { nav } from "$lib/stores/navigation.svelte";
 import TaskBoard from "$lib/components/tasks/TaskBoard.svelte";
 import TaskForm from "$lib/components/tasks/TaskForm.svelte";
 import TaskDetail from "$lib/components/tasks/TaskDetail.svelte";
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
+import { Button } from "$lib/components/ui/button/index.js";
+import Plus from "@lucide/svelte/icons/plus";
 
 // Track position as [columnIndex, taskIndex]
 let selectedColumn = $state(0);
@@ -234,9 +237,22 @@ onMount(() => {
 
 <svelte:window onkeydown={handleGlobalKey} />
 
-<div class="h-full flex flex-col overflow-hidden">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Tasks">
+		{#snippet right()}
+			<Button
+				variant="outline"
+				size="sm"
+				class="h-7 gap-1.5 text-[11px] bg-[var(--sig-bg)] border-[var(--sig-border)]"
+				onclick={() => openForm()}
+			>
+				<Plus class="size-3.5" />
+				New Task
+			</Button>
+		{/snippet}
+	</PageBanner>
 	<!-- Board -->
-	<div class="flex-1 min-h-0 overflow-auto">
+	<div class="flex flex-col flex-1 min-h-0 overflow-auto">
 		<TaskBoard
 			tasks={ts.tasks}
 			loading={ts.loading}

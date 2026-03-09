@@ -118,8 +118,9 @@
 
 <Card
 	class="flex flex-col overflow-hidden rounded-none
-		border-[var(--sig-border)] bg-[var(--sig-surface)] py-0
+		border-[var(--sig-border)] py-0
 		shadow-none"
+	style="background: var(--sig-surface);"
 >
 	<CardHeader class="px-3 py-2.5">
 		<div class="flex items-center gap-2">

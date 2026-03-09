@@ -19,6 +19,7 @@ import { nav } from "$lib/stores/navigation.svelte";
 import { Checkbox } from "$lib/components/ui/checkbox/index.js";
 import { ActionLabels } from "$lib/ui/action-labels";
 import { onMount } from "svelte";
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
 
 let secrets = $state<string[]>([]);
 let secretsLoading = $state(false);
@@ -431,7 +432,8 @@ onMount(() => {
 
 <svelte:window onkeydown={handleGlobalKey} />
 
-<div class="flex h-full flex-col overflow-hidden">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Secrets" />
 	<div
 		class="grid flex-1 gap-[var(--space-md)] overflow-hidden p-[var(--space-md)]
 			xl:grid-cols-[1.2fr_0.8fr]"

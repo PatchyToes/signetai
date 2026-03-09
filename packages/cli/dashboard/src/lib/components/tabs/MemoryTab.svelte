@@ -1,4 +1,8 @@
 <script lang="ts">
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
+import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+import { MEMORY_TAB_ITEMS } from "$lib/components/layout/page-headers";
+import { focusMemoryTab } from "$lib/stores/tab-group-focus.svelte";
 import type { Memory } from "$lib/api";
 import {
 	mem,
@@ -357,6 +361,14 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Memory Index">
+		<TabGroupBar
+			group="memory"
+			tabs={MEMORY_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusMemoryTab(index)}
+		/>
+	</PageBanner>
 	<section class="flex flex-col flex-1 min-h-0 gap-2.5 p-3 bg-[var(--sig-bg)]">
 	<!-- Search bar -->
 	<label class="flex items-center gap-2 px-3 py-1.5
@@ -548,7 +560,7 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 	<!-- Similarity mode banner -->
 	{#if mem.similarSourceId && mem.similarSource}
 		<div class="flex items-center justify-between gap-3
-			px-3 py-1.5 border border-dashed
+			px-3 py-1.5 border border-dashed rounded-lg
 			border-[var(--sig-border-strong)]
 			sig-label text-[var(--sig-text)] bg-[var(--sig-surface)]">
 			<span class="truncate">
@@ -574,7 +586,7 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 		auto-rows-min gap-2.5 content-start">
 		{#if mem.loadingSimilar}
 			<div class="col-span-full py-8 text-center text-[12px]
-				text-[var(--sig-text-muted)]
+				text-[var(--sig-text-muted)] rounded-lg
 				border border-dashed border-[var(--sig-border-strong)]">
 				Finding similar memories...
 			</div>
@@ -590,7 +602,7 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 				class="doc-card relative flex flex-col
 				gap-1.5 p-3 border border-[var(--sig-border-strong)]
 				border-t-2 border-t-[var(--sig-text-muted)]
-				bg-[var(--sig-surface)] overflow-hidden
+				bg-[var(--sig-surface)] overflow-hidden rounded-lg
 				transition-colors duration-150
 				hover:border-[var(--sig-text-muted)]
 				focus-visible:outline focus-visible:outline-2
@@ -679,7 +691,7 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 				</div>
 			{:else}
 				<div class="col-span-full py-8 text-center text-[12px]
-					text-[var(--sig-text-muted)]
+					text-[var(--sig-text-muted)] rounded-lg
 					border border-dashed border-[var(--sig-border-strong)]">
 					{mem.similarSourceId
 						? 'No similar memories found.'
@@ -702,37 +714,6 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 </div>
 
 <style>
-	.doc-card::before,
-	.doc-card::after {
-		content: '';
-		position: absolute;
-		width: 5px;
-		height: 5px;
-		border-color: var(--sig-border-strong);
-		border-style: solid;
-		pointer-events: none;
-		transition: border-color 150ms;
-	}
-
-	.doc-card::before {
-		top: -1px;
-		left: -1px;
-		border-width: 1px 0 0 1px;
-	}
-
-	.doc-card::after {
-		bottom: -1px;
-		right: -1px;
-		border-width: 0 1px 1px 0;
-	}
-
-	.doc-card:hover::before,
-	.doc-card:hover::after,
-	.doc-card:focus::before,
-	.doc-card:focus::after {
-		border-color: var(--sig-text-muted);
-	}
-
 	.doc-card:focus {
 		border-color: var(--sig-text-muted);
 		outline: 2px solid var(--sig-accent);

@@ -153,7 +153,10 @@ export function startSimulation(
 			forceCollide().radius((entry: any) => entry.radius + 2),
 		)
 		.alphaDecay(0.03)
-		.on("tick", requestRedraw);
+		.on("tick", requestRedraw)
+		.on("end", () => {
+			if (!userAdjustedCamera) fitCameraToBounds();
+		});
 }
 
 export function startKnowledgeGraphSimulation(
@@ -197,7 +200,10 @@ export function startKnowledgeGraphSimulation(
 			forceCollide().radius((entry: any) => entry.radius + 2),
 		)
 		.alphaDecay(0.03)
-		.on("tick", requestRedraw);
+		.on("tick", requestRedraw)
+		.on("end", () => {
+			if (!userAdjustedCamera) fitCameraToBounds();
+		});
 }
 
 export function updatePhysics(nextPhysics: GraphPhysicsConfig): void {

@@ -6,6 +6,11 @@ import { browser } from "$app/environment";
 import * as Select from "$lib/components/ui/select/index.js";
 import { ActionLabels } from "$lib/ui/action-labels";
 import { onMount, tick } from "svelte";
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
+import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+import { ENGINE_TAB_ITEMS } from "$lib/components/layout/page-headers";
+import { nav } from "$lib/stores/navigation.svelte";
+import { focusEngineTab } from "$lib/stores/tab-group-focus.svelte";
 
 interface LogEntry {
 	timestamp: string;
@@ -423,7 +428,16 @@ $effect(() => {
 });
 </script>
 
-<div class="flex flex-col flex-1 min-h-0 p-[var(--space-sm)] lg:p-[var(--space-md)]">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Logs">
+		<TabGroupBar
+			group="engine"
+			tabs={ENGINE_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusEngineTab(index)}
+		/>
+	</PageBanner>
+	<div class="flex flex-col flex-1 min-h-0 p-[var(--space-sm)] lg:p-[var(--space-md)]">
 	<div class="flex-1 min-h-0 grid grid-cols-1 gap-[var(--space-md)] lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
 		<section class="min-h-0 flex flex-col rounded-lg border border-[var(--sig-border-strong)] bg-[var(--sig-surface-raised)] overflow-hidden">
 			<div class="flex flex-wrap items-center gap-[var(--space-sm)] px-[var(--space-md)] py-[var(--space-sm)] border-b border-[var(--sig-border)] shrink-0">
@@ -590,6 +604,7 @@ $effect(() => {
 				<div class="text-[var(--sig-text-muted)]">Select a log entry to inspect details.</div>
 			{/if}
 		</section>
+	</div>
 	</div>
 </div>
 

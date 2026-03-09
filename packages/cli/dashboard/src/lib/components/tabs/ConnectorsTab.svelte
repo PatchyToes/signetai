@@ -14,6 +14,11 @@
 		type DocumentConnector,
 	} from "$lib/api";
 	import { toast } from "$lib/stores/toast.svelte";
+	import PageBanner from "$lib/components/layout/PageBanner.svelte";
+	import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+	import { ENGINE_TAB_ITEMS } from "$lib/components/layout/page-headers";
+	import { nav } from "$lib/stores/navigation.svelte";
+	import { focusEngineTab } from "$lib/stores/tab-group-focus.svelte";
 
 	let harnesses = $state<Harness[]>([]);
 	let connectors = $state<DocumentConnector[]>([]);
@@ -172,7 +177,16 @@
 	});
 </script>
 
-<div class="flex flex-1 flex-col gap-6 p-4 overflow-y-auto">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Connectors">
+		<TabGroupBar
+			group="engine"
+			tabs={ENGINE_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusEngineTab(index)}
+		/>
+	</PageBanner>
+	<div class="flex flex-1 flex-col gap-6 p-4 overflow-y-auto">
 	{#if loading}
 		<div class="flex flex-1 items-center justify-center sig-label">
 			Loading connectors...
@@ -350,4 +364,5 @@
 			{/if}
 		</section>
 	{/if}
+	</div>
 </div>
