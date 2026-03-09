@@ -414,6 +414,56 @@ participate in useful traversal paths? The ones that don't are noise,
 regardless of their mention count.
 
 
+Foundation: Lossless Context Patterns
+--------------------------------------
+
+Desire paths assumes a clean, bounded knowledge graph with
+non-destructive lifecycle management. Five patterns adapted from
+Voltropy's Lossless Context Management (LCM) research provide this
+foundation. They are documented in [[LCM-PATTERNS|Lossless Context
+Patterns]] and can be implemented independently, before desire paths.
+
+The patterns that matter most to desire paths:
+
+- **Lossless retention** -- decay without destruction. When a path
+  gets demoted by consistently bad feedback, the underlying knowledge
+  moves to a cold tier rather than being deleted. Explorer bees can
+  walk into cold territory and rediscover forgotten connections. This
+  makes the entire feedback loop non-destructive -- the system can
+  evolve its topology without permanent information loss.
+
+- **Three-level extraction escalation** -- convergence guarantee for
+  the extraction pipeline. If desire paths learns from a graph
+  polluted with noise entities, path scoring learns from garbage.
+  Escalation ensures extraction output is always bounded, which keeps
+  path reinforcement signals clean.
+
+- **Zero-cost continuity** -- if 30% of sessions are trivial and
+  produce noise extractions, 30% of path reinforcement signals are
+  misleading. A significance gate at pipeline entry prevents noise
+  from entering the system, making every training signal the predictor
+  receives more trustworthy.
+
+- **Session summary DAG** -- desire paths operates on the spatial
+  dimension (entity graph). The session DAG adds a temporal dimension.
+  The predictor can learn to route through both: "for queries about
+  recent refactors, walk session summaries first; for queries about
+  architecture, walk entity aspects." Temporal sequence as a learnable
+  routing signal.
+
+- **On-demand expansion** -- desire paths' eager traversal at session
+  start is the push path. On-demand expansion is the pull path. The
+  agent requests what it knows it needs, complementing what the system
+  predicted it would need. Explorer bees can also use expansion to
+  drill into speculative findings immediately.
+
+These patterns provide the deterministic floor. Desire paths provides
+the learning ceiling. LCM guarantees convergence, bounded output, and
+lossless lifecycle. Desire paths adds reinforcement, emergence, and
+lateral thinking. Together they produce a system that is both reliable
+and intelligent.
+
+
 Relationship to Existing Architecture
 --------------------------------------
 
@@ -440,6 +490,10 @@ architecture:
 - **The exploration layer** extends the [[pipeline|extraction pipeline]] with one
   additional step: checking whether new facts bridge to unlinked
   entities. No new infrastructure required.
+- **The [[LCM-PATTERNS|lossless context patterns]]** provide the deterministic
+  foundation: bounded extraction, non-destructive decay, temporal
+  hierarchy, and on-demand expansion. Desire paths builds on these
+  guarantees.
 
 
 The Convergence
@@ -468,11 +522,14 @@ Small. Dense. Connected. Correct. And now: *learned*.
 
 ---
 
-*This document describes the concept. Implementation details,
-data structures, and integration points will follow in a separate
-specification once the concept is validated.*
+*This document describes the concept. The deterministic foundation
+is specified in [[LCM-PATTERNS|Lossless Context Patterns]].
+Implementation details, data structures, and integration points
+for the learning layer will follow in a separate specification
+once the foundation is in place.*
 
 ---
 
-*Written by Nicholai, Mr. Claude, PatchyToes, and Jake. March 7, 2026.*
+*Written by Nicholai, Mr. Claude, PatchyToes, and Jake. March 7, 2026.
+Updated March 8, 2026: added LCM foundation section and cross-references.*
 

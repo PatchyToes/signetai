@@ -9,7 +9,6 @@ This file: AGENTS.md -> Symlinked to CLAUDE.md
 
 # Repository Guidelines 
 
-
 This file provides guidance to AI assistants working on this repository.
 It is version controlled and co-maintained by human developers and AI
 assistants. Changes to this document (and the codebase) should be
@@ -28,6 +27,26 @@ daemon with HTTP API, and web dashboard.
 
 **Always read `VISION.md` at the start of every session.** It describes
 what Signet is building toward and should anchor development decisions.
+
+Core Priorities
+---
+
+1. Performance.
+2. Reliability.
+3. Keep behavior predictable under load and during failures (session 
+restarts, reconnects, partial streams).
+
+If a tradeoff is required, choose correctness and robustness over short-term 
+convenience.
+
+Maintainability
+---
+
+Long term maintainability is a core priority. If you add new functionality, 
+first check if there are shared logic that can be extracted to a separate module.
+Duplicate logic across mulitple files is a code smell and should be avoided. 
+Don't be afraid to change existing code. Don't take shortcuts by just adding local 
+logic to solve a problem.
 
 Commands
 ---
@@ -128,6 +147,7 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 | `signetai` | Meta-package bundling CLI + daemon | - |
 | `@signet/web` | Marketing website (Astro static, Cloudflare Pages) | cloudflare |
 | `predictor` | Predictive memory scorer sidecar (WIP) | rust |
+
 
 ### Package Responsibilities
 
@@ -705,3 +725,19 @@ uppercase), `sig-heading` (11px bold uppercase), `sig-meta` (9px),
 - Use `$effect()` for side effects, not `afterUpdate`.
 - Wrap mutable external references in `$state.raw()` or
   `untrack()` where needed to prevent infinite reactivity loops.
+
+
+Reference repos
+---
+
+Use these as implementation references when designing protocol handling,
+integrations, and operational safeguards.
+
+- [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) — lossless context handling
+- [openclaw](https://github.com/openclaw/openclaw) — agent runtime reference
+- [acpx](https://github.com/openclaw/acpx) — agent communication protocol
+- [arscontexta](https://github.com/agenticnotetaking/arscontexta) — agentic notetaking
+- [ACAN](https://github.com/HongChuanYang/Training-by-LLM-Enhanced-Memory-Retrieval-for-Generative-Agents-via-ACAN) — LLM-enhanced memory retrieval
+- [cli](https://github.com/entireio/cli) — CLI patterns
+- [codex/cli](https://github.com/openai/codex.git)
+- [opencode](https://github.com/anomalyco/opencode.git)
