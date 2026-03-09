@@ -6,8 +6,6 @@
   <a href="https://github.com/signetai/signetai/stargazers"><img src="https://img.shields.io/github/stars/signetai/signetai.svg" alt="GitHub Stars" /></a>
 </p>
 
-> For Claude Code, OpenCode, and OpenClaw
-
 <table>
 <tr>
 <td width="240" valign="top">
@@ -15,371 +13,287 @@
 </td>
 <td valign="top">
 
-**Own your agent. Bring it anywhere.**
+**Your agent is an investment. Signet is where its value accumulates.**
 
-Signet is a local-first identity, memory, and operations layer for AI
-agents. It ships a full memory pipeline with LLM-based extraction and
-graph-augmented retrieval, an authenticated HTTP API, analytics, and
-an integration SDK — all running on your machine, under your control.
+Signet is an open protocol for agent identity, knowledge, and trust.
+It defines how an agent should persist across sessions, learn from
+its operator, and carry its identity between tools. The reference
+implementation ships a distillation engine that turns raw conversation
+into structured insights, a knowledge graph that maps how those
+insights connect, and a portable identity layer that follows your
+agent into any harness you use.
 
-Agent configuration lives in plain files at `~/.agents/`, backed by a
-SQLite database, and synced across every harness you use. Signet is
-also the first *agent-native secret store*, letting your agent use
-secrets without ever reading their values.
+Everything runs locally. You own the data. The agent is yours.
 
 </td>
 </tr>
 </table>
 
 ---
-
-<table>
-<tr>
-<td valign="top">
 
 Why Signet
 ===
 
-Most AI tools build memory silos. Switch harnesses and you lose your
-agent's context, preferences, and accumulated knowledge. Rebuild it
-manually, or start from scratch.
+Your agent starts every session from zero. It doesn't know what you
+worked on yesterday. It doesn't know your preferences, your projects,
+or the decisions you've already made together. Every session is a
+first date.
 
-Signet gives you one portable substrate you actually own: plain-text
-identity files you can inspect and version-control, a daemon that runs
-locally and handles everything memory-related, and connector packages
-that keep each harness in sync with your canonical config. The same
-agent follows you into Claude Code, OpenCode, or OpenClaw — same
-personality, same memory, same secrets — without any vendor lock-in.
+Signet fixes this. Not with a vector store that regurgitates old
+conversations — with a distillation engine that extracts structured
+insights from every session, maps them into a knowledge graph, and
+assembles the right context for the right moment. Your agent doesn't
+just remember. It *understands*.
 
-The memory pipeline is privacy-first: the default LLM is a local Ollama
-model. Nothing leaves your machine unless you configure it to.
-
-</td>
-</tr>
-</table>
+The same agent follows you across Claude Code, OpenCode, and
+OpenClaw. Same personality, same knowledge, same secrets. Switch
+tools without starting over.
 
 ---
 
-```text
-~/.agents/
-├── agent.yaml        # Manifest + runtime config
-├── AGENTS.md         # Source-of-truth operating instructions
-├── SOUL.md           # Voice/personality guidance
-├── IDENTITY.md       # Structured identity metadata
-├── USER.md           # User preferences/profile
-├── MEMORY.md         # Synthesized working memory (generated)
-├── memory/           # SQLite DB + embedding artifacts
-├── skills/           # Installed skills (SKILL.md per skill)
-├── .secrets/         # Encrypted secret store
-└── .daemon/          # PID + logs
-```
-
-How memory works
+How it works
 ===
 
-When you save a memory, Signet persists the raw content immediately —
-the database write happens before any LLM processing begins. No matter
-what happens after, your data is safe.
+### The distillation layer
 
-In the background, a local LLM reads the new memory and does two things:
-it breaks the content into structured facts and entities, then checks
-what's already stored. For each fact, it decides whether to file it as
-new, update an existing memory, replace something outdated, or skip it
-entirely.
+At the end of every conversation, Signet reviews the session and
+distills it. Not "save the transcript" — *distill*. A local LLM
+breaks the conversation into atomic facts, checks them against
+what's already known, and decides: file as new, update something
+existing, replace something outdated, or skip entirely. Your agent
+won't store "prefers dark mode" fourteen times. It recognizes the
+insight already exists and moves on.
 
-This means your agent won't keep duplicating "prefers dark mode" every
-session. It sees the existing memory, recognizes it already knows this,
-and moves on.
+### The knowledge graph
 
-The same pipeline runs at the end of every conversation. The daemon
-reviews the session transcript, extracts anything worth remembering,
-and feeds it through the same process. So even if you never use
-`/remember` manually, your agent builds context over time — without
-accumulating duplicates or contradictions.
+Named entities — people, projects, tools, concepts — are extracted
+and linked. When you ask about a project, Signet doesn't just find
+text that sounds related. It traverses the graph: the project's
+architecture, the people involved, the tools it depends on, the
+constraints that apply. Context arrives structured, not as a pile of
+fragments hoping something useful is in there.
 
-**Knowledge graph.** The pipeline also maintains an entity graph. Named
-entities (people, projects, tools, concepts) are extracted and linked,
-and search uses one-hop graph traversal to boost results that are
-semantically adjacent to your query. Asking about a project surfaces
-memories mentioning the people and tools associated with it.
+### The index
 
-**Document ingest.** You can feed documents directly into the pipeline.
-They're chunked, embedded, and indexed alongside your memories. URL
-fetching is built in — point Signet at a doc, a spec, or a reference
-page and it becomes part of your agent's searchable knowledge base.
+Every insight is embedded and indexed. Retrieval blends keyword
+search, semantic similarity, and graph traversal into a single
+ranked result. The constellation view in the dashboard lets you see
+your agent's knowledge topology — what's connected, what's isolated,
+what's going stale.
 
-**Modify and forget.** Explicit `/modify` and `/forget` commands let you
-correct or remove specific memories. Deletions are soft: content is
-tombstoned with a 30-day recovery window and a full audit trail.
-Pinned (critical) memories are never modified by the pipeline, only
-by you.
+### Document ingest
 
-**Diagnostics and maintenance.** The daemon runs a maintenance worker
-that scores memory health — checking for orphaned embeddings, schema
-drift, embedding failures, and other issues — and can repair them
-autonomously. Timeline reconstruction lets you trace incidents by
-replaying analytics events across a time window.
+Feed any document into the distillation layer. PDFs, specs, reference
+pages, URLs. They're chunked, embedded, and indexed alongside your
+agent's insights. Point Signet at a codebase's docs and they become
+part of what your agent knows.
 
-Three safety guarantees hold throughout:
+### Safety guarantees
 
 - **Raw-first**: content is persisted before any LLM processing begins
-- **Pinned memories are sacred**: the model cannot delete them, period
+- **Pinned insights are sacred**: the distillation layer cannot modify
+  them. Only you can.
 - **Everything is recoverable**: deletions are soft, with a 30-day
-  recovery window and a full audit trail
+  recovery window and full audit trail
 
-What ships now
-===
-
-Memory
 ---
-
-- Pipeline v2 with durable async job queue and structured extraction
-- Hybrid retrieval: FTS5 keyword + vector similarity, score-blended
-- Knowledge graph: entity extraction, graph-augmented search boost
-- Document ingest with automatic chunking, embedding, and URL fetching
-- Explicit modify/forget with soft-delete and 30-day recovery
-- Retention decay: configurable aging for low-value memories
-- Full audit history for every write, update, and deletion
-
-Identity
----
-
-- Portable identity files at `~/.agents/` (AGENTS.md, SOUL.md,
-  IDENTITY.md, USER.md, MEMORY.md)
-- Daemon-driven harness sync: writes harness-specific config files on
-  change (CLAUDE.md, opencode AGENTS.md, OpenClaw bootstrap)
-- Skills: install and manage skills from skills.sh
-- Git-aware workflow: optional auto-commit and configurable sync
-
-Security
----
-
-- Auth middleware with three modes: `local` (localhost-only, no token),
-  `team` (bearer token, all requests), `hybrid` (token required for
-  writes, open for reads)
-- Role-based permissions with four roles: `admin`, `operator`, `agent`,
-  `readonly`
-- Scope model: `project`, `agent`, `user`
-- Rate limiting on destructive operations
-- Secrets: libsodium-encrypted at rest (`XSalsa20-Poly1305`), never
-  returned by API, subprocess output redacted
-- Privacy-first default: local Ollama LLM, no outbound telemetry
-
-Operations
----
-
-- Analytics: usage counters, error ring buffer, per-endpoint latency
-  histograms, token usage tracking
-- Diagnostics: health scoring across memory, embeddings, schema,
-  config integrity
-- Autonomous maintenance: scheduled repair actions with dry-run support
-- Timeline: incident reconstruction by replaying events across a window
-- Repair actions: targeted fixes for detected issues, audit-logged
-
-Integrations
----
-
-- Connectors: Claude Code, OpenCode, OpenClaw, filesystem (built-in)
-- SDK (`@signet/sdk`): typed API client, React hooks, Vercel AI SDK
-  middleware, OpenAI helper wrappers
-- Dashboard at `http://localhost:3850`: config editor, memory browser,
-  embeddings view, skills/secrets/logs
-
-Requirements
-===
-
-- Node.js 18+ for CLI and package workflows
-- Bun for the daemon runtime (`signet start`)
-- Ollama for the local LLM (recommended) or an OpenAI API key
-- macOS or Linux
-
-Quickstart
-===
 
 Install
----
+===
 
 ```bash
-# Global install (pick one)
-npm install -g signetai
-bun add -g signetai
+bun add -g signetai        # or: npm install -g signetai 
+signet setup               # interactive setup wizard
 ```
 
-Then run the interactive setup wizard:
-
-```bash
-signet
-```
-
-The wizard initializes `~/.agents/`, configures your selected
-harnesses, prompts for an embedding provider (Ollama/OpenAI/skip),
-creates the memory database, and starts the daemon.
+The wizard initializes `~/.agents/` (or configure your own directory),
+configures your selected harnesses, sets up an embedding provider 
+(Native/Ollama/OpenAI), creates the database, and starts the daemon.
 
 ### Tell your agent to install it
 
-Copy this prompt and paste it to your AI agent (Claude Code, OpenClaw,
-Clawdbot, OpenCode, etc.):
+Paste this to your AI agent:
 
 ```
 Install and fully configure Signet AI by following this guide exactly: https://signetai.sh/skill.md
 ```
 
-The linked guide walks your agent through prerequisites, installation,
-setup, and verification step by step — with gates that ensure it stops
-and explains what it's doing before each phase.
-
-Use it
----
+### Use it
 
 ```bash
-signet status
-signet dashboard
+signet status              # check daemon health
+signet dashboard           # open the web UI
 
-signet remember "prefers bun over npm" -w claude-code
+signet remember "prefers bun over npm"
 signet recall "coding preferences"
-
-# Explicit modify and forget
-signet memory modify <id> "updated content"
-signet memory forget <id>
-signet memory recover <id>
 ```
 
-In connected harnesses, built-in skills work directly:
+In connected harnesses, skills work directly:
 
 ```text
 /remember critical: never commit secrets to git
 /recall release process
 ```
 
+---
+
 Harness support
 ===
 
 | Harness | Status | Integration |
 |---|---|---|
-| Claude Code | Supported | Connector writes `~/.claude/CLAUDE.md` + hook config |
-| OpenCode | Supported | Connector writes `~/.config/opencode/AGENTS.md` + plugin |
-| OpenClaw | Supported | Connector bootstrap + `@signetai/adapter-openclaw` runtime |
-| Cursor | Planned | File-based identity sync |
-| Windsurf | Planned | File/plugin integration |
+| Claude Code | Supported | Hooks + CLAUDE.md sync |
+| OpenCode | Supported | Plugin + AGENTS.md sync |
+| OpenClaw | Supported | Runtime adapter + bootstrap |
+| Codex | In progress | WIP |
+| Gemini CLI | Planned | WIP |
+
+---
+
+What Signet is building
+===
+
+Signet is a protocol, not just a product. The reference implementation
+is the proof that the protocol works. Here's the full picture:
+
+### Identity
+
+Portable agent identity in plain files at `~/.agents/` by default.
+Instructions, personality, user profile, working knowledge — 
+all inspectable, version-controlled, and synced across harnesses 
+automatically. Your agent's identity is not locked inside any 
+vendor's platform.
+
+```text
+~/.agents/
+  agent.yaml        # manifest + runtime config
+  AGENTS.md         # operating instructions
+  SOUL.md           # personality + voice
+  IDENTITY.md       # structured identity
+  USER.md           # operator profile
+  MEMORY.md         # synthesized working knowledge
+  skills/           # installed capabilities
+  .secrets/         # encrypted secret store
+```
+
+### Insights, not observations
+
+Other tools store observations — raw text thrown into a vector
+database and retrieved by cosine distance. Signet distills
+observations into insights: structured facts organized into a
+knowledge graph with entities, aspects, attributes, and dependency
+edges. The difference is the difference between a pile of sticky
+notes and an actual understanding of the domain.
+
+### Trust and security
+
+Secrets are libsodium-encrypted at rest. Your agent can use secrets
+without ever reading their values — Signet injects them into
+subprocess environments and redacts them from captured output. Auth
+supports local-only, token-based, and hybrid modes with role-based
+access control.
+
+The distillation layer runs on a local Ollama model by default.
+Nothing leaves your machine unless you configure it to.
+
+### The protocol layer
+
+Signet defines how agents should carry identity, how knowledge should
+be structured, and how trust should be established. The spec is open.
+The implementation is open. The goal is a standard that any tool can
+adopt — not a walled garden that locks you in.
+
+---
 
 Architecture
 ===
 
 ```text
 CLI (signet)
-  setup, memory, secrets, skills, hooks, git sync, updates, service mgmt
+  setup, knowledge, secrets, skills, hooks, git sync, service mgmt
 
 Daemon (@signet/daemon, localhost:3850)
-  ├── HTTP API (83+ endpoints across 18 domains)
-  ├── Memory Pipeline
-  │     extraction → decision → graph → retention
-  ├── Document Worker
-  │     ingest → chunk → embed → index
-  ├── Maintenance Worker
-  │     diagnostics → health scoring → repair actions
-  ├── Auth Middleware
-  │     local / team / hybrid modes, RBAC, rate limiting
-  ├── Analytics
-  │     usage counters, error ring buffer, latency histograms
-  └── File Watcher
-        identity sync (2s debounce), git auto-commit (5s debounce)
+  |-- HTTP API (90+ endpoints across 18 domains)
+  |-- Distillation Layer
+  |     extraction -> decision -> graph -> retention
+  |-- Document Worker
+  |     ingest -> chunk -> embed -> index
+  |-- Maintenance Worker
+  |     diagnostics -> health scoring -> repair
+  |-- Auth Middleware
+  |     local / team / hybrid, RBAC, rate limiting
+  |-- Analytics
+  |     usage, errors, latency, tokens
+  |-- File Watcher
+        identity sync, git auto-commit
 
 Core (@signet/core)
-  types, identity, SQLite, hybrid search, graph search, shared utils
+  types, identity, SQLite, hybrid search, graph traversal
 
 SDK (@signet/sdk)
-  typed client, React hooks, Vercel AI SDK middleware, OpenAI helpers
+  typed client, React hooks, Vercel AI SDK middleware
 
 Connectors
-  claude-code, opencode, openclaw, filesystem
+  claude-code, opencode, openclaw
 ```
 
-API overview
----
-
-The daemon exposes a REST API organized into these domains:
-
-| Domain | Endpoints |
-|---|---|
-| Health / status | `/health`, `/api/status` |
-| Config | `/api/config` |
-| Identity | `/api/identity` |
-| Memory | CRUD, search, modify, forget, recover, history |
-| Documents | ingest, list, delete |
-| Connectors | install, sync, list |
-| Auth | token management, role assignment |
-| Analytics | usage, errors, latency, tokens |
-| Diagnostics | health score, issue list |
-| Timeline | event replay, incident reconstruction |
-| Repair | available actions, execute, dry-run |
-| Skills | list, install, remove |
-| Secrets | list, set, delete, exec |
-| Harnesses | list, sync |
-| Hooks | session-start, prompt-submit, session-end, synthesis |
-| Logs | tail, search |
-| Embeddings | export |
-| Update | check, apply |
-| Git | status, commit, sync |
-
-Security model
-===
-
-The daemon binds to `localhost` by default — no external exposure
-without explicit configuration. Auth is layered on top via middleware
-that you configure per-deployment.
-
-Three auth modes: `local` requires no token (localhost trust),
-`team` requires a bearer token on every request, `hybrid` requires
-tokens for writes but allows open reads. Four roles control what each
-token can do: `admin` (full access), `operator` (config + memory +
-skills), `agent` (memory operations only), `readonly` (GET only).
-Destructive operations (bulk delete, repair, forget) are additionally
-rate-limited regardless of role.
-
-Secrets never leave the encrypted store as plaintext. The API returns
-only key names. When an agent needs to run a command that uses a secret,
-Signet injects it into the subprocess environment and redacts it from
-the captured output before returning anything to the caller.
-
 Packages
-===
+---
 
 | Package | Role |
 |---|---|
-| [`@signet/core`](./packages/core) | Types, identity, SQLite, hybrid + graph search, shared utils |
-| [`@signet/cli`](./packages/cli) | CLI entrypoint, setup wizard, config workflows, dashboard |
-| [`@signet/daemon`](./packages/daemon) | API server, pipeline workers, auth, analytics, diagnostics, watcher |
-| [`@signet/sdk`](./packages/sdk) | Typed client, React hooks, Vercel AI SDK middleware, OpenAI helpers |
-| [`@signet/connector-base`](./packages/connector-base) | Shared connector primitives |
+| [`@signet/core`](./packages/core) | Types, identity, SQLite, hybrid + graph search |
+| [`@signet/cli`](./packages/cli) | CLI, setup wizard, dashboard |
+| [`@signet/daemon`](./packages/daemon) | API server, distillation layer, auth, analytics, diagnostics |
+| [`@signet/sdk`](./packages/sdk) | Typed client, React hooks, Vercel AI SDK middleware |
 | [`@signet/connector-claude-code`](./packages/connector-claude-code) | Claude Code integration |
 | [`@signet/connector-opencode`](./packages/connector-opencode) | OpenCode integration |
-| [`@signet/connector-openclaw`](./packages/connector-openclaw) | OpenClaw bootstrap integration |
+| [`@signet/connector-openclaw`](./packages/connector-openclaw) | OpenClaw integration |
 | [`@signetai/adapter-openclaw`](./packages/adapters/openclaw) | OpenClaw runtime plugin |
-| [`@signet/web`](./web) | Marketing website (Cloudflare Worker) |
-| [`signetai`](./packages/signetai) | Meta-package bundling CLI + daemon (`signet` binary) |
+| [`signetai`](./packages/signetai) | Meta-package (`signet` binary) |
+
+---
 
 Documentation
 ===
 
+**Usage**
 - [Quickstart](./docs/QUICKSTART.md)
 - [CLI Reference](./docs/CLI.md)
 - [Configuration](./docs/CONFIGURATION.md)
-- [Memory](./docs/MEMORY.md)
-- [Memory Pipeline](./docs/PIPELINE.md)
-- [Documents](./docs/DOCUMENTS.md)
 - [Hooks](./docs/HOOKS.md)
 - [Harnesses](./docs/HARNESSES.md)
 - [Connectors](./docs/CONNECTORS.md)
 - [Secrets](./docs/SECRETS.md)
 - [Skills](./docs/SKILLS.md)
 - [Auth](./docs/AUTH.md)
-- [Analytics](./docs/ANALYTICS.md)
-- [Diagnostics](./docs/DIAGNOSTICS.md)
 - [Dashboard](./docs/DASHBOARD.md)
 - [SDK](./docs/SDK.md)
 - [API Reference](./docs/API.md)
-- [Self-Hosting](./docs/SELF-HOSTING.md)
+
+**Architecture and Design**
 - [Architecture](./docs/ARCHITECTURE.md)
+- [Knowledge Architecture](./docs/KNOWLEDGE-ARCHITECTURE.md)
+- [Knowledge Graph](./docs/KNOWLEDGE-GRAPH.md)
+- [Desire Paths](./docs/DESIRE-PATHS.md) — learned traversal through the knowledge graph
+- [Lossless Context Patterns](./docs/LCM-PATTERNS.md) — deterministic guarantees for the distillation layer
+- [ACP Integration](./docs/ACP-INTEGRATION.md) — Agent Client Protocol integration
+- [Spec Index](./docs/specs/INDEX.md) — build sequence and integration contracts
+
+Research
+---
+
+| Paper / Project | Relevance |
+|---|---|
+| [Lossless Context Management](https://papers.voltropy.com/LCM) (Voltropy, 2026) | Hierarchical summarization, guaranteed convergence, zero-cost continuity. Patterns adapted in [LCM-PATTERNS.md](./docs/LCM-PATTERNS.md). |
+| [Recursive Language Models](https://arxiv.org/abs/2512.24601) (Zhang et al., 2026) | Active context management. LCM builds on and departs from RLM's approach. |
+| [acpx](https://github.com/openclaw/acpx) (OpenClaw) | Agent Client Protocol. Structured agent coordination, session persistence. |
+| [lossless-claw](https://github.com/Martian-Engineering/lossless-claw) (Martian Engineering) | LCM reference implementation as an OpenClaw plugin. |
+| [openclaw](https://github.com/openclaw/openclaw) (OpenClaw) | Agent runtime reference. |
+| [arscontexta](https://github.com/agenticnotetaking/arscontexta) | Agentic notetaking patterns. |
+| [ACAN](https://github.com/HongChuanYang/Training-by-LLM-Enhanced-Memory-Retrieval-for-Generative-Agents-via-ACAN) (Hong et al.) | LLM-enhanced memory retrieval for generative agents. |
+
+---
 
 Development
 ===
@@ -394,39 +308,29 @@ bun test
 bun run lint
 ```
 
-Useful package-level flows:
-
 ```bash
-# CLI dev
-cd packages/cli && bun run dev
-
-# Dashboard dev
-cd packages/cli/dashboard && bun run dev
-
-# Daemon dev (watch mode)
-cd packages/daemon && bun run dev
+cd packages/cli && bun run dev          # CLI dev
+cd packages/cli/dashboard && bun run dev # Dashboard dev
+cd packages/daemon && bun run dev        # Daemon dev (watch mode)
 ```
+
+Requirements: Node.js 18+, Bun, Ollama (recommended) or OpenAI API
+key. macOS or Linux.
 
 Contributing
 ===
 
-Contributions are welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
-
-If you are adding a harness integration, build on the existing connector
-pattern (`@signet/connector-base`) and keep runtime memory semantics in
-the daemon API. Before contributing a significant feature, check how
-similar things are structured and consider opening an issue first if
-the architecture fit is unclear.
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Build on existing patterns.
+Open an issue before contributing significant features.
 
 License
 ===
 
 Apache-2.0.
 
-Links
-===
+---
 
-- Website: [signetai.sh](https://signetai.sh)
-- Docs: [signetai.sh/docs](https://signetai.sh/docs)
-- Spec: [signetai.sh/spec](https://signetai.sh/spec)
-- Issues: [github.com/signetai/signetai/issues](https://github.com/signetai/signetai/issues)
+[signetai.sh](https://signetai.sh) --
+[docs](https://signetai.sh/docs) --
+[spec](https://signetai.sh/spec) --
+[issues](https://github.com/signetai/signetai/issues)
