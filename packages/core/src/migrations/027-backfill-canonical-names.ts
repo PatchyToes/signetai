@@ -11,7 +11,14 @@
 import type { MigrationDb } from "./index";
 
 export function up(db: MigrationDb): void {
-	db.exec(
-		"UPDATE entities SET canonical_name = LOWER(TRIM(name)) WHERE canonical_name IS NULL",
-	);
+	// Match toCanonicalName(): trim, lowercase, collapse internal whitespace.
+	// SQLite lacks regex replace, so iteratively collapse double-spaces
+	// (covers the realistic cases; triple+ spaces converge after a few passes).
+	db.exec(`
+		UPDATE entities
+		SET canonical_name = REPLACE(REPLACE(REPLACE(
+			LOWER(TRIM(name)),
+			'  ', ' '), '  ', ' '), '  ', ' ')
+		WHERE canonical_name IS NULL
+	`);
 }
