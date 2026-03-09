@@ -61,7 +61,7 @@ function toPascalCase(segment: string): string {
 
 function toMethodName(route: Route): string {
 	const segments = route.path.split("/").filter(Boolean);
-	const methodPrefix = route.method === "delete" ? "delete" : route.method;
+	const methodPrefix = route.method;
 	const suffix = segments
 		.map((segment) => {
 			if (segment.startsWith(":")) {
@@ -80,7 +80,7 @@ function toMethodName(route: Route): string {
  */
 function extractParams(path: string): readonly string[] {
 	const params: string[] = [];
-	const regex = /:([a-zA-Z_]+)/g;
+	const regex = /:([a-zA-Z_][a-zA-Z0-9_]*)/g;
 	let match: RegExpExecArray | null;
 	while ((match = regex.exec(path)) !== null) {
 		params.push(match[1]);
@@ -185,6 +185,10 @@ ${methods}
  */
 function main(): void {
 	console.log("Reading daemon.ts...");
+	if (!existsSync(DAEMON_PATH)) {
+		console.error(`Error: daemon.ts not found at ${DAEMON_PATH}`);
+		process.exit(1);
+	}
 	const daemonCode = readFileSync(DAEMON_PATH, "utf-8");
 
 	console.log("Extracting routes...");

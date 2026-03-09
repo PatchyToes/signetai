@@ -2619,7 +2619,7 @@ app.get("/api/memory/jobs/:id", (c) => {
 		return c.json({ error: "job id is required" }, 400);
 	}
 
-	const row = getDbAccessor().withReadDb((db) => {
+	const maybeRow = getDbAccessor().withReadDb((db) => {
 		return db
 			.prepare(
 				`SELECT id, memory_id, document_id, job_type, status,
@@ -2629,24 +2629,40 @@ app.get("/api/memory/jobs/:id", (c) => {
 				 WHERE id = ?
 				 LIMIT 1`,
 			)
-			.get(jobId) as
-			| {
-					id: string;
-					memory_id: string | null;
-					document_id: string | null;
-					job_type: string;
-					status: string;
-					attempts: number;
-					max_attempts: number;
-					leased_at: string | null;
-					completed_at: string | null;
-					failed_at: string | null;
-					error: string | null;
-					created_at: string;
-					updated_at: string;
-			  }
-			| undefined;
+			.get(jobId) as unknown;
 	});
+
+	type JobRow = {
+		readonly id: string;
+		readonly memory_id: string | null;
+		readonly document_id: string | null;
+		readonly job_type: string;
+		readonly status: string;
+		readonly attempts: number;
+		readonly max_attempts: number;
+		readonly leased_at: string | null;
+		readonly completed_at: string | null;
+		readonly failed_at: string | null;
+		readonly error: string | null;
+		readonly created_at: string;
+		readonly updated_at: string;
+	};
+
+	const isJobRow = (val: unknown): val is JobRow => {
+		if (!val || typeof val !== "object") return false;
+		const obj = val as Record<string, unknown>;
+		return (
+			typeof obj.id === "string" &&
+			typeof obj.job_type === "string" &&
+			typeof obj.status === "string" &&
+			typeof obj.attempts === "number" &&
+			typeof obj.max_attempts === "number" &&
+			typeof obj.created_at === "string" &&
+			typeof obj.updated_at === "string"
+		);
+	};
+
+	const row = isJobRow(maybeRow) ? maybeRow : null;
 
 	if (!row) {
 		return c.json({ error: "Job not found" }, 404);

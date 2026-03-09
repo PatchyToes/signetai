@@ -183,11 +183,11 @@ export interface ContinuityResponse {
 }
 
 export interface ContinuityLatestResponse {
-  readonly scores: Array<{
+  readonly scores: readonly {
     readonly project: string;
     readonly score: number;
     readonly created_at: string;
-  }>;
+  }[];
 }
 
 // ============================================================================

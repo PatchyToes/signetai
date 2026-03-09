@@ -209,32 +209,54 @@ export interface DocumentDeleteResult {
 
 // Job types
 
-export interface JobStatus {
+type JobStatusBase = {
   readonly id: string;
   readonly memory_id: string | null;
-  readonly document_id?: string | null;
+  readonly document_id: string | null;
   readonly job_type: string;
-  readonly status:
-    | "pending"
-    | "leased"
-    | "retry_scheduled"
-    | "failed"
-    | "completed"
-    | "done"
-    | "dead";
-  readonly attempt_count?: number;
-  readonly attempts?: number;
   readonly max_attempts: number;
   readonly next_attempt_at: string | null;
-  readonly last_error?: string | null;
-  readonly last_error_code?: string | null;
-  readonly error?: string | null;
   readonly created_at: string;
   readonly updated_at: string;
-  readonly leased_at?: string | null;
-  readonly completed_at?: string | null;
-  readonly failed_at?: string | null;
-}
+};
+
+export type JobStatus =
+  | (JobStatusBase & {
+      readonly status: "pending";
+    })
+  | (JobStatusBase & {
+      readonly status: "leased";
+      readonly attempts: number;
+      readonly leased_at: string;
+    })
+  | (JobStatusBase & {
+      readonly status: "retry_scheduled";
+      readonly attempts: number;
+      readonly next_attempt_at: string;
+    })
+  | (JobStatusBase & {
+      readonly status: "failed";
+      readonly attempts: number;
+      readonly failed_at: string;
+      readonly error: string;
+      readonly last_error_code?: string;
+    })
+  | (JobStatusBase & {
+      readonly status: "completed";
+      readonly attempts: number;
+      readonly completed_at: string;
+    })
+  | (JobStatusBase & {
+      readonly status: "done";
+      readonly attempts: number;
+      readonly completed_at: string;
+    })
+  | (JobStatusBase & {
+      readonly status: "dead";
+      readonly attempts: number;
+      readonly failed_at: string;
+      readonly error: string;
+    });
 
 // Health / status types
 
