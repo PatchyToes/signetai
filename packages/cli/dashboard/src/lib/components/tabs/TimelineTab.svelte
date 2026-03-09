@@ -571,7 +571,7 @@ onMount(() => {
 	role="region"
 	aria-label="Memory timeline. Use left and right arrows to move through eras."
 >
-	<PageBanner title="Timeline" pattern="lines">
+	<PageBanner title="Timeline">
 		<TabGroupBar
 			group="memory"
 			tabs={MEMORY_TAB_ITEMS}

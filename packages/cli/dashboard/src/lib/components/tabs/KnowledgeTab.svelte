@@ -308,7 +308,7 @@ onMount(() => {
 </script>
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Knowledge" pattern="lines">
+	<PageBanner title="Knowledge">
 		<TabGroupBar
 			group="memory"
 			tabs={MEMORY_TAB_ITEMS}

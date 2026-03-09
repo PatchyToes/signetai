@@ -433,7 +433,7 @@ onMount(() => {
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Secrets" pattern="terminal" />
+	<PageBanner title="Secrets" />
 	<div
 		class="grid flex-1 gap-[var(--space-md)] overflow-hidden p-[var(--space-md)]
 			xl:grid-cols-[1.2fr_0.8fr]"

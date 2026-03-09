@@ -238,7 +238,7 @@ onMount(() => {
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Tasks" pattern="lines">
+	<PageBanner title="Tasks">
 		{#snippet right()}
 			<Button
 				variant="outline"

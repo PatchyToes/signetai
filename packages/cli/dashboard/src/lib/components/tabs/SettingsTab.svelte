@@ -144,7 +144,7 @@
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="settings-tab">
-	<PageBanner title="Settings" pattern="terminal">
+	<PageBanner title="Settings">
 		<TabGroupBar
 			group="engine"
 			tabs={ENGINE_TAB_ITEMS}

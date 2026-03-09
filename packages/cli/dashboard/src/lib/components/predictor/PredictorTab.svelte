@@ -362,7 +362,7 @@
 
 <!-- Observatory layout: CSS grid, no page scroll -->
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Predictor" pattern="terminal">
+	<PageBanner title="Predictor">
 		<TabGroupBar
 			group="engine"
 			tabs={ENGINE_TAB_ITEMS}

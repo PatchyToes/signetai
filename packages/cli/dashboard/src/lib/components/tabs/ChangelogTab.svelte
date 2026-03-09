@@ -111,7 +111,7 @@ const activeDoc = $derived(docFor(activeView));
 </script>
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Changelog" pattern="lines" />
+	<PageBanner title="Changelog" />
 	<div
 		class="shrink-0 border-b border-[var(--sig-border)] bg-[var(--sig-surface)]
 			px-4 py-3"

@@ -361,7 +361,7 @@ function handleSearchKeydown(e: KeyboardEvent): void {
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Memory Index" pattern="terminal">
+	<PageBanner title="Memory Index">
 		<TabGroupBar
 			group="memory"
 			tabs={MEMORY_TAB_ITEMS}

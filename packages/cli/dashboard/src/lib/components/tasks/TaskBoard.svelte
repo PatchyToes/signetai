@@ -175,14 +175,14 @@ function getColumnTasks(key: string): ScheduledTask[] {
 		gap: 6px;
 		padding: var(--space-sm) var(--space-md);
 		border-bottom: 1px solid var(--sig-border);
-		shrink: 0;
+		flex-shrink: 0;
 	}
 
 	.column-dot {
 		display: inline-block;
 		width: 6px;
 		height: 6px;
-		shrink: 0;
+		flex-shrink: 0;
 	}
 
 	.column-label {

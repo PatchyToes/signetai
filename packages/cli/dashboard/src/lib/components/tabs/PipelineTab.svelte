@@ -337,7 +337,7 @@
 </script>
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Pipeline" pattern="lines">
+	<PageBanner title="Pipeline">
 		<TabGroupBar
 			group="engine"
 			tabs={ENGINE_TAB_ITEMS}

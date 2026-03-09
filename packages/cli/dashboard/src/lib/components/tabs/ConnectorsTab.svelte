@@ -178,7 +178,7 @@
 </script>
 
 <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
-	<PageBanner title="Connectors" pattern="lines">
+	<PageBanner title="Connectors">
 		<TabGroupBar
 			group="engine"
 			tabs={ENGINE_TAB_ITEMS}

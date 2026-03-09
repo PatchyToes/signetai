@@ -1,26 +1,16 @@
 <script lang="ts">
 	import type { Snippet } from "svelte";
 
-	type PatternVariant =
-		| "dots"
-		| "grid"
-		| "lines"
-		| "mesh"
-		| "terminal"
-		| "signal";
-
 	interface Props {
 		title: string;
-		pattern?: PatternVariant;
 		children?: Snippet;
 		right?: Snippet;
 	}
 
-	const { title, pattern = "dots", children, right }: Props = $props();
+	const { title, children, right }: Props = $props();
 </script>
 
-<div class="banner banner--{pattern}">
-	<div class="banner-pattern" aria-hidden="true"></div>
+<div class="banner">
 	<div class="banner-content">
 		{#if children}
 			<div class="banner-left">
@@ -51,11 +41,6 @@
 		overflow: hidden;
 		background: var(--sig-surface);
 		margin-bottom: 2rem;
-	}
-
-	/* Pattern overlay — no longer used, kept for structure */
-	.banner-pattern {
-		display: none;
 	}
 
 	/* Content layout */
@@ -119,7 +104,7 @@
 
 	.banner-coord--tl {
 		top: 4px;
-		right: 8px;
+		left: 8px;
 	}
 
 	.banner-coord--br {
