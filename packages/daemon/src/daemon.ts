@@ -5490,7 +5490,11 @@ app.post("/api/sessions/:key/bypass", async (c) => {
 app.get("/api/sessions/summaries", (c) => {
 	const accessor = getDbAccessor();
 	const project = c.req.query("project");
-	const depth = c.req.query("depth");
+	const depthRaw = c.req.query("depth");
+	const depthNum = depthRaw !== undefined ? Number(depthRaw) : undefined;
+	if (depthNum !== undefined && (Number.isNaN(depthNum) || !Number.isInteger(depthNum) || depthNum < 0)) {
+		return c.json({ error: "depth must be a non-negative integer" }, 400);
+	}
 	const limit = Math.min(Number(c.req.query("limit") ?? "50"), 200);
 	const offset = Number(c.req.query("offset") ?? "0");
 
@@ -5514,9 +5518,9 @@ app.get("/api/sessions/summaries", (c) => {
 			where += " AND project = ?";
 			params.push(project);
 		}
-		if (depth !== undefined) {
+		if (depthNum !== undefined) {
 			where += " AND depth = ?";
-			params.push(Number(depth));
+			params.push(depthNum);
 		}
 
 		const countRow = db

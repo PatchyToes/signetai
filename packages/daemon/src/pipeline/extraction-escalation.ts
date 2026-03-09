@@ -138,7 +138,7 @@ function isConstraintContent(fact: ExtractedFact): boolean {
 export function applyLevel3Filter(
 	extraction: ExtractionResult,
 	accessor: DbAccessor,
-	_agentId: string,
+	agentId: string,
 ): ExtractionResult {
 	if (extraction.facts.length === 0 && extraction.entities.length === 0) {
 		return extraction;
@@ -164,8 +164,10 @@ export function applyLevel3Filter(
 				const batch = hashes.slice(start, start + BATCH);
 				const placeholders = batch.map(() => "?").join(",");
 				const rows = db
-					.prepare(`SELECT content_hash FROM memories WHERE content_hash IN (${placeholders})`)
-					.all(...batch) as ReadonlyArray<{ content_hash: string }>;
+					.prepare(
+						`SELECT content_hash FROM memories WHERE content_hash IN (${placeholders}) AND agent_id = ?`,
+					)
+					.all(...batch, agentId) as ReadonlyArray<{ content_hash: string }>;
 				for (const row of rows) {
 					existingHashes.add(row.content_hash);
 				}

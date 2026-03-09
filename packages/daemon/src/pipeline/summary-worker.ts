@@ -259,7 +259,7 @@ async function processJob(
 
 	// Write to session_summaries DAG (depth 0 = session level)
 	try {
-		writeSummaryToDAG(accessor, job, result);
+		writeSummaryToDAG(accessor, job, result, agentId);
 	} catch (e) {
 		logger.warn("summary-worker", "Failed to write session summary to DAG (non-fatal)", {
 			error: e instanceof Error ? e.message : String(e),
@@ -701,6 +701,7 @@ function writeSummaryToDAG(
 	accessor: DbAccessor,
 	job: SummaryJobRow,
 	result: LlmSummaryResult,
+	agentId: string,
 ): void {
 	accessor.withWriteTx((db) => {
 		// Check if table exists (migration may not have run)
@@ -720,7 +721,7 @@ function writeSummaryToDAG(
 				id, project, depth, kind, content, token_count,
 				earliest_at, latest_at, session_key, harness,
 				agent_id, created_at
-			) VALUES (?, ?, 0, 'session', ?, ?, ?, ?, ?, ?, 'default', ?)`,
+			) VALUES (?, ?, 0, 'session', ?, ?, ?, ?, ?, ?, ?, ?)`,
 		).run(
 			summaryId,
 			job.project,
@@ -730,6 +731,7 @@ function writeSummaryToDAG(
 			now,            // processing time ≈ session end time
 			job.session_key,
 			job.harness,
+			agentId,
 			now,
 		);
 

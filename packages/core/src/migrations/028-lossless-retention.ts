@@ -1,5 +1,5 @@
 /**
- * Migration 027: Lossless Retention (Cold Tier)
+ * Migration 028: Lossless Retention (Cold Tier)
  *
  * Replaces hard deletion of tombstoned memories with cold-tier archival.
  * Nothing is ever truly lost — expired memories are archived into
