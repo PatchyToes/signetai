@@ -41,8 +41,18 @@ interface UserPromptSubmitResult {
 	readonly memoryCount?: number;
 }
 
-// Per-prompt inject cache: consumed once by system.transform after chat.message populates it
+// Per-prompt inject cache: consumed once by system.transform after chat.message populates it.
+// Capped to prevent unbounded growth if sessions die between the two hooks.
+const MAX_PENDING = 64;
 const pendingInject = new Map<string, string>();
+
+function pendingInjectSet(sessionID: string, inject: string): void {
+	pendingInject.set(sessionID, inject);
+	if (pendingInject.size > MAX_PENDING) {
+		const oldest = pendingInject.keys().next().value;
+		if (oldest !== undefined) pendingInject.delete(oldest);
+	}
+}
 
 function readRuntimeEnv(name: string): string | undefined {
 	const runtimeProcess = Reflect.get(globalThis, "process");
@@ -122,7 +132,7 @@ export const SignetPlugin: Plugin = async ({ directory }) => {
 					READ_TIMEOUT,
 				);
 				if (result?.inject) {
-					pendingInject.set(input.sessionID, result.inject);
+					pendingInjectSet(input.sessionID, result.inject);
 				}
 			} catch {
 				// never block the user's message
