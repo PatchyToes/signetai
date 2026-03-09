@@ -157,16 +157,16 @@ function getColumnTasks(key: string): ScheduledTask[] {
 		overflow: hidden;
 		background:
 			repeating-conic-gradient(
-				rgba(255, 255, 255, 0.01) 0% 25%,
+				color-mix(in srgb, var(--sig-text) 1%, transparent) 0% 25%,
 				transparent 0% 50%
 			) 0 0 / 10px 10px,
 			repeating-conic-gradient(
 				transparent 0% 25%,
-				rgba(0, 0, 0, 0.015) 0% 50%
+				color-mix(in srgb, var(--sig-text) 1.5%, transparent) 0% 50%
 			) 5px 5px / 10px 10px,
 			repeating-conic-gradient(
 				var(--sig-surface) 0% 25%,
-				color-mix(in srgb, var(--sig-surface) 98%, black) 0% 50%
+				color-mix(in srgb, var(--sig-surface) 98%, var(--sig-bg)) 0% 50%
 			) 0 0 / 10px 10px;
 	}
 

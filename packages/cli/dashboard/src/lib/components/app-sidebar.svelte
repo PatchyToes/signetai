@@ -1,7 +1,6 @@
 <script lang="ts">
 import type { DaemonStatus, Harness, Identity } from "$lib/api";
 import * as Sidebar from "$lib/components/ui/sidebar/index.js";
-const { useSidebar } = Sidebar;
 import {
 	type TabId,
 	isEngineGroup,
@@ -31,6 +30,8 @@ import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Store from "@lucide/svelte/icons/store";
 import Sun from "@lucide/svelte/icons/sun";
 import { onMount } from "svelte";
+
+const { useSidebar } = Sidebar;
 
 interface Props {
 	identity: Identity;

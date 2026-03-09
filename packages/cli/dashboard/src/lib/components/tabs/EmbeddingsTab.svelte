@@ -1979,8 +1979,8 @@ $effect(() => {
 		{/if}
 
 			<div class="absolute left-3 top-3 bottom-3 z-[8] pointer-events-none flex flex-col justify-end items-start max-w-[220px]">
-				{#if legendOpen}
-					<div class="pointer-events-auto border border-[rgba(255,255,255,0.1)] mb-0 px-3 py-2 min-w-[180px] overflow-y-auto">
+				<Collapsible.Root bind:open={legendOpen} class="pointer-events-auto min-w-[180px]">
+					<Collapsible.Content class="border border-[var(--sig-border)] px-3 py-2 overflow-y-auto">
 						<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
 							<span class="text-[var(--sig-text)]">Color</span> = {nodeColorMode === "none" ? "off" : nodeColorMode === "newness" ? "by recency" : "by source"}
 						</div>
@@ -2052,16 +2052,12 @@ $effect(() => {
 								</div>
 							</div>
 						{/if}
-					</div>
-				{/if}
-				<button
-					class="pointer-events-auto flex items-center gap-2 px-3 py-1.5 min-w-[180px] border border-[rgba(255,255,255,0.1)] text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] cursor-pointer bg-transparent"
-					onclick={() => legendOpen = !legendOpen}
-					aria-expanded={legendOpen}
-				>
-					Legend
-					<span class="text-[8px]">{legendOpen ? "▼" : "▲"}</span>
-				</button>
+					</Collapsible.Content>
+					<Collapsible.Trigger class="flex w-full items-center gap-2 px-3 py-1.5 min-w-[180px] border border-[var(--sig-border)] text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] bg-transparent">
+						<span>Legend</span>
+						<ChevronDown class={`size-3 text-[var(--sig-text-muted)] transition-transform ${legendOpen ? 'rotate-180' : ''}`} />
+					</Collapsible.Trigger>
+				</Collapsible.Root>
 			</div>
 
 		{#if graphStatus}

@@ -28,7 +28,7 @@
 	</div>
 	<!-- Coordinate markers -->
 	<span class="banner-coord banner-coord--tl" aria-hidden="true">0,0</span>
-	<span class="banner-coord banner-coord--br" aria-hidden="true"></span>
+	<span class="banner-coord banner-coord--br" aria-hidden="true">■</span>
 </div>
 
 <style>
