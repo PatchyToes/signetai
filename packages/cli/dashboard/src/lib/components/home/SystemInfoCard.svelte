@@ -24,6 +24,22 @@
 		return "var(--sig-danger)";
 	}
 
+	function healthHue(score: number | null): string {
+		if (score === null) return "rgba(255,255,255,0.02)";
+		if (score >= 0.8) return "color-mix(in srgb, var(--sig-success) 8%, transparent)";
+		if (score >= 0.6) return "color-mix(in srgb, #d4a017 8%, transparent)";
+		if (score >= 0.4) return "color-mix(in srgb, #e67e22 10%, transparent)";
+		return "color-mix(in srgb, var(--sig-danger) 10%, transparent)";
+	}
+
+	function healthBorder(score: number | null): string {
+		if (score === null) return "var(--sig-border)";
+		if (score >= 0.8) return "color-mix(in srgb, var(--sig-success) 25%, var(--sig-border))";
+		if (score >= 0.6) return "color-mix(in srgb, #d4a017 25%, var(--sig-border))";
+		if (score >= 0.4) return "color-mix(in srgb, #e67e22 25%, var(--sig-border))";
+		return "color-mix(in srgb, var(--sig-danger) 25%, var(--sig-border))";
+	}
+
 	const pipelineMode = $derived.by(() => {
 		if (!pipelineStatus) return "unknown";
 		const mode = (pipelineStatus as Record<string, unknown>).mode;
@@ -56,7 +72,7 @@
 	});
 </script>
 
-<Card.Root class="h-full">
+<Card.Root class="h-full transition-colors duration-500" style="background: {healthHue(healthScore)}; border-color: {healthBorder(healthScore)};">
 	<Card.Header class="py-2 px-3">
 		<Card.Title>
 			<span class="sig-heading">System Health</span>

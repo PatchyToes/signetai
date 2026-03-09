@@ -1,4 +1,5 @@
 <script lang="ts">
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
 import {
 	type ConstellationGraph,
 	type EmbeddingCheckResult,
@@ -21,6 +22,9 @@ import {
 } from "$lib/api";
 import * as Collapsible from "$lib/components/ui/collapsible/index.js";
 import { nav, setTab } from "$lib/stores/navigation.svelte";
+import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+import { MEMORY_TAB_ITEMS } from "$lib/components/layout/page-headers";
+import { focusMemoryTab } from "$lib/stores/tab-group-focus.svelte";
 import { mem } from "$lib/stores/memory.svelte";
 import { toast } from "$lib/stores/toast.svelte";
 import { syncLayoutToStorage, workspaceLayout } from "$lib/stores/workspace-layout.svelte";
@@ -75,6 +79,7 @@ const { onopenglobalsimilar }: Props = $props();
 // State
 // -----------------------------------------------------------------------
 
+let legendOpen = $state(false);
 let graphSelected = $state<EmbeddingPoint | null>(null);
 let graphHovered = $state<EmbeddingPoint | null>(null);
 let graphStatus = $state("");
@@ -1859,7 +1864,15 @@ $effect(() => {
 });
 </script>
 
-<div class="flex h-full flex-col overflow-hidden">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Constellation" pattern="terminal">
+		<TabGroupBar
+			group="memory"
+			tabs={MEMORY_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusMemoryTab(index)}
+		/>
+	</PageBanner>
 	<div class="flex flex-1 min-h-0 bg-[#050505] max-lg:flex-col">
 		<div
 		bind:this={graphRegion}
@@ -1965,81 +1978,89 @@ $effect(() => {
 			</div>
 		{/if}
 
-			<div class="absolute left-3 bottom-3 z-[8] pointer-events-none space-y-2 max-w-[320px]">
-				<div class="pointer-events-auto border border-[rgba(255,255,255,0.2)] bg-[rgba(5,5,5,0.72)] px-2 py-1.5">
-					<div class="text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] mb-1">Legend</div>
-					<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
-						<span class="text-[var(--sig-text)]">Color</span> = {nodeColorMode === "none" ? "off" : nodeColorMode === "newness" ? "by recency" : "by source"}
-					</div>
-					{#if nodeColorMode === "newness"}
-						<div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--sig-text-muted)] mb-1.5">
-							<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(5 * 60 * 1000, 0.95)}`}></span>last few minutes</span>
-							<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(3 * 60 * 60 * 1000, 0.9)}`}></span>last few hours</span>
-							<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(3 * 24 * 60 * 60 * 1000, 0.85)}`}></span>last week</span>
-							<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(30 * 24 * 60 * 60 * 1000, 0.85)}`}></span>older</span>
-						</div>
-						<div class="flex flex-wrap gap-1 mb-1.5">
-							{#each legendSourceCounts as source}
-								<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] border border-[rgba(255,255,255,0.14)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'bg-[rgba(255,255,255,0.08)] text-[var(--sig-text-bright)]' : 'bg-transparent text-[var(--sig-text-muted)]'}">
-									{source.who} {source.count}
-								</span>
-							{/each}
-						</div>
-					{:else if nodeColorMode === "source"}
-						<div class="flex flex-wrap gap-1 mb-1.5">
-							{#each legendSourceCounts as source}
-								<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] border border-[rgba(255,255,255,0.14)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'bg-[rgba(255,255,255,0.08)] text-[var(--sig-text-bright)]' : 'bg-transparent text-[var(--sig-text-muted)]'}">
-									<span class="inline-block w-[6px] h-[6px] rounded-full" style={`background:${sourceColorRgba(source.who, 1)}`}></span>
-									{source.who} {source.count}
-								</span>
-							{/each}
-						</div>
-					{:else}
-						<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1.5">
-							No color applied - all nodes are shown in gray.
-						</div>
-					{/if}
-					<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
-						<span class="text-[var(--sig-text)]">Radius</span> = importance
-					</div>
-					<div class="flex items-center gap-2 text-[10px] text-[var(--sig-text-muted)] mb-1.5">
-						<span class="inline-block w-[6px] h-[6px] rounded-full border border-[rgba(255,255,255,0.24)]"></span>
-						<span class="inline-block w-[9px] h-[9px] rounded-full border border-[rgba(255,255,255,0.28)]"></span>
-						<span class="inline-block w-[12px] h-[12px] rounded-full border border-[rgba(255,255,255,0.32)]"></span>
-						<span>low to high</span>
-					</div>
-					{#if showNewSinceLastSeen && nodeColorMode !== "none"}
+			<div class="absolute left-3 top-3 bottom-3 z-[8] pointer-events-none flex flex-col justify-end items-start max-w-[220px]">
+				{#if legendOpen}
+					<div class="pointer-events-auto border border-[rgba(255,255,255,0.1)] mb-0 px-3 py-2 min-w-[180px] overflow-y-auto">
 						<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
-							<span class="text-[var(--sig-text)]">Outline</span> = new since last seen
+							<span class="text-[var(--sig-text)]">Color</span> = {nodeColorMode === "none" ? "off" : nodeColorMode === "newness" ? "by recency" : "by source"}
 						</div>
-					{/if}
-					<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35]">
-						<span class="text-[var(--sig-text)]">Relation highlight</span> = selected node neighborhood emphasis
-					</div>
-					{#if showEntityOverlay}
-						<div class="mt-2 pt-2 border-t border-[var(--sig-border)]">
-							<div class="text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] mb-1">Knowledge Graph</div>
+						{#if nodeColorMode === "newness"}
+							<div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--sig-text-muted)] mb-1.5">
+								<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(5 * 60 * 1000, 0.95)}`}></span>last few minutes</span>
+								<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(3 * 60 * 60 * 1000, 0.9)}`}></span>last few hours</span>
+								<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(3 * 24 * 60 * 60 * 1000, 0.85)}`}></span>last week</span>
+								<span class="inline-flex items-center gap-1"><span class="inline-block w-[8px] h-[8px] rounded-full" style={`background:${newnessLegendColor(30 * 24 * 60 * 60 * 1000, 0.85)}`}></span>older</span>
+							</div>
 							<div class="flex flex-wrap gap-1 mb-1.5">
-								{#each Object.entries(entityTypeColors) as [type, color]}
-									{#if type !== "unknown"}
-										<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] text-[var(--sig-text-muted)] border border-[rgba(255,255,255,0.14)] bg-transparent">
-											<span class="inline-block w-[8px] h-[8px]" style={`background:${color}; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);`}></span>
-											{type}
-										</span>
-									{/if}
+								{#each legendSourceCounts as source}
+									<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] border border-[rgba(255,255,255,0.14)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'bg-[rgba(255,255,255,0.08)] text-[var(--sig-text-bright)]' : 'bg-transparent text-[var(--sig-text-muted)]'}">
+										{source.who} {source.count}
+									</span>
 								{/each}
 							</div>
-							<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] space-y-0.5">
-								<div><span class="text-[var(--sig-text)]">Hexagon</span> = entity (large, labeled)</div>
-								<div><span class="text-[var(--sig-text)]">Circle</span> = aspect (medium, orbits entity)</div>
-								<div><span class="text-[var(--sig-text)]">Small dot</span> = attribute (orbits aspect)</div>
-								<div><span class="text-[var(--sig-text)]">Tiny dot</span> = linked memory (leaf node)</div>
-								<div><span class="text-[var(--sig-text)]">Faint lines</span> = parent-child hierarchy</div>
-								<div><span class="text-[var(--sig-text)]">Styled line</span> = entity dependency</div>
+						{:else if nodeColorMode === "source"}
+							<div class="flex flex-wrap gap-1 mb-1.5">
+								{#each legendSourceCounts as source}
+									<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] border border-[rgba(255,255,255,0.14)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'bg-[rgba(255,255,255,0.08)] text-[var(--sig-text-bright)]' : 'bg-transparent text-[var(--sig-text-muted)]'}">
+										<span class="inline-block w-[6px] h-[6px] rounded-full" style={`background:${sourceColorRgba(source.who, 1)}`}></span>
+										{source.who} {source.count}
+									</span>
+								{/each}
 							</div>
+						{:else}
+							<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1.5">
+								No color applied - all nodes are shown in gray.
+							</div>
+						{/if}
+						<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
+							<span class="text-[var(--sig-text)]">Radius</span> = importance
 						</div>
-					{/if}
-				</div>
+						<div class="flex items-center gap-2 text-[10px] text-[var(--sig-text-muted)] mb-1.5">
+							<span class="inline-block w-[6px] h-[6px] rounded-full border border-[rgba(255,255,255,0.24)]"></span>
+							<span class="inline-block w-[9px] h-[9px] rounded-full border border-[rgba(255,255,255,0.28)]"></span>
+							<span class="inline-block w-[12px] h-[12px] rounded-full border border-[rgba(255,255,255,0.32)]"></span>
+							<span>low to high</span>
+						</div>
+						{#if showNewSinceLastSeen && nodeColorMode !== "none"}
+							<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] mb-1">
+								<span class="text-[var(--sig-text)]">Outline</span> = new since last seen
+							</div>
+						{/if}
+						<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35]">
+							<span class="text-[var(--sig-text)]">Relation highlight</span> = selected node neighborhood emphasis
+						</div>
+						{#if showEntityOverlay}
+							<div class="mt-2 pt-2 border-t border-[rgba(255,255,255,0.1)]">
+								<div class="text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] mb-1">Knowledge Graph</div>
+								<div class="flex flex-wrap gap-1 mb-1.5">
+									{#each Object.entries(entityTypeColors) as [type, color]}
+										{#if type !== "unknown"}
+											<span class="h-5 inline-flex items-center gap-1 px-1.5 py-0 font-[family-name:var(--font-mono)] text-[10px] text-[var(--sig-text-muted)] border border-[rgba(255,255,255,0.14)] bg-transparent">
+												<span class="inline-block w-[8px] h-[8px]" style={`background:${color}; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);`}></span>
+												{type}
+											</span>
+										{/if}
+									{/each}
+								</div>
+								<div class="text-[10px] text-[var(--sig-text-muted)] leading-[1.35] space-y-0.5">
+									<div><span class="text-[var(--sig-text)]">Hexagon</span> = entity (large, labeled)</div>
+									<div><span class="text-[var(--sig-text)]">Circle</span> = aspect (medium, orbits entity)</div>
+									<div><span class="text-[var(--sig-text)]">Small dot</span> = attribute (orbits aspect)</div>
+									<div><span class="text-[var(--sig-text)]">Tiny dot</span> = linked memory (leaf node)</div>
+									<div><span class="text-[var(--sig-text)]">Faint lines</span> = parent-child hierarchy</div>
+									<div><span class="text-[var(--sig-text)]">Styled line</span> = entity dependency</div>
+								</div>
+							</div>
+						{/if}
+					</div>
+				{/if}
+				<button
+					class="pointer-events-auto flex items-center gap-2 px-3 py-1.5 min-w-[180px] border border-[rgba(255,255,255,0.1)] text-[10px] font-[family-name:var(--font-mono)] uppercase tracking-[0.06em] text-[var(--sig-text-muted)] cursor-pointer bg-transparent"
+					onclick={() => legendOpen = !legendOpen}
+				>
+					Legend
+					<span class="text-[8px]">{legendOpen ? "▼" : "▲"}</span>
+				</button>
 			</div>
 
 		{#if graphStatus}
@@ -2189,7 +2210,7 @@ $effect(() => {
 		<div class="w-[360px] min-w-[320px] border-l border-[var(--sig-border)] bg-[var(--sig-surface)] flex flex-col min-h-0 max-lg:w-full max-lg:min-w-0 max-lg:max-h-[48%] max-lg:border-l-0 max-lg:border-t max-lg:border-t-[var(--sig-border)]">
 			<div class="p-3 border-b border-[var(--sig-border)] space-y-2 overflow-y-auto">
 				<Collapsible.Root bind:open={controlsMenuOpen} class="border border-[var(--sig-border)]">
-					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 bg-transparent border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-text)] hover:bg-[var(--sig-surface-raised)]">
+					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-highlight)]" style="background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 94%);">
 						<span>View Controls</span>
 						<ChevronDown class={`size-3 text-[var(--sig-text-muted)] transition-transform ${controlsMenuOpen ? 'rotate-180' : ''}`} />
 					</Collapsible.Trigger>
@@ -2210,18 +2231,18 @@ $effect(() => {
 							</div>
 							<div class="text-[10px] font-[family-name:var(--font-mono)] text-[var(--sig-text-muted)]">Window {activeProjectionWindow.offset + 1}-{activeProjectionWindow.offset + embeddings.length} / {embeddingsTotal}</div>
 							<div class="flex flex-wrap gap-1">
-								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showPinnedOnly ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={togglePinnedOnly}>Pinned</button>
-								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showNeighborhoodOnly ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={toggleNeighborhoodOnly}>Neighborhood</button>
-								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {clusterLensMode ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={toggleClusterLens}>Lens</button>
+								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showPinnedOnly ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={togglePinnedOnly}>Pinned</button>
+								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showNeighborhoodOnly ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={toggleNeighborhoodOnly}>Neighborhood</button>
+								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {clusterLensMode ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={toggleClusterLens}>Lens</button>
 								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] text-[var(--sig-text-muted)] hover:text-[var(--sig-text-bright)]" onclick={resetProjectionFilters}>{ActionLabels.Reset}</button>
 							</div>
 							<div class="border border-[var(--sig-border)] px-2 py-2 space-y-1.5">
 								<div class="font-[family-name:var(--font-mono)] text-[10px] uppercase tracking-[0.08em] text-[var(--sig-text-muted)]">Color Mode</div>
 								<div class="flex flex-wrap gap-1">
-									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'newness' ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => (nodeColorMode = "newness")}>Newness</button>
-									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'source' ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => (nodeColorMode = "source")}>Source</button>
+									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'newness' ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => (nodeColorMode = "newness")}>Newness</button>
+									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'source' ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => (nodeColorMode = "source")}>Source</button>
 									<button
-										class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'none' ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}"
+										class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {nodeColorMode === 'none' ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}"
 										onclick={() => {
 											nodeColorMode = "none";
 											showNewSinceLastSeen = false;
@@ -2234,16 +2255,16 @@ $effect(() => {
 							<div class="border border-[var(--sig-border)] px-2 py-2 space-y-1.5">
 								<div class="font-[family-name:var(--font-mono)] text-[10px] uppercase tracking-[0.08em] text-[var(--sig-text-muted)]">Overlays</div>
 								<div class="flex flex-wrap gap-1">
-									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showNewSinceLastSeen && nodeColorMode !== 'none' ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'} {nodeColorMode === 'none' ? 'opacity-60 cursor-not-allowed' : ''}" onclick={() => (showNewSinceLastSeen = !showNewSinceLastSeen)} disabled={nodeColorMode === "none"}>New since last seen</button>
+									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showNewSinceLastSeen && nodeColorMode !== 'none' ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'} {nodeColorMode === 'none' ? 'opacity-60 cursor-not-allowed' : ''}" onclick={() => (showNewSinceLastSeen = !showNewSinceLastSeen)} disabled={nodeColorMode === "none"}>New since last seen</button>
 									<button
-										class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showEntityOverlay ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}"
+										class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {showEntityOverlay ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}"
 										onclick={() => { showEntityOverlay = !showEntityOverlay; if (graphInitialized) reloadEmbeddingsGraph(); }}
 									>
 										{entityOverlayLoading ? 'Loading...' : 'Entities'}
 									</button>
 								</div>
 							</div>
-							<div class="border border-[var(--sig-border)] px-2 py-2 space-y-1.5">
+							<div class="border border-[var(--sig-border)] px-2 py-2 space-y-1.5" style="accent-color: var(--sig-highlight);">
 								<div class="font-[family-name:var(--font-mono)] text-[10px] uppercase tracking-[0.08em] text-[var(--sig-text-muted)]">Graph Physics</div>
 								<label class="block">
 									<div class="flex items-center justify-between text-[10px] font-[family-name:var(--font-mono)] text-[var(--sig-text-muted)]">
@@ -2314,18 +2335,18 @@ $effect(() => {
 				</Collapsible.Root>
 
 				<Collapsible.Root bind:open={presetsMenuOpen} class="border border-[var(--sig-border)]">
-					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 bg-transparent border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-text)] hover:bg-[var(--sig-surface-raised)]">
+					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-highlight)]" style="background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 94%);">
 						<span>Presets</span>
 						<ChevronDown class={`size-3 text-[var(--sig-text-muted)] transition-transform ${presetsMenuOpen ? 'rotate-180' : ''}`} />
 					</Collapsible.Trigger>
 					<Collapsible.Content>
 						<div class="p-2 border-t border-[var(--sig-border)] flex flex-wrap gap-1">
 							{#each builtinPresets as preset}
-								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {activePresetId === preset.id ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => applyPreset(preset)}>{preset.name}</button>
+								<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] uppercase border border-[var(--sig-border-strong)] {activePresetId === preset.id ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => applyPreset(preset)}>{preset.name}</button>
 							{/each}
 							{#each customPresets as preset}
 								<div class="inline-flex items-center border border-[var(--sig-border-strong)]">
-									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] {activePresetId === preset.id ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => applyPreset(preset)}>{preset.name}</button>
+									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] {activePresetId === preset.id ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => applyPreset(preset)}>{preset.name}</button>
 									<button class="px-1.5 py-[2px] font-[family-name:var(--font-mono)] text-[10px] text-[var(--sig-text-muted)] hover:text-[var(--sig-text-bright)]" onclick={() => removeCustomPreset(preset.id)} aria-label={`Delete ${preset.name} preset`}>×</button>
 								</div>
 							{/each}
@@ -2335,7 +2356,7 @@ $effect(() => {
 				</Collapsible.Root>
 
 				<Collapsible.Root bind:open={sourcesMenuOpen} class="border border-[var(--sig-border)]">
-					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 bg-transparent border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-text)] hover:bg-[var(--sig-surface-raised)]">
+					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-highlight)]" style="background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 94%);">
 						<span>Sources</span>
 						<ChevronDown class={`size-3 text-[var(--sig-text-muted)] transition-transform ${sourcesMenuOpen ? 'rotate-180' : ''}`} />
 					</Collapsible.Trigger>
@@ -2345,7 +2366,7 @@ $effect(() => {
 								<span class="text-[10px] text-[var(--sig-text-muted)]">No sources</span>
 							{:else}
 								{#each sourceCounts as source}
-									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleSourceFromPanel(source.who)}>{source.who} {source.count}</button>
+									<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedSources.size === 0 || selectedSources.has(source.who) ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleSourceFromPanel(source.who)}>{source.who} {source.count}</button>
 								{/each}
 							{/if}
 						</div>
@@ -2353,7 +2374,7 @@ $effect(() => {
 				</Collapsible.Root>
 
 				<Collapsible.Root bind:open={showAdvancedFilters} class="border border-[var(--sig-border)]">
-					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 bg-transparent border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-text)] hover:bg-[var(--sig-surface-raised)]">
+					<Collapsible.Trigger class="flex w-full items-center justify-between px-2 py-1.5 border-none text-[10px] uppercase tracking-[0.08em] font-[family-name:var(--font-mono)] text-[var(--sig-highlight)]" style="background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 94%);">
 						<span>Advanced</span>
 						<ChevronDown class={`size-3 text-[var(--sig-text-muted)] transition-transform ${showAdvancedFilters ? 'rotate-180' : ''}`} />
 					</Collapsible.Trigger>
@@ -2396,7 +2417,7 @@ $effect(() => {
 									<span class="text-[10px] text-[var(--sig-text-muted)] font-[family-name:var(--font-mono)]">none</span>
 								{:else}
 									{#each harnessOptions as harness}
-										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedHarnesses.has(harness) ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleHarness(harness)}>{harness}</button>
+										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedHarnesses.has(harness) ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleHarness(harness)}>{harness}</button>
 									{/each}
 								{/if}
 							</div>
@@ -2405,7 +2426,7 @@ $effect(() => {
 									<span class="px-1 text-[10px] text-[var(--sig-text-muted)] uppercase font-[family-name:var(--font-mono)]">Type</span>
 									{#each [...new Set([...selectedServerTypes, ...typeCounts.map((entry) => entry.value)])] as value}
 										{@const count = typeCounts.find((entry) => entry.value === value)?.count ?? 0}
-										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedServerTypes.has(value) ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleServerType(value)}>{value}{count > 0 ? ` ${count}` : ""}</button>
+										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedServerTypes.has(value) ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleServerType(value)}>{value}{count > 0 ? ` ${count}` : ""}</button>
 									{/each}
 								</div>
 							{/if}
@@ -2414,7 +2435,7 @@ $effect(() => {
 									<span class="px-1 text-[10px] text-[var(--sig-text-muted)] uppercase font-[family-name:var(--font-mono)]">Source type</span>
 									{#each [...new Set([...selectedServerSourceTypes, ...sourceTypeCounts.map((entry) => entry.value)])] as value}
 										{@const count = sourceTypeCounts.find((entry) => entry.value === value)?.count ?? 0}
-										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedServerSourceTypes.has(value) ? 'text-[var(--sig-text-bright)] bg-[var(--sig-surface-raised)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleServerSourceType(value)}>{value}{count > 0 ? ` ${count}` : ""}</button>
+										<button class="px-2 py-[2px] font-[family-name:var(--font-mono)] text-[10px] border border-[var(--sig-border-strong)] {selectedServerSourceTypes.has(value) ? 'text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)]' : 'text-[var(--sig-text-muted)] bg-transparent'}" onclick={() => toggleServerSourceType(value)}>{value}{count > 0 ? ` ${count}` : ""}</button>
 									{/each}
 								</div>
 							{/if}

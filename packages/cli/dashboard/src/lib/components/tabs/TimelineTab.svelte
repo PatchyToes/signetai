@@ -1,4 +1,5 @@
 <script lang="ts">
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
 import {
 	getMarketplaceMcpServers,
 	getMemories,
@@ -448,6 +449,9 @@ function getRangeChipLabel(bucket: MemoryTimelineBucket): string {
 }
 
 import { nav, setTab } from "$lib/stores/navigation.svelte";
+import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+import { MEMORY_TAB_ITEMS } from "$lib/components/layout/page-headers";
+import { focusMemoryTab } from "$lib/stores/tab-group-focus.svelte";
 
 function handleKeydown(event: KeyboardEvent): void {
 	// Only handle events when Timeline tab is active
@@ -563,10 +567,19 @@ onMount(() => {
 
 <div
 	bind:this={rootEl}
-	class="timeline-shell flex flex-1 min-h-0 flex-col gap-3 bg-[var(--sig-bg)] p-3"
+	class="timeline-shell flex flex-col flex-1 min-h-0 overflow-hidden"
 	role="region"
 	aria-label="Memory timeline. Use left and right arrows to move through eras."
 >
+	<PageBanner title="Timeline" pattern="lines">
+		<TabGroupBar
+			group="memory"
+			tabs={MEMORY_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusMemoryTab(index)}
+		/>
+	</PageBanner>
+	<div class="flex flex-1 min-h-0 flex-col gap-3 p-3 bg-[var(--sig-bg)]">
 	{#if loading}
 		<div class="flex flex-1 items-center justify-center sig-label">Loading timeline...</div>
 	{:else if buckets.length === 0}
@@ -792,6 +805,7 @@ onMount(() => {
 	{#if error}
 		<p class="sig-label text-[var(--sig-danger)]">{error}</p>
 	{/if}
+	</div>
 </div>
 
 <style>

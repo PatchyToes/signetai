@@ -11,6 +11,11 @@
 	import SearchSection from "./settings/SearchSection.svelte";
 	import TrustSection from "./settings/TrustSection.svelte";
 	import IdentityPanel from "$lib/components/config/IdentityPanel.svelte";
+	import PageBanner from "$lib/components/layout/PageBanner.svelte";
+	import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+	import { ENGINE_TAB_ITEMS } from "$lib/components/layout/page-headers";
+	import { nav } from "$lib/stores/navigation.svelte";
+	import { focusEngineTab } from "$lib/stores/tab-group-focus.svelte";
 
 	interface Props {
 		configFiles: ConfigFile[];
@@ -71,8 +76,8 @@
 	];
 
 	const tabBtn = "px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.06em] rounded-md transition-colors duration-150 border-none cursor-pointer whitespace-nowrap";
-	const tabActive = `${tabBtn} bg-[var(--sig-accent)] text-[var(--sig-bg)]`;
-	const tabInactive = `${tabBtn} bg-transparent text-[var(--sig-text-muted)] hover:bg-[var(--sig-surface-raised)] hover:text-[var(--sig-text-bright)]`;
+	const tabActive = `${tabBtn} text-[var(--sig-highlight)] bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_90%)] border border-[color-mix(in_srgb,var(--sig-highlight),transparent_85%)]`;
+	const tabInactive = `${tabBtn} bg-transparent text-[var(--sig-text-muted)] hover:text-[var(--sig-highlight)] hover:bg-[color-mix(in_srgb,var(--sig-highlight),var(--sig-bg)_94%)]`;
 
 	let activeSection = $state("agent");
 	let discardDialogOpen = $state(false);
@@ -139,6 +144,14 @@
 <svelte:window onkeydown={handleGlobalKey} />
 
 <div class="settings-tab">
+	<PageBanner title="Settings" pattern="terminal">
+		<TabGroupBar
+			group="engine"
+			tabs={ENGINE_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusEngineTab(index)}
+		/>
+	</PageBanner>
 	{#if !st.hasFiles}
 		<div class="empty-state">No YAML config files found</div>
 	{:else}
@@ -256,6 +269,7 @@
 		flex-direction: column;
 		flex: 1;
 		min-height: 0;
+		overflow: hidden;
 	}
 
 	.empty-state {
@@ -271,6 +285,7 @@
 	.tab-bar {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		padding: var(--space-sm) var(--space-md);
 		background: var(--sig-surface);
 		border-bottom: 1px solid var(--sig-border);

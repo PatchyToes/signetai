@@ -42,8 +42,9 @@
 
 <Card
 	class="flex flex-1 flex-col overflow-hidden rounded-none
-		border-[var(--sig-border)] bg-[var(--sig-surface)] py-0
+		border-[var(--sig-border)] py-0
 		shadow-none"
+	style="background: var(--sig-surface);"
 >
 	<CardHeader class="px-3 py-2.5">
 		<div class="flex items-center gap-2">
@@ -79,7 +80,7 @@
 		{:else}
 			<!-- Pinned entity list -->
 			<div class="flex flex-1 flex-col gap-1.5">
-				{#each entities as entity (entity.id)}
+				{#each entities as entity, idx (entity.id ?? `entity-${idx}`)}
 					<div
 						class="flex items-center gap-2 rounded-sm px-2 py-1.5"
 						style="background: var(--sig-surface-raised); border: 1px solid var(--sig-border)"

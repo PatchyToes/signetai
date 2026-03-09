@@ -1,4 +1,9 @@
 <script lang="ts">
+import PageBanner from "$lib/components/layout/PageBanner.svelte";
+import TabGroupBar from "$lib/components/layout/TabGroupBar.svelte";
+import { MEMORY_TAB_ITEMS } from "$lib/components/layout/page-headers";
+import { nav } from "$lib/stores/navigation.svelte";
+import { focusMemoryTab } from "$lib/stores/tab-group-focus.svelte";
 import { onMount } from "svelte";
 import {
 	CalendarDate,
@@ -302,8 +307,16 @@ onMount(() => {
 });
 </script>
 
-<div class="flex flex-1 min-h-0 overflow-auto bg-[var(--sig-bg)]">
-	<div class="flex w-full flex-col gap-3 p-3">
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+	<PageBanner title="Knowledge" pattern="lines">
+		<TabGroupBar
+			group="memory"
+			tabs={MEMORY_TAB_ITEMS}
+			activeTab={nav.activeTab}
+			onselect={(_tab, index) => focusMemoryTab(index)}
+		/>
+	</PageBanner>
+	<div class="flex flex-col flex-1 min-h-0 overflow-auto gap-3 p-3 bg-[var(--sig-bg)]">
 		<Card.Root class="border-[var(--sig-border)] bg-[var(--sig-surface)]">
 			<Card.Header class="border-b border-[var(--sig-border)] pb-3">
 				<Card.Title class="sig-heading flex items-center gap-2">

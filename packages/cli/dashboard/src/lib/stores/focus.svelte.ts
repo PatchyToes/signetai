@@ -10,7 +10,7 @@ import { nav, type TabId } from "./navigation.svelte";
 export type FocusZone = "sidebar-menu" | "sidebar-footer" | "page-content";
 
 export type SidebarFocusItem =
-	| "config"
+	| "home"
 	| "memory-group"
 	| "secrets"
 	| "skills"
@@ -23,7 +23,7 @@ export type SidebarFocusItem =
  * Sidebar navigation order for arrow key cycling
  */
 export const SIDEBAR_ORDER: readonly SidebarFocusItem[] = [
-	"config",
+	"home",
 	"memory-group",
 	"secrets",
 	"skills",
@@ -42,18 +42,20 @@ function tabToSidebarItem(tab: string): SidebarFocusItem {
 		case "pipeline":
 		case "connectors":
 		case "logs":
+		case "predictor":
 			return "engine-group";
 		case "memory":
 		case "timeline":
 		case "embeddings":
+		case "knowledge":
 			return "memory-group";
-		case "config":
+		case "home":
 		case "secrets":
 		case "skills":
 		case "tasks":
 			return tab;
 		default:
-			return "config";
+			return "home";
 	}
 }
 
@@ -84,7 +86,7 @@ function sidebarItemToTab(item: SidebarFocusItem): TabId | null {
 		case "theme-toggle":
 		case "github-link":
 			return null;
-		case "config":
+		case "home":
 		case "secrets":
 		case "skills":
 		case "tasks":

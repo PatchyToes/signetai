@@ -1,6 +1,7 @@
 <script lang="ts">
 import type { DaemonStatus, Harness, Identity } from "$lib/api";
 import * as Sidebar from "$lib/components/ui/sidebar/index.js";
+const { useSidebar } = Sidebar;
 import {
 	type TabId,
 	isEngineGroup,
@@ -26,7 +27,6 @@ import Github from "@lucide/svelte/icons/github";
 import House from "@lucide/svelte/icons/house";
 import ListChecks from "@lucide/svelte/icons/list-checks";
 import Moon from "@lucide/svelte/icons/moon";
-import Network from "@lucide/svelte/icons/network";
 import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Store from "@lucide/svelte/icons/store";
 import Sun from "@lucide/svelte/icons/sun";
@@ -52,6 +52,8 @@ const {
 	onprefetchembeddings,
 }: Props = $props();
 
+const sidebar = useSidebar();
+
 function maybePrefetchEmbeddings(id: string): void {
 	if (id !== "memory") return;
 	onprefetchembeddings?.();
@@ -64,7 +66,6 @@ type NavItem =
 const navItems: NavItem[] = [
 	{ id: "home", label: "Home", icon: House },
 	{ id: "memory-group", label: "Memory", icon: Brain, group: "memory" },
-	{ id: "knowledge", label: "Knowledge", icon: Network },
 	{ id: "secrets", label: "Secrets", icon: ShieldCheck },
 	{ id: "skills", label: "Marketplace", icon: Store },
 	{ id: "tasks", label: "Tasks", icon: ListChecks },
@@ -96,18 +97,15 @@ function handleClick(item: NavItem): void {
 // Initialize sidebar focus on mount — derive from current active tab
 onMount(() => {
 	if (!focus.sidebarItem) {
-		// Sync to whichever tab is actually active
 		const item = navItems.find(n => isActive(n));
-		setSidebarItem((item?.id ?? "config") as SidebarFocusItem);
+		setSidebarItem((item?.id ?? "home") as SidebarFocusItem);
 	}
 });
 
-// Get tabindex for roving tabindex pattern
 function getTabIndex(itemId: SidebarFocusItem): number {
 	return focus.sidebarItem === itemId ? 0 : -1;
 }
 
-// Handle keyboard navigation within sidebar
 function handleSidebarKeydown(e: KeyboardEvent, item: NavItem): void {
 	if (e.key === "ArrowDown") {
 		e.preventDefault();
@@ -119,13 +117,11 @@ function handleSidebarKeydown(e: KeyboardEvent, item: NavItem): void {
 		e.preventDefault();
 		activateItem(item);
 	} else if (e.key === " ") {
-		// Space should also activate for accessibility
 		e.preventDefault();
 		activateItem(item);
 	}
 }
 
-// Handle footer element keyboard navigation
 function handleFooterKeydown(e: KeyboardEvent, item: SidebarFocusItem): void {
 	if (e.key === "ArrowDown") {
 		e.preventDefault();
@@ -143,7 +139,6 @@ function handleFooterKeydown(e: KeyboardEvent, item: SidebarFocusItem): void {
 	}
 }
 
-// Activate a sidebar item (navigate or toggle)
 function activateItem(item: NavItem): void {
 	handleClick(item);
 	setFocusZone("page-content");
@@ -155,15 +150,19 @@ function activateItem(item: NavItem): void {
 	<Sidebar.Header>
 		<Sidebar.Menu>
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton class="h-auto py-2.5 font-[family-name:var(--font-display)]">
+				<Sidebar.MenuButton
+					class="h-auto py-2.5 font-[family-name:var(--font-display)]"
+					onclick={() => sidebar.toggle()}
+				>
 					{#snippet child({ props })}
 						<div {...props}>
 							<span
 								class="inline-block h-2.5 w-2.5 shrink-0 relative
 									before:absolute before:w-px before:h-full before:left-1/2
-									before:bg-[var(--sig-accent)]
+									before:bg-[var(--sig-highlight)]
 									after:absolute after:w-full after:h-px after:top-1/2
-									after:bg-[var(--sig-accent)]"
+									after:bg-[var(--sig-highlight)]"
+								style="filter: drop-shadow(0 0 3px var(--sig-highlight-dim));"
 								aria-hidden="true"
 							></span>
 							<div class="flex flex-col gap-0.5 leading-none overflow-hidden
@@ -195,30 +194,36 @@ function activateItem(item: NavItem): void {
 			<Sidebar.GroupContent>
 				<Sidebar.Menu>
 					{#each navItems as item (item.id)}
+						{@const active = isActive(item)}
 						<Sidebar.MenuItem>
-							<Sidebar.MenuButton
-								data-sidebar-item={item.id}
-								tabindex={getTabIndex(item.id as SidebarFocusItem)}
-								isActive={isActive(item)}
-								onclick={() => activateItem(item)}
-								onkeydown={(e) => handleSidebarKeydown(e, item)}
-								onmouseenter={() => maybePrefetchEmbeddings(item.id)}
-								onfocus={() => {
-									maybePrefetchEmbeddings(item.id);
-									focus.sidebarItem = item.id as SidebarFocusItem;
-								}}
-								tooltipContent={item.label}
+							<div
+								class="nav-blend-item"
+								class:nav-blend-item--active={active}
 							>
-								<item.icon class="size-4" />
-								<span class="text-xs uppercase tracking-[0.06em]
-									font-[family-name:var(--font-mono)]
-									overflow-hidden whitespace-nowrap
-									transition-opacity duration-200 ease-out
-									group-data-[collapsible=icon]:opacity-0"
+								<Sidebar.MenuButton
+									data-sidebar-item={item.id}
+									tabindex={getTabIndex(item.id as SidebarFocusItem)}
+									isActive={active}
+									onclick={() => activateItem(item)}
+									onkeydown={(e) => handleSidebarKeydown(e, item)}
+									onmouseenter={() => maybePrefetchEmbeddings(item.id)}
+									onfocus={() => {
+										maybePrefetchEmbeddings(item.id);
+										focus.sidebarItem = item.id as SidebarFocusItem;
+									}}
+									tooltipContent={item.label}
 								>
-									{item.label}
-								</span>
-							</Sidebar.MenuButton>
+									<item.icon class="size-4" />
+									<span class="text-xs uppercase tracking-[0.06em]
+										font-[family-name:var(--font-mono)]
+										overflow-hidden whitespace-nowrap
+										transition-opacity duration-200 ease-out
+										group-data-[collapsible=icon]:opacity-0"
+									>
+										{item.label}
+									</span>
+								</Sidebar.MenuButton>
+							</div>
 						</Sidebar.MenuItem>
 					{/each}
 				</Sidebar.Menu>
@@ -226,15 +231,16 @@ function activateItem(item: NavItem): void {
 		</Sidebar.Group>
 	</Sidebar.Content>
 
-	<Sidebar.Footer>
+	<Sidebar.Footer class="sidebar-carbon-footer">
 		<Sidebar.Menu>
 			<Sidebar.MenuItem>
 				<div class="flex items-center gap-1.5 px-2 py-1">
 					<span
-						class="inline-block h-1.5 w-1.5 shrink-0"
-						class:bg-[var(--sig-success)]={!!daemonStatus}
+						class="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+						class:bg-[var(--sig-highlight)]={!!daemonStatus}
 						class:border={!daemonStatus}
 						class:border-[var(--sig-text-muted)]={!daemonStatus}
+						style={daemonStatus ? "box-shadow: 0 0 6px var(--sig-highlight);" : ""}
 					></span>
 					<span
 						class="text-[10px] tracking-[0.1em] uppercase
@@ -330,3 +336,126 @@ function activateItem(item: NavItem): void {
 		</Sidebar.Menu>
 	</Sidebar.Footer>
 </Sidebar.Root>
+
+<style>
+	/*
+	 * "Blend into page" effect: the active sidebar item extends to the
+	 * right edge and visually merges with the main content area, using
+	 * rounded cutout corners above and below to form a tab shape.
+	 */
+
+	.nav-blend-item {
+		position: relative;
+		margin-right: -8px; /* extend to the sidebar's right edge */
+		border-radius: 6px;
+		transition: background 0.2s ease, border-color 0.2s ease;
+	}
+
+	.nav-blend-item--active {
+		background: var(--sig-surface);
+		border-radius: 6px 0 0 6px;
+		border-left: 2px solid var(--sig-highlight);
+		border-top: 1px solid var(--sig-border-strong);
+		border-bottom: 1px solid var(--sig-border-strong);
+	}
+
+	/* Rounded cutout above the active item */
+	.nav-blend-item--active::before {
+		content: "";
+		position: absolute;
+		right: 0;
+		bottom: 100%;
+		width: 10px;
+		height: 10px;
+		background: transparent;
+		border-bottom-right-radius: 8px;
+		box-shadow: 3px 3px 0 0 var(--sig-surface);
+		pointer-events: none;
+	}
+
+	/* Rounded cutout below the active item */
+	.nav-blend-item--active::after {
+		content: "";
+		position: absolute;
+		right: 0;
+		top: 100%;
+		width: 10px;
+		height: 10px;
+		background: transparent;
+		border-top-right-radius: 8px;
+		box-shadow: 3px -3px 0 0 var(--sig-surface);
+		pointer-events: none;
+	}
+
+	/* Override the active button styling to match the blend */
+	:global(.nav-blend-item--active [data-sidebar="menu-button"]) {
+		background: transparent !important;
+		color: var(--sig-text-bright) !important;
+	}
+
+	/* When collapsed, disable the blend effect */
+	:global([data-collapsible="icon"][data-state="collapsed"]) .nav-blend-item {
+		margin-right: 0;
+	}
+	:global([data-collapsible="icon"][data-state="collapsed"]) .nav-blend-item--active {
+		background: transparent;
+		border-radius: 6px;
+		border-left: none;
+	}
+	:global([data-collapsible="icon"][data-state="collapsed"]) .nav-blend-item--active::before,
+	:global([data-collapsible="icon"][data-state="collapsed"]) .nav-blend-item--active::after {
+		display: none;
+	}
+
+	/* Carbon fiber texture on sidebar footer */
+	:global(.sidebar-carbon-footer) {
+		position: relative;
+		border-top: none;
+	}
+	:global(.sidebar-carbon-footer)::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		border-radius: inherit;
+		background:
+			repeating-conic-gradient(
+				rgba(255, 255, 255, 0.02) 0% 25%,
+				transparent 0% 50%
+			) 0 0 / 10px 10px,
+			repeating-conic-gradient(
+				transparent 0% 25%,
+				rgba(0, 0, 0, 0.03) 0% 50%
+			) 5px 5px / 10px 10px,
+			repeating-conic-gradient(
+				var(--sig-surface) 0% 25%,
+				color-mix(in srgb, var(--sig-surface) 96%, black) 0% 50%
+			) 0 0 / 10px 10px;
+		-webkit-mask-image: linear-gradient(to bottom, transparent, black 12px), linear-gradient(to right, black 50%, transparent 100%);
+		-webkit-mask-composite: source-in;
+		mask-image: linear-gradient(to bottom, transparent, black 12px), linear-gradient(to right, black 50%, transparent 100%);
+		mask-composite: intersect;
+		z-index: 0;
+	}
+	:global(.sidebar-carbon-footer > *) {
+		position: relative;
+		z-index: 1;
+	}
+
+	/* Light theme — darken the weave instead */
+	:global([data-theme="light"] .sidebar-carbon-footer)::before {
+		background:
+			repeating-conic-gradient(
+				rgba(0, 0, 0, 0.02) 0% 25%,
+				transparent 0% 50%
+			) 0 0 / 10px 10px,
+			repeating-conic-gradient(
+				transparent 0% 25%,
+				rgba(0, 0, 0, 0.03) 0% 50%
+			) 5px 5px / 10px 10px,
+			repeating-conic-gradient(
+				var(--sig-surface) 0% 25%,
+				color-mix(in srgb, var(--sig-surface) 96%, black) 0% 50%
+			) 0 0 / 10px 10px;
+	}
+</style>

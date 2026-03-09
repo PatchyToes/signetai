@@ -82,30 +82,19 @@ function getColumnTasks(key: string): ScheduledTask[] {
 		</span>
 	</div>
 {:else}
-	<div class="grid grid-cols-4 gap-3 p-[var(--space-md)] h-full min-h-0">
+	<div class="board-grid">
 		{#each columns as col, colIndex (col.key)}
 			{@const colTasks = getColumnTasks(col.key)}
-			<div class="flex flex-col gap-2 min-h-0" data-column-idx={colIndex}>
-				<div class="flex items-center gap-2 shrink-0 px-1">
+			<div class="column-window" data-column-idx={colIndex}>
+				<div class="column-header">
 					<span
-						class="inline-block w-2 h-2 shrink-0"
+						class="column-dot"
 						style="background: {col.color}"
 					></span>
-					<span
-						class="text-[10px] font-bold uppercase tracking-[0.1em]
-							text-[var(--sig-text-muted)]
-							font-[family-name:var(--font-display)]"
-					>
-						{col.label}
-					</span>
-					<span
-						class="text-[10px] text-[var(--sig-text-muted)]
-							font-[family-name:var(--font-mono)]"
-					>
-						{colTasks.length}
-					</span>
+					<span class="column-label">{col.label}</span>
+					<span class="column-count">{colTasks.length}</span>
 				</div>
-				<div class="flex flex-col gap-2 overflow-y-auto min-h-0 flex-1">
+				<div class="column-cards">
 					{#each colTasks as task, taskIndex (task.id)}
 						<TaskCard
 							{task}
@@ -116,39 +105,131 @@ function getColumnTasks(key: string): ScheduledTask[] {
 							ontoggle={(enabled) => ontoggle(task.id, enabled)}
 						/>
 					{/each}
+					{#if colTasks.length === 0}
+						<div class="column-empty">No tasks</div>
+					{/if}
 				</div>
 			</div>
 		{/each}
 	</div>
 
 	{#if disabled.length > 0}
-		<div class="px-[var(--space-md)] pb-[var(--space-md)]">
-			<div class="flex items-center gap-2 px-1 mb-2">
-				<span
-					class="text-[10px] font-bold uppercase tracking-[0.1em]
-						text-[var(--sig-text-muted)]
-						font-[family-name:var(--font-display)]"
-				>
-					Disabled
-				</span>
-				<span
-					class="text-[10px] text-[var(--sig-text-muted)]
-						font-[family-name:var(--font-mono)]"
-				>
-					{disabled.length}
-				</span>
-			</div>
-			<div class="flex gap-2 flex-wrap">
-				{#each disabled as task (task.id)}
-					<TaskCard
-						{task}
-						columnKey="disabled"
-						onclick={() => onopendetail(task.id, -1, -1)}
-						ontrigger={() => ontrigger(task.id)}
-						ontoggle={(enabled) => ontoggle(task.id, enabled)}
-					/>
-				{/each}
+		<div class="disabled-section">
+			<div class="column-window">
+				<div class="column-header">
+					<span class="column-dot" style="background: var(--sig-text-muted)"></span>
+					<span class="column-label">Disabled</span>
+					<span class="column-count">{disabled.length}</span>
+				</div>
+				<div class="disabled-cards">
+					{#each disabled as task (task.id)}
+						<TaskCard
+							{task}
+							columnKey="disabled"
+							onclick={() => onopendetail(task.id, -1, -1)}
+							ontrigger={() => ontrigger(task.id)}
+							ontoggle={(enabled) => ontoggle(task.id, enabled)}
+						/>
+					{/each}
+				</div>
 			</div>
 		</div>
 	{/if}
 {/if}
+
+<style>
+	.board-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: var(--space-sm);
+		padding: var(--space-md);
+		min-height: 0;
+		flex: 1;
+	}
+
+	.column-window {
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		border: 1px solid var(--sig-border-strong);
+		border-radius: 8px;
+		overflow: hidden;
+		background:
+			repeating-conic-gradient(
+				rgba(255, 255, 255, 0.01) 0% 25%,
+				transparent 0% 50%
+			) 0 0 / 10px 10px,
+			repeating-conic-gradient(
+				transparent 0% 25%,
+				rgba(0, 0, 0, 0.015) 0% 50%
+			) 5px 5px / 10px 10px,
+			repeating-conic-gradient(
+				var(--sig-surface) 0% 25%,
+				color-mix(in srgb, var(--sig-surface) 98%, black) 0% 50%
+			) 0 0 / 10px 10px;
+	}
+
+	.column-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: var(--space-sm) var(--space-md);
+		border-bottom: 1px solid var(--sig-border);
+		shrink: 0;
+	}
+
+	.column-dot {
+		display: inline-block;
+		width: 6px;
+		height: 6px;
+		shrink: 0;
+	}
+
+	.column-label {
+		font-family: var(--font-display);
+		font-size: 10px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--sig-text-muted);
+	}
+
+	.column-count {
+		font-family: var(--font-mono);
+		font-size: 10px;
+		color: var(--sig-text-muted);
+		margin-left: auto;
+	}
+
+	.column-cards {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+		padding: var(--space-sm);
+		overflow-y: auto;
+		min-height: 0;
+		flex: 1;
+	}
+
+	.column-empty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: var(--space-lg) var(--space-md);
+		font-family: var(--font-mono);
+		font-size: 10px;
+		color: var(--sig-text-muted);
+		opacity: 0.5;
+	}
+
+	.disabled-section {
+		padding: 0 var(--space-md) var(--space-md);
+	}
+
+	.disabled-cards {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+		gap: var(--space-sm);
+		padding: var(--space-sm);
+	}
+</style>

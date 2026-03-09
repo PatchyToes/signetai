@@ -1046,7 +1046,8 @@ $effect(() => {
 		flex-direction: column;
 		gap: 3px;
 		padding: 8px;
-		background: color-mix(in srgb, var(--sig-surface-raised) 55%, transparent);
+		background: var(--sig-surface-raised);
+		border: 1px solid var(--sig-border);
 		border-radius: 0.45rem;
 	}
 
@@ -1083,13 +1084,13 @@ $effect(() => {
 
 	.module-search:hover,
 	.input:hover {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	.module-search:focus,
 	.input:focus {
-		border-color: var(--sig-accent);
-		outline: 2px solid var(--sig-accent);
+		border-color: var(--sig-highlight);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
@@ -1173,17 +1174,19 @@ $effect(() => {
 	}
 
 	:global(.view-tab:hover) {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
+		color: var(--sig-highlight);
 	}
 
 	:global(.view-tab:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
 	:global(.view-tab.view-tab-active) {
-		border-color: var(--sig-accent);
-		color: var(--sig-text-bright);
+		border-color: var(--sig-highlight);
+		color: var(--sig-highlight);
+		background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 90%);
 	}
 
 	.hero-actions {
@@ -1201,18 +1204,19 @@ $effect(() => {
 	}
 
 	:global(.hero-switch:hover) {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
+		color: var(--sig-highlight);
 	}
 
 	:global(.hero-switch:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
 	:global(.hero-switch.hero-switch-active) {
-		border-color: var(--sig-accent);
-		color: var(--sig-text-bright);
-		background: color-mix(in srgb, var(--sig-surface-raised) 84%, transparent);
+		border-color: var(--sig-highlight);
+		color: var(--sig-highlight);
+		background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 90%);
 	}
 
 	.module-body {
@@ -1237,7 +1241,8 @@ $effect(() => {
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-		background: color-mix(in srgb, var(--sig-surface-raised) 35%, transparent);
+		background: color-mix(in srgb, var(--sig-highlight), var(--sig-bg) 96%);
+		border: 1px solid var(--sig-border);
 		border-radius: 0.5rem;
 	}
 
@@ -1253,17 +1258,17 @@ $effect(() => {
 		font-size: 11px;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: var(--sig-text-bright);
+		color: var(--sig-highlight);
 		cursor: pointer;
 		transition: color 0.15s;
 	}
 
 	:global(.rail-trigger:hover) {
-		color: var(--sig-accent);
+		color: var(--sig-highlight-text);
 	}
 
 	:global(.rail-trigger:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 2px;
 	}
 
@@ -1289,11 +1294,11 @@ $effect(() => {
 	}
 
 	:global(.rail-select:hover) {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	:global(.rail-select:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
@@ -1313,11 +1318,11 @@ $effect(() => {
 	}
 
 	:global(.rail-btn:hover) {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	:global(.rail-btn:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
@@ -1347,11 +1352,11 @@ $effect(() => {
 		width: 16px;
 		height: 16px;
 		cursor: pointer;
-		accent-color: var(--sig-accent);
+		accent-color: var(--sig-highlight);
 	}
 
 	.toggle-row input[type="checkbox"]:focus-visible {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 
@@ -1366,11 +1371,11 @@ $effect(() => {
 	}
 
 	.sync-actions :global(button:hover) {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	.sync-actions :global(button:focus-visible) {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
 	}
 

@@ -187,7 +187,7 @@ let isInstalled = $derived(
 					<Button
 						variant="outline"
 						size="sm"
-						class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-danger)] text-[var(--sig-danger)] hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)]"
+						class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text)] transition-all duration-150 hover:bg-[var(--sig-danger)] hover:text-[var(--sig-text-bright)] hover:border-[var(--sig-danger)] hover:shadow-[0_0_12px_rgba(220,38,38,0.35)] hover:scale-[1.02]"
 						onclick={(e: MouseEvent) => { e.stopPropagation(); onuninstall?.(); }}
 						disabled={uninstalling}
 					>
@@ -197,7 +197,7 @@ let isInstalled = $derived(
 					<Button
 						variant="outline"
 						size="sm"
-						class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text-bright)]"
+						class="flex-1 h-auto rounded-lg font-[family-name:var(--font-mono)] text-[9px] uppercase tracking-[0.08em] px-2 py-1 border-[var(--sig-border-strong)] text-[var(--sig-text)] transition-all duration-150 hover:bg-[var(--sig-surface-raised)] hover:text-[var(--sig-text-bright)] hover:border-[var(--sig-text-muted)] hover:shadow-[0_0_12px_rgba(255,255,255,0.1)] hover:scale-[1.02]"
 						onclick={(e: MouseEvent) => { e.stopPropagation(); oninstall?.(); }}
 						disabled={installing}
 					>
@@ -239,24 +239,27 @@ let isInstalled = $derived(
 		gap: 8px;
 		padding: var(--space-sm);
 		background:
-			radial-gradient(circle at 12% -24%, color-mix(in srgb, var(--sig-accent) 8%, transparent), transparent 52%),
-			linear-gradient(220deg, color-mix(in srgb, var(--sig-surface-raised) 92%, black) 0%, var(--sig-surface-raised) 72%);
+			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 8%, transparent), transparent 45%),
+			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 94%, black) 0%, var(--sig-surface) 65%);
 		border: 1px solid var(--sig-border);
 		cursor: pointer;
-		transition: border-color 0.15s;
+		transition: border-color 0.15s, background 0.15s;
 		text-align: left;
 		min-height: 140px;
 		width: 100%;
 	}
 
 	.card:hover {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
+		background:
+			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 11%, transparent), transparent 45%),
+			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 91%, black) 0%, var(--sig-surface) 65%);
 	}
 
 	.card:focus-visible {
-		outline: 2px solid var(--sig-accent);
+		outline: 2px solid var(--sig-highlight);
 		outline-offset: 1px;
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 	}
 
 	.action-row {
@@ -265,10 +268,10 @@ let isInstalled = $derived(
 		width: 100%;
 	}
 	.card-wrap.selected > .card {
-		border-color: var(--sig-accent);
+		border-color: var(--sig-highlight);
 		background:
-			radial-gradient(circle at 12% -24%, color-mix(in srgb, var(--sig-accent) 10%, transparent), transparent 54%),
-			linear-gradient(220deg, color-mix(in srgb, var(--sig-surface) 90%, black) 0%, var(--sig-surface) 74%);
+			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 14%, transparent), transparent 45%),
+			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 88%, black) 0%, var(--sig-surface) 65%);
 	}
 	.card-wrap.featured > .card {
 		min-height: 160px;
@@ -355,7 +358,7 @@ let isInstalled = $derived(
 		font-family: var(--font-display);
 		font-size: 12px;
 		font-weight: 600;
-		color: var(--sig-text-bright);
+		color: var(--sig-highlight);
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 		overflow: hidden;
@@ -439,7 +442,7 @@ let isInstalled = $derived(
 	}
 
 	.compare-dot.active {
-		background: var(--sig-accent);
-		border-color: var(--sig-accent);
+		background: var(--sig-highlight);
+		border-color: var(--sig-highlight);
 	}
 </style>

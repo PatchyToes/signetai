@@ -24,8 +24,8 @@
 	import PinnedEntityCluster from "$lib/components/home/PinnedEntityCluster.svelte";
 	import SystemInfoCard from "$lib/components/home/SystemInfoCard.svelte";
 	import MiniChangelog from "$lib/components/home/MiniChangelog.svelte";
-	import QuickLinks from "$lib/components/home/QuickLinks.svelte";
 	import { onMount } from "svelte";
+	import PageBanner from "$lib/components/layout/PageBanner.svelte";
 
 	interface Props {
 		identity: Identity;
@@ -72,6 +72,8 @@
 	});
 </script>
 
+<div class="flex flex-col flex-1 min-h-0 overflow-hidden">
+<PageBanner title="Home" pattern="lines" />
 <div class="home-grid">
 	<div class="area-banner">
 		<AgentHeader
@@ -83,19 +85,13 @@
 			memoryCount={memoryStats?.total ?? 0}
 		/>
 	</div>
-
 	<div class="area-insights">
 		<SuggestedInsights {memories} />
 	</div>
-
-	<div class="area-predictor">
+	<div class="area-right-top">
+		<PinnedEntityCluster />
 		<PredictorSplitBar {daemonStatus} />
 	</div>
-
-	<div class="area-entity">
-		<PinnedEntityCluster />
-	</div>
-
 	<div class="area-health">
 		<SystemInfoCard
 			{diagnostics}
@@ -103,29 +99,24 @@
 			{memoryStats}
 		/>
 	</div>
-
-	<div class="area-links">
-		<QuickLinks />
-	</div>
-
 	<div class="area-changelog">
 		<MiniChangelog html={changelogHtml} />
 	</div>
+</div>
 </div>
 
 <style>
 	.home-grid {
 		display: grid;
 		grid-template-columns: 1.6fr 1fr;
-		grid-template-rows: auto 1fr 1fr auto auto;
+		grid-template-rows: auto 1fr 1fr;
 		grid-template-areas:
 			"banner     banner"
-			"insights   predictor"
-			"insights   entity"
-			"health     entity"
-			"links      changelog";
+			"insights   righttop"
+			"health     changelog";
 		gap: var(--space-sm);
-		height: 100%;
+		flex: 1;
+		min-height: 0;
 		padding: var(--space-sm);
 		overflow: hidden;
 	}
@@ -140,22 +131,21 @@
 		overflow: hidden;
 	}
 
-	.area-predictor {
-		grid-area: predictor;
-	}
-
-	.area-entity {
-		grid-area: entity;
+	.area-right-top {
+		grid-area: righttop;
+		display: flex;
+		gap: var(--space-sm);
 		min-height: 0;
 		overflow: hidden;
 	}
 
-	.area-health {
-		grid-area: health;
+	.area-right-top > :global(*) {
+		flex: 1;
+		min-width: 0;
 	}
 
-	.area-links {
-		grid-area: links;
+	.area-health {
+		grid-area: health;
 	}
 
 	.area-changelog {

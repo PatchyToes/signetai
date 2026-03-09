@@ -3,7 +3,6 @@ import { type TabId, isMemoryGroup, isEngineGroup } from "$lib/stores/navigation
 import { PAGE_HEADERS, MEMORY_TAB_ITEMS, ENGINE_TAB_ITEMS } from "./page-headers";
 import TabGroupBar from "./TabGroupBar.svelte";
 import { Button } from "$lib/components/ui/button/index.js";
-import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 import Plus from "@lucide/svelte/icons/plus";
 
 interface Props {
@@ -31,20 +30,11 @@ const {
 
 <header
 	class="flex h-12 shrink-0 items-center justify-between
-		border-b border-[var(--sig-border)] px-4"
+		border-b border-[var(--sig-border)] px-4
+		bg-[var(--sig-surface)]"
+	class:hidden={activeTab === "home" || activeTab === "secrets" || activeTab === "skills" || activeTab === "tasks" || isMemoryGroup(activeTab) || isEngineGroup(activeTab)}
 >
 	<div class="flex items-center gap-2">
-		<Sidebar.Trigger class="-ml-1" />
-		<span class="sig-heading">
-			{PAGE_HEADERS[activeTab].title}
-		</span>
-		{#if !isMemoryGroup(activeTab) && !isEngineGroup(activeTab)}
-			<span class="sig-eyebrow tracking-[0.1em]">&middot;</span>
-			<span class="sig-eyebrow tracking-[0.1em]">
-				{PAGE_HEADERS[activeTab].eyebrow}
-			</span>
-		{/if}
-
 		{#if isMemoryGroup(activeTab)}
 			<TabGroupBar
 				group="memory"
