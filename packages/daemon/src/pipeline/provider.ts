@@ -128,9 +128,12 @@ function spawnHidden(cmd: string[], options?: { env?: Record<string, string | un
 		stderr: proc.stderr,
 		exited: proc.exited,
 		kill(signal?: string) {
-			// Default to SIGTERM (15) when no signal is specified
-			const sigNum = signal === "SIGKILL" ? 9 : 15;
-			proc.kill(sigNum);
+			const sigMap: Record<string, number> = { SIGTERM: 15, SIGKILL: 9 };
+			const sigNum = signal ? sigMap[signal] : 15;
+			if (signal && sigNum === undefined) {
+				logger.warn("pipeline", `Unknown signal "${signal}", defaulting to SIGTERM`);
+			}
+			proc.kill(sigNum ?? 15);
 		},
 	};
 }
@@ -564,7 +567,8 @@ export function createAnthropicProvider(
 
 			// Pre-check deadline before waiting on semaphore
 			if (deadline - Date.now() <= 0) {
-				throw lastError ?? new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded before attempt ${attempt})`);
+				const reason = lastError ? `last error: ${lastError.message}` : "no successful attempt";
+				throw new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded before attempt ${attempt}; ${reason})`);
 			}
 
 			// Acquire semaphore only for the actual API call, release
@@ -574,7 +578,8 @@ export function createAnthropicProvider(
 				// contention delay is accounted for in the abort timer.
 				const remainingMs = deadline - Date.now();
 				if (remainingMs <= 0) {
-					throw lastError ?? new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
+					const reason = lastError ? `last error: ${lastError.message}` : "no successful attempt";
+					throw new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore; ${reason})`);
 				}
 				const controller = new AbortController();
 				const timer = setTimeout(() => controller.abort(), remainingMs);
