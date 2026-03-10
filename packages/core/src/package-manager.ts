@@ -306,18 +306,40 @@ export function resolveGlobalPackagePath(
 				return undefined;
 			}
 			case "yarn": {
-				const result = spawnSync("yarn", ["global", "dir"], {
+				// `yarn global dir` is Yarn Classic (v1) only. Yarn Berry (v2+)
+				// removed all `yarn global` subcommands. Detect version first.
+				const versionResult = spawnSync("yarn", ["--version"], {
 					encoding: "utf-8",
-					timeout: 10_000,
+					timeout: 5_000,
 					windowsHide: true,
 				});
-				if (result.status === 0 && result.stdout.trim()) {
-					const candidate = join(
-						result.stdout.trim(),
+				const isClassic =
+					versionResult.status === 0 &&
+					/^1\./.test(versionResult.stdout.trim());
+
+				if (isClassic) {
+					const result = spawnSync("yarn", ["global", "dir"], {
+						encoding: "utf-8",
+						timeout: 10_000,
+						windowsHide: true,
+					});
+					if (result.status === 0 && result.stdout.trim()) {
+						const candidate = join(
+							result.stdout.trim(),
+							"node_modules",
+							packageName,
+						);
+						if (existsSync(candidate)) return candidate;
+					}
+				} else {
+					// Berry defaults to ~/.yarn/berry/global; respects YARN_GLOBAL_FOLDER
+					const berryGlobal = join(
+						process.env.YARN_GLOBAL_FOLDER ??
+							join(homedir(), ".yarn", "berry", "global"),
 						"node_modules",
 						packageName,
 					);
-					if (existsSync(candidate)) return candidate;
+					if (existsSync(berryGlobal)) return berryGlobal;
 				}
 				return undefined;
 			}

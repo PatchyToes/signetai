@@ -554,17 +554,9 @@ async function configureHarnessHooks(
 				runtimePath,
 			});
 			if (runtimePath === "plugin") {
-				await ensureOpenClawPluginPackage(basePath);
-				// Resolve the now-installed global path and re-patch config
-				// with plugins.load.paths as a discovery fallback.
-				const packageManager = resolvePrimaryPackageManager({
-					agentsDir: basePath,
-					env: process.env,
-				});
-				const globalPkgPath = resolveGlobalPackagePath(
-					packageManager.family,
-					OPENCLAW_PLUGIN_PACKAGE,
-				);
+				// ensureOpenClawPluginPackage returns the resolved global path — reuse
+				// it to patch load.paths without spawning a second subprocess.
+				const globalPkgPath = await ensureOpenClawPluginPackage(basePath);
 				if (globalPkgPath) {
 					await connector.install(basePath, {
 						configureWorkspace: false,
@@ -660,20 +652,24 @@ function writeOpenClawPluginSyncVersion(basePath: string, version: string): void
 async function ensureOpenClawPluginPackage(
 	basePath: string,
 	options: { force?: boolean; silent?: boolean } = {},
-): Promise<boolean> {
+): Promise<string | undefined> {
 	const connector = new OpenClawConnector();
 	if (connector.getConfiguredRuntimePath() !== "plugin") {
-		return false;
-	}
-
-	if (!options.force && readOpenClawPluginSyncVersion(basePath) === VERSION) {
-		return true;
+		return undefined;
 	}
 
 	const packageManager = resolvePrimaryPackageManager({
 		agentsDir: basePath,
 		env: process.env,
 	});
+
+	if (!options.force && readOpenClawPluginSyncVersion(basePath) === VERSION) {
+		// Cached — skip re-install but still resolve and return path for caller
+		const cachedPath = resolveGlobalPackagePath(packageManager.family, OPENCLAW_PLUGIN_PACKAGE);
+		if (cachedPath) ensureOpenClawExtensionSymlink(cachedPath, options.silent);
+		return cachedPath;
+	}
+
 	const installCommand = getGlobalInstallCommand(
 		packageManager.family,
 		`${OPENCLAW_PLUGIN_PACKAGE}@${VERSION}`,
@@ -694,7 +690,7 @@ async function ensureOpenClawPluginPackage(
 				),
 			);
 		}
-		return false;
+		return undefined;
 	}
 
 	writeOpenClawPluginSyncVersion(basePath, VERSION);
@@ -704,11 +700,10 @@ async function ensureOpenClawPluginPackage(
 		);
 	}
 
-	// Symlink global package into OpenClaw's extensions directory so
-	// plugin discovery finds it without needing plugins.load.paths.
-	ensureOpenClawExtensionSymlink(packageManager.family, options.silent);
-
-	return true;
+	// Resolve once and reuse for both symlink creation and load.paths patch.
+	const globalPath = resolveGlobalPackagePath(packageManager.family, OPENCLAW_PLUGIN_PACKAGE);
+	if (globalPath) ensureOpenClawExtensionSymlink(globalPath, options.silent);
+	return globalPath;
 }
 
 /**
@@ -717,18 +712,9 @@ async function ensureOpenClawPluginPackage(
  * updates if stale, creates if missing.
  */
 function ensureOpenClawExtensionSymlink(
-	family: import("@signet/core").PackageManagerFamily,
+	globalPath: string,
 	silent?: boolean,
 ): void {
-	const globalPath = resolveGlobalPackagePath(family, OPENCLAW_PLUGIN_PACKAGE);
-	if (!globalPath) {
-		if (!silent) {
-			console.log(
-				chalk.yellow("  Warning: could not resolve global package path for symlink"),
-			);
-		}
-		return;
-	}
 
 	// Discover the active OpenClaw state directory. Check env overrides first,
 	// then probe for existing legacy dirs (~/.clawdbot, ~/.moldbot, ~/.moltbot).

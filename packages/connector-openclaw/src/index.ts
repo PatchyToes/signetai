@@ -23,7 +23,7 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { BaseConnector, type InstallResult, type UninstallResult } from "@signet/connector-base";
 import { parse as parseJson5 } from "json5";
 
@@ -737,11 +737,17 @@ export class OpenClawConnector extends BaseConnector {
 				// Add global package path to plugins.load.paths as a fallback
 				// for environments where the symlink can't be created (Docker, perms).
 				if (globalPackagePath) {
+					// Use the parent directory as the load path. OpenClaw scans each
+					// entry in load.paths for a subdirectory named after the plugin
+					// ("signet-memory-openclaw"). The package lives at:
+					//   …/@signetai/signet-memory-openclaw
+					// so dirname gives …/@signetai/, which contains "signet-memory-openclaw".
+					const searchPath = dirname(globalPackagePath);
 					const pluginsObj = (config.plugins ?? {}) as JsonObject;
 					const loadObj = (pluginsObj.load ?? {}) as JsonObject;
 					const existingPaths = Array.isArray(loadObj.paths) ? (loadObj.paths as string[]) : [];
-					if (!existingPaths.includes(globalPackagePath)) {
-						loadObj.paths = [...existingPaths, globalPackagePath];
+					if (!existingPaths.includes(searchPath)) {
+						loadObj.paths = [...existingPaths, searchPath];
 						pluginsObj.load = loadObj;
 						config.plugins = pluginsObj;
 					}
