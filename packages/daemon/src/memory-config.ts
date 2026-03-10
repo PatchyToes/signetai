@@ -292,9 +292,7 @@ export function loadPipelineConfig(
 				? (typeof flatModel === "string" ? flatModel : d.extraction.model)
 				: typeof extractionRaw?.model === "string"
 					? extractionRaw.model
-					: typeof flatModel === "string"
-						? flatModel
-						: d.extraction.model,
+					: d.extraction.model,
 			timeout: clampPositive(
 				extractionRaw?.timeout ?? raw.extractionTimeout,
 				5000,
