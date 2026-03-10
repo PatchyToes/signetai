@@ -219,9 +219,39 @@ export function requeueDeadJobs(
 		return count;
 	});
 
+	// Also requeue dead summary_jobs (issue #181)
+	const summaryAffected = accessor.withWriteTx((db) => {
+		// Check if summary_jobs table exists (migration may not have run)
+		const tableExists = db
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'summary_jobs'")
+			.get();
+		if (!tableExists) return 0;
+
+		const deadSummary = db
+			.prepare("SELECT id FROM summary_jobs WHERE status = 'dead' LIMIT ?")
+			.all(maxBatch) as Array<{ id: string }>;
+		if (deadSummary.length === 0) return 0;
+
+		const placeholders = deadSummary.map(() => "?").join(", ");
+		const ids = deadSummary.map((r) => r.id);
+		const now = new Date().toISOString();
+		const result = db
+			.prepare(
+				`UPDATE summary_jobs
+				 SET status = 'pending', attempts = 0, error = NULL
+				 WHERE id IN (${placeholders})`,
+			)
+			.run(...ids);
+		return countChanges(result);
+	});
+
+	const totalAffected = affected + summaryAffected;
+
 	limiter.record(action);
 	logger.info("pipeline", "repair: requeued dead jobs", {
-		affected,
+		memoryJobs: affected,
+		summaryJobs: summaryAffected,
+		total: totalAffected,
 		actor: ctx.actor,
 		reason: ctx.reason,
 	});
@@ -229,8 +259,8 @@ export function requeueDeadJobs(
 	return {
 		action,
 		success: true,
-		affected,
-		message: `requeued ${affected} dead job(s) to pending`,
+		affected: totalAffected,
+		message: `requeued ${affected} dead memory job(s) and ${summaryAffected} dead summary job(s) to pending`,
 	};
 }
 

@@ -13,6 +13,70 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { logger } from "../logger";
 
 // ---------------------------------------------------------------------------
+// Global concurrency semaphore for CLI subprocess providers
+// ---------------------------------------------------------------------------
+// Prevents starvation when multiple pipeline workers (extraction,
+// structural-classify, summary, etc.) all spawn `claude -p` or `codex`
+// subprocesses simultaneously. Without this, 10+ concurrent processes
+// can cause API rate limiting and timeout cascades.
+
+const DEFAULT_MAX_CONCURRENT_SUBPROCESSES = 4;
+
+class SubprocessSemaphore {
+	private readonly max: number;
+	private active = 0;
+	private readonly queue: Array<() => void> = [];
+
+	constructor(max: number) {
+		this.max = max;
+	}
+
+	async acquire(): Promise<void> {
+		if (this.active < this.max) {
+			this.active++;
+			return;
+		}
+		return new Promise<void>((resolve) => {
+			this.queue.push(() => {
+				this.active++;
+				resolve();
+			});
+		});
+	}
+
+	release(): void {
+		this.active--;
+		const next = this.queue.shift();
+		if (next) next();
+	}
+
+	get pending(): number {
+		return this.queue.length;
+	}
+
+	get running(): number {
+		return this.active;
+	}
+}
+
+const subprocessSemaphore = new SubprocessSemaphore(
+	Number(process.env.SIGNET_MAX_LLM_CONCURRENCY) || DEFAULT_MAX_CONCURRENT_SUBPROCESSES,
+);
+
+/**
+ * Run an async function guarded by the global subprocess semaphore.
+ * Ensures no more than N concurrent CLI subprocess calls across all workers.
+ */
+async function withSemaphore<T>(fn: () => Promise<T>): Promise<T> {
+	await subprocessSemaphore.acquire();
+	try {
+		return await fn();
+	} finally {
+		subprocessSemaphore.release();
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Windows-safe spawn helper
 // ---------------------------------------------------------------------------
 // Bun.spawn does not support windowsHide, so CLI subprocesses flash a
@@ -229,6 +293,7 @@ export function createClaudeCodeProvider(
 		outputFormat: "text" | "json",
 		opts?: { timeoutMs?: number; maxTokens?: number },
 	): Promise<string> {
+		return withSemaphore(async () => {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 
 		const args = [
@@ -284,6 +349,7 @@ export function createClaudeCodeProvider(
 		} finally {
 			clearTimeout(timer);
 		}
+		}); // withSemaphore
 	}
 
 	return {
@@ -435,6 +501,7 @@ export function createCodexProvider(
 		prompt: string,
 		opts?: { timeoutMs?: number; maxTokens?: number },
 	): Promise<LlmGenerateResult> {
+		return withSemaphore(async () => {
 		const timeoutMs = opts?.timeoutMs ?? cfg.defaultTimeoutMs;
 		const args = [
 			"exec",
@@ -482,6 +549,7 @@ export function createCodexProvider(
 		} finally {
 			clearTimeout(timer);
 		}
+		}); // withSemaphore
 	}
 
 	return {
