@@ -809,7 +809,7 @@ async function resolveProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promis
 			}
 			if (!apiKey) {
 				logger.error("summary-worker", "ANTHROPIC_API_KEY not found for summary worker — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`");
-				return createOllamaProvider({ model: model || "qwen3:4b", defaultTimeoutMs: timeout });
+				return createOllamaProvider({ model: "qwen3:4b", defaultTimeoutMs: timeout });
 			}
 			return createAnthropicProvider({ model: model || "haiku", apiKey, defaultTimeoutMs: timeout });
 		}
