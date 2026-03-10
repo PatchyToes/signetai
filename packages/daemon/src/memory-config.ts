@@ -248,15 +248,21 @@ export function loadPipelineConfig(
 	const nestedProvider = extractionRaw?.provider;
 	const flatProvider = raw.extractionProvider;
 	const flatModel = raw.extractionModel;
-	const flatProviderWon = typeof flatProvider === "string" && (
-		flatProvider === "codex" || flatProvider === "opencode" ||
-		flatProvider === "claude-code" || flatProvider === "ollama"
-	);
-	const resolvedProvider: "ollama" | "claude-code" | "opencode" | "codex" =
+
+	type ProviderKind = "ollama" | "claude-code" | "opencode" | "codex";
+	const VALID_PROVIDERS: ReadonlySet<string> = new Set<ProviderKind>([
+		"codex", "opencode", "claude-code", "ollama",
+	]);
+
+	function isValidProvider(v: unknown): v is ProviderKind {
+		return typeof v === "string" && VALID_PROVIDERS.has(v);
+	}
+
+	const flatProviderWon = isValidProvider(flatProvider);
+	const resolvedProvider: ProviderKind =
 		flatProviderWon
-			? flatProvider as "ollama" | "claude-code" | "opencode" | "codex"
-			: nestedProvider === "codex" || nestedProvider === "opencode" ||
-			  nestedProvider === "claude-code" || nestedProvider === "ollama"
+			? flatProvider
+			: isValidProvider(nestedProvider)
 				? nestedProvider
 				: typeof (extractionRaw?.model ?? flatModel) === "string" &&
 					  nestedProvider === undefined &&
@@ -281,12 +287,12 @@ export function loadPipelineConfig(
 
 		extraction: {
 			provider: resolvedProvider,
-			model: flatProviderWon && typeof flatModel === "string"
-				? (flatModel as string)
+			model: flatProviderWon
+				? (typeof flatModel === "string" ? flatModel : d.extraction.model)
 				: typeof extractionRaw?.model === "string"
 					? extractionRaw.model
 					: typeof flatModel === "string"
-						? (flatModel as string)
+						? flatModel
 						: d.extraction.model,
 			timeout: clampPositive(
 				extractionRaw?.timeout ?? raw.extractionTimeout,

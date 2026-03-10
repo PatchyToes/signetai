@@ -17,7 +17,7 @@ import type { Database } from "bun:sqlite";
 import type { DbAccessor } from "../db-accessor";
 import type { LlmProvider } from "./provider";
 import { createOllamaProvider, createClaudeCodeProvider, createCodexProvider, createOpenCodeProvider } from "./provider";
-import { getLlmProvider } from "../llm";
+
 import { isDuplicate, inferType } from "../hooks";
 import { loadMemoryConfig } from "../memory-config";
 import { logger } from "../logger";
@@ -714,26 +714,29 @@ function writeSummaryToDAG(
 			.get();
 		if (!row) return;
 
-		const summaryId = crypto.randomUUID();
 		const now = new Date().toISOString();
 		const tokenCount = Math.ceil(result.summary.length / 4);
 
 		// Upsert: check for existing row first since ON CONFLICT doesn't
 		// work with the partial unique index (WHERE session_key IS NOT NULL).
 		const existing = job.session_key
-			? db.prepare(
+			? (db.prepare(
 				`SELECT id FROM session_summaries
 				 WHERE session_key = ? AND depth = 0`,
-			).get(job.session_key) as { id: string } | undefined
+			).get(job.session_key) as { id: string } | undefined)
 			: undefined;
 
+		let effectiveId: string;
+
 		if (existing) {
+			effectiveId = existing.id;
 			db.prepare(
 				`UPDATE session_summaries
 				 SET content = ?, token_count = ?, latest_at = ?
 				 WHERE id = ?`,
 			).run(result.summary, tokenCount, now, existing.id);
 		} else {
+			effectiveId = crypto.randomUUID();
 			db.prepare(
 				`INSERT INTO session_summaries (
 					id, project, depth, kind, content, token_count,
@@ -741,7 +744,7 @@ function writeSummaryToDAG(
 					agent_id, created_at
 				) VALUES (?, ?, 0, 'session', ?, ?, ?, ?, ?, ?, ?, ?)`,
 			).run(
-				summaryId,
+				effectiveId,
 				job.project,
 				result.summary,
 				tokenCount,
@@ -772,7 +775,7 @@ function writeSummaryToDAG(
 				 VALUES (?, ?)`,
 			);
 			for (const mem of recentMemories) {
-				linkStmt.run(summaryId, mem.id);
+				linkStmt.run(effectiveId, mem.id);
 			}
 		}
 	});
