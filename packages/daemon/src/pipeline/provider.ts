@@ -517,9 +517,9 @@ class NonRetryableError extends Error {
 }
 
 function isRetryableStatus(status: number): boolean {
-	// 429 = rate limited, 500 = internal error, 502/503 = transient,
+	// 429 = rate limited, 500 = internal error, 502/503/504 = transient gateway,
 	// 529 = overloaded. Don't retry 501 (not implemented) or other 5xx.
-	return status === 429 || status === 500 || status === 502 || status === 503 || status === 529;
+	return status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 529;
 }
 
 export function createAnthropicProvider(
