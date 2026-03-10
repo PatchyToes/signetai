@@ -226,7 +226,7 @@ async function processJob(
 	const prompt = buildPrompt(job.transcript, today);
 
 	const raw = await provider.generate(prompt, {
-		timeoutMs: LLM_TIMEOUT_MS,
+		timeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 		maxTokens: memoryCfg.pipelineV2.synthesis.maxTokens,
 	});
 
@@ -565,7 +565,8 @@ async function scoreContinuity(
 		injectedMemories,
 	);
 
-	const raw = await provider.generate(prompt, { timeoutMs: LLM_TIMEOUT_MS });
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	const raw = await provider.generate(prompt, { timeoutMs: cfg.pipelineV2.synthesis.timeout });
 
 	let jsonStr = raw.trim();
 	const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
