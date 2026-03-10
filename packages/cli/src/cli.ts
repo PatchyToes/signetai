@@ -3976,23 +3976,28 @@ secretCmd
 	});
 
 secretCmd
-	.command("exec <command>")
+	.command("exec <command...>")
 	.description("Run a command with secrets injected as environment variables")
 	.option("-s, --secret <name>", "Secret to inject (repeatable)", appendCliString, [] as string[])
-	.action(async (command: string, opts: { secret: string[] }) => {
+	.action(async (commandParts: string[], opts: { secret: string[] }) => {
 		if (!(await ensureDaemonForSecrets())) return;
 
 		if (opts.secret.length === 0) {
 			console.error(chalk.red("  At least one --secret is required."));
 			console.log(chalk.dim("\n  Example:"));
-			console.log(`    signet secret exec --secret OPENAI_API_KEY "curl -H 'Authorization: Bearer $OPENAI_API_KEY' ..."\n`);
+			console.log(`    signet secret exec --secret OPENAI_API_KEY curl https://api.openai.com/v1/models\n`);
 			process.exit(1);
 		}
 
+		// Map each name to itself — env var name and secret name are the same.
+		// The daemon API accepts Record<envVarName, secretName> for future
+		// "ENV=SECRET" remapping support.
 		const secrets: Record<string, string> = {};
 		for (const name of opts.secret) {
 			secrets[name] = name;
 		}
+
+		const command = commandParts.join(" ");
 
 		try {
 			const { ok, data } = await secretApiCall("POST", "/api/secrets/exec", {
@@ -4005,10 +4010,11 @@ secretCmd
 				process.exit(1);
 			}
 
-			const result = data as { stdout: string; stderr: string; code: number };
+			const result = data as { stdout: string; stderr: string; code: number | null };
 			if (result.stdout) process.stdout.write(result.stdout);
 			if (result.stderr) process.stderr.write(result.stderr);
-			process.exit(result.code);
+			// code is null when the process was killed by a signal — treat as failure
+			process.exit(result.code ?? 1);
 		} catch (e) {
 			console.error(chalk.red(`  Error: ${(e as Error).message}`));
 			process.exit(1);
