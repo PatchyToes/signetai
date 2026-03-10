@@ -547,14 +547,20 @@ export function createAnthropicProvider(
 				});
 			}
 
-			const remainingMs = deadline - Date.now();
-			if (remainingMs <= 0) {
+			// Pre-check deadline before waiting on semaphore
+			if (deadline - Date.now() <= 0) {
 				throw lastError ?? new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded before attempt ${attempt})`);
 			}
 
 			// Acquire semaphore only for the actual API call, release
 			// immediately after so backoff sleep doesn't hold a slot.
 			const result = await withSemaphore(async () => {
+				// Recompute remaining time AFTER semaphore acquisition so
+				// contention delay is accounted for in the abort timer.
+				const remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) {
+					throw lastError ?? new Error(`Anthropic timeout after ${timeoutMs}ms (deadline exceeded waiting for semaphore)`);
+				}
 				const controller = new AbortController();
 				const timer = setTimeout(() => controller.abort(), remainingMs);
 
