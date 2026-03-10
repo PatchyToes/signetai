@@ -277,7 +277,7 @@ async function processJob(
 
 	// --- Session continuity scoring ---
 	try {
-		await scoreContinuity(accessor, provider, job, result.summary);
+		await scoreContinuity(accessor, provider, job, result.summary, memoryCfg);
 	} catch (e) {
 		logger.warn("summary-worker", "Continuity scoring failed (non-fatal)", {
 			error: e instanceof Error ? e.message : String(e),
@@ -555,6 +555,7 @@ async function scoreContinuity(
 	provider: LlmProvider,
 	job: SummaryJobRow,
 	summary: string,
+	memoryCfg: ReturnType<typeof loadMemoryConfig>,
 ): Promise<void> {
 	// Load injected memories for this session (empty array for old sessions)
 	const injectedMemories = loadInjectedMemories(accessor, job.session_key);
@@ -565,8 +566,10 @@ async function scoreContinuity(
 		injectedMemories,
 	);
 
-	const cfg = loadMemoryConfig(AGENTS_DIR);
-	const raw = await provider.generate(prompt, { timeoutMs: cfg.pipelineV2.synthesis.timeout });
+	const raw = await provider.generate(prompt, {
+		timeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+		maxTokens: memoryCfg.pipelineV2.synthesis.maxTokens,
+	});
 
 	let jsonStr = raw.trim();
 	const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
