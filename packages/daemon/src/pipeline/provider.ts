@@ -647,7 +647,7 @@ export function createAnthropicProvider(
 
 					const text = textParts.join("\n").trim();
 					if (text.length === 0) {
-						throw new Error(
+						throw new NonRetryableError(
 							`Anthropic returned empty response (stop_reason: ${data.stop_reason ?? "unknown"})`,
 						);
 					}
