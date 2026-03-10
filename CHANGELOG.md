@@ -2,6 +2,18 @@
 
 All notable changes to Signet are documented here.
 
+## [0.53.3] - 2026-03-10
+
+### Bug Fixes
+
+- **daemon**: redact provider URLs and harden fallback bases
+- **daemon**: align opencode endpoint wiring and fallback handling
+- **daemon**: harden loopback parsing and summary worker guards
+- **daemon**: normalize loopback fallbacks for provider probes
+- **daemon**: address PR review regressions and doc gaps
+- **daemon**: harden VPS runtime config and pipeline behavior
+
+
 ## [0.53.2] - 2026-03-10
 
 ### Bug Fixes
