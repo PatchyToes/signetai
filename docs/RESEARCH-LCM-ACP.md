@@ -1,3 +1,10 @@
+---
+title: "Research: LCM & ACP"
+description: "Research notes on Lossless Context Management, acpx, and lossless-claw."
+order: 99
+section: "Research"
+---
+
 # Research: Lossless Context Management & Agent Client Protocol
 
 > Research notes on LCM, acpx, and lossless-claw. Collected 2026-03-08.
