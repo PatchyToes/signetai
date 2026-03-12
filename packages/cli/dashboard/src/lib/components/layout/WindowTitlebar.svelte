@@ -26,22 +26,33 @@
 		return windowApi;
 	}
 
-	// Poll maximized state and scale factor
+	// Track maximized state and scale factor via resize event (no polling).
+	// onResized fires synchronously on maximize/restore/resize, so the
+	// button icon updates immediately instead of lagging up to 500ms.
 	$effect(() => {
 		if (!isTauri) return;
+		let unlisten: (() => void) | null = null;
 		let cancelled = false;
-		const check = async () => {
+
+		async function init() {
 			const api = await ensureApi();
 			if (!api || cancelled) return;
 			const win = api.getCurrentWindow();
+			// Initial state
 			maximized = await win.isMaximized();
 			scaleFactor = await win.scaleFactor();
-		};
-		check();
-		const interval = setInterval(check, 500);
+			// Subscribe to resize events
+			unlisten = await win.onResized(async () => {
+				if (cancelled) return;
+				maximized = await win.isMaximized();
+				scaleFactor = await win.scaleFactor();
+			});
+		}
+
+		init();
 		return () => {
 			cancelled = true;
-			clearInterval(interval);
+			unlisten?.();
 		};
 	});
 
