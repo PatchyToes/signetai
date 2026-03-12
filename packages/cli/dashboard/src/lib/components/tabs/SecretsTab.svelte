@@ -444,7 +444,7 @@ let onePasswordStatusColor = $derived(
 	onePasswordStatus.connected
 		? "var(--sig-success)"
 		: onePasswordStatus.configured
-			? "var(--sig-warning, #d4a017)"
+			? "var(--sig-warning)"
 			: "var(--sig-text-muted)",
 );
 
@@ -531,6 +531,7 @@ onMount(() => {
 								class="secret-delete"
 								onclick={() => removeSecret(name)}
 								disabled={secretDeleting === name}
+								aria-label={`Delete secret ${name}`}
 							>
 								{#if secretDeleting === name}
 									<span class="secret-delete-text">...</span>
@@ -546,34 +547,38 @@ onMount(() => {
 
 		<!-- 1Password integration panel -->
 		<div class="panel" role="group" aria-label="1Password integration">
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div
-				class="panel-header panel-header--toggle"
-				onclick={() => { onePasswordExpanded = !onePasswordExpanded; }}
-				onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onePasswordExpanded = !onePasswordExpanded; } }}
-				tabindex="0"
-				role="button"
-			>
-				{#if onePasswordExpanded}
-					<ChevronDown class="panel-chevron" />
-				{:else}
-					<ChevronRight class="panel-chevron" />
-				{/if}
-				<span class="panel-label">1Password</span>
-				<span class="panel-status" style="color: {onePasswordStatusColor}">
-					{onePasswordStatusLabel}
-				</span>
+			<div class="panel-header-row">
+				<button
+					class="panel-header panel-header--toggle"
+					onclick={() => {
+						onePasswordExpanded = !onePasswordExpanded;
+						if (!onePasswordExpanded) focusedOnePasswordInput = -1;
+					}}
+					aria-expanded={onePasswordExpanded}
+					aria-controls="op-panel"
+				>
+					{#if onePasswordExpanded}
+						<ChevronDown class="panel-chevron" />
+					{:else}
+						<ChevronRight class="panel-chevron" />
+					{/if}
+					<span class="panel-label">1Password</span>
+					<span class="panel-status" style="color: {onePasswordStatusColor}">
+						{onePasswordStatusLabel}
+					</span>
+				</button>
 				<button
 					class="panel-action"
-					onclick={(e) => { e.stopPropagation(); refreshOnePasswordStatus(); }}
+					onclick={() => refreshOnePasswordStatus()}
 					disabled={onePasswordLoading}
+					aria-label="Refresh 1Password status"
 				>
-					<RefreshCw class="size-3" style={onePasswordLoading ? "animation: spin 1s linear infinite" : ""} />
+					<RefreshCw class={`size-3${onePasswordLoading ? " op-spin" : ""}`} />
 				</button>
 			</div>
 
 			{#if onePasswordExpanded}
-				<div class="onepassword-panel" onkeydown={handleOnePasswordPanelKeydown}>
+				<div id="op-panel" class="onepassword-panel" onkeydown={handleOnePasswordPanelKeydown}>
 					<!-- Status message -->
 					{#if onePasswordStatus.connected}
 						<div class="op-status op-status--ok">
@@ -853,13 +858,32 @@ onMount(() => {
 		flex-shrink: 0;
 	}
 
+	.panel-header-row {
+		display: flex;
+		align-items: center;
+	}
+
 	.panel-header--toggle {
+		flex: 1;
 		cursor: pointer;
+		background: none;
+		border: none;
+		text-align: left;
 		transition: background var(--dur) var(--ease);
 	}
 
 	.panel-header--toggle:hover {
 		background: var(--sig-surface-raised);
+	}
+
+	:global(.op-spin) {
+		animation: spin 1s linear infinite;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		:global(.op-spin) {
+			animation: none;
+		}
 	}
 
 	.panel-pip {

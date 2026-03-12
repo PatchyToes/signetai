@@ -14,7 +14,7 @@
 	const { memories }: Props = $props();
 
 	let actedIds = $state<Set<string>>(new Set());
-	let refreshKey = $state(0);
+	let displayOffset = $state(0);
 
 	function scoreMemory(m: Memory): number {
 		const now = Date.now();
@@ -42,9 +42,8 @@
 			.filter(Boolean);
 	}
 
-	const scoredPool = $derived.by(() => {
-		void refreshKey;
-		return memories
+	const scoredPool = $derived(
+		memories
 			.filter((m) => {
 				if (actedIds.has(m.id)) return false;
 				if (m.pinned) return false;
@@ -53,16 +52,20 @@
 				return true;
 			})
 			.map((m) => ({ memory: m, score: scoreMemory(m) }))
-			.sort((a, b) => b.score - a.score);
-	});
-
-	const displayCards = $derived(
-		scoredPool.slice(0, 3).map((s) => s.memory),
+			.sort((a, b) => b.score - a.score),
 	);
+
+	const displayCards = $derived.by(() => {
+		if (scoredPool.length === 0) return [];
+		const start = displayOffset % scoredPool.length;
+		return Array.from({ length: Math.min(3, scoredPool.length) }, (_, i) =>
+			scoredPool[(start + i) % scoredPool.length].memory,
+		);
+	});
 
 	function importanceColor(imp: number): string {
 		if (imp >= 0.8) return "var(--sig-danger)";
-		if (imp >= 0.5) return "var(--sig-warning, #d4a017)";
+		if (imp >= 0.5) return "var(--sig-warning)";
 		return "var(--sig-success)";
 	}
 
@@ -122,7 +125,7 @@
 	}
 
 	function handleRefresh(): void {
-		refreshKey += 1;
+		displayOffset = (displayOffset + 3) % Math.max(1, scoredPool.length);
 	}
 </script>
 

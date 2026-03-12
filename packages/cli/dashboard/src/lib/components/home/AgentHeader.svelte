@@ -70,7 +70,7 @@
 	}
 
 	const projectName = $derived(
-		latestProject?.project?.replace(/^\/.*\//, "").replace(/\/$/, "") ?? "--",
+		latestProject?.project?.replace(/\/$/, "").split("/").pop() ?? "--",
 	);
 
 	const recency = $derived(
@@ -119,7 +119,7 @@
 	function scoreColor(score: number | null): string {
 		if (score === null) return "var(--sig-text-muted)";
 		if (score >= 0.8) return "var(--sig-success)";
-		if (score >= 0.5) return "var(--sig-warning, #d4a017)";
+		if (score >= 0.5) return "var(--sig-warning)";
 		return "var(--sig-danger)";
 	}
 

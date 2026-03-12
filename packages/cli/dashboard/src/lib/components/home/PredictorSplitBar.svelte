@@ -53,7 +53,7 @@
 
 	function statusColor(status: string): string {
 		if (status === "healthy") return "var(--sig-success)";
-		if (status === "degraded" || status === "cold_start") return "var(--sig-warning, #d4a017)";
+		if (status === "degraded" || status === "cold_start") return "var(--sig-warning)";
 		if (status === "unhealthy") return "var(--sig-danger)";
 		return "var(--sig-text-muted)";
 	}
@@ -80,6 +80,8 @@
 	$effect(() => {
 		if (daemonStatus) {
 			fetchData();
+		} else {
+			loaded = true;
 		}
 	});
 </script>
