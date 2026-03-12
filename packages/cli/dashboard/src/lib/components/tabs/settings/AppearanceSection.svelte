@@ -51,14 +51,14 @@
 
 	<FormField label="UI scale" description="Adjust text and spacing size. Icons remain crisp at all levels. Ctrl+/- or Ctrl+0 to reset.">
 		<div class="scale-control">
-			<button class="scale-btn" onclick={() => uiScale.zoomOut()} title="Zoom out (Ctrl+-)">
+			<button class="scale-btn" onclick={() => uiScale.zoomOut()} title="Zoom out (Ctrl+-)" aria-label="Zoom out">
 				<ZoomOut size={14} />
 			</button>
 			<span class="scale-value">{uiScale.percent}</span>
-			<button class="scale-btn" onclick={() => uiScale.zoomIn()} title="Zoom in (Ctrl+=)">
+			<button class="scale-btn" onclick={() => uiScale.zoomIn()} title="Zoom in (Ctrl+=)" aria-label="Zoom in">
 				<ZoomIn size={14} />
 			</button>
-			<button class="scale-btn scale-btn--reset" onclick={() => uiScale.reset()} title="Reset (Ctrl+0)">
+			<button class="scale-btn scale-btn--reset" onclick={() => uiScale.reset()} title="Reset (Ctrl+0)" aria-label="Reset zoom">
 				<RotateCcw size={12} />
 			</button>
 		</div>

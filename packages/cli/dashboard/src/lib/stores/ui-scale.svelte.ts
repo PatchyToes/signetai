@@ -57,20 +57,26 @@ export const uiScale = {
 		if (index < STEPS.length - 1) {
 			index++;
 			applyScale();
-			localStorage.setItem(STORAGE_KEY, String(index));
+			if (typeof localStorage !== "undefined") {
+				localStorage.setItem(STORAGE_KEY, String(index));
+			}
 		}
 	},
 	zoomOut(): void {
 		if (index > 0) {
 			index--;
 			applyScale();
-			localStorage.setItem(STORAGE_KEY, String(index));
+			if (typeof localStorage !== "undefined") {
+				localStorage.setItem(STORAGE_KEY, String(index));
+			}
 		}
 	},
 	reset(): void {
 		index = DEFAULT_INDEX;
 		applyScale();
-		localStorage.setItem(STORAGE_KEY, String(index));
+		if (typeof localStorage !== "undefined") {
+			localStorage.setItem(STORAGE_KEY, String(index));
+		}
 	},
 	/** Call from a wheel handler to zoom with Ctrl+scroll */
 	handleZoomWheel(e: WheelEvent): boolean {
