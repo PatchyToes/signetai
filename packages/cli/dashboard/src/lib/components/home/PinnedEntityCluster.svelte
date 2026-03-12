@@ -208,7 +208,7 @@
 		padding: var(--space-md);
 	}
 
-	:global(.empty-icon) {
+	:global(.panel .empty-icon) {
 		width: 16px;
 		height: 16px;
 		color: var(--sig-border-strong);

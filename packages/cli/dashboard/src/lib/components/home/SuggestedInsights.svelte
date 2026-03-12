@@ -303,7 +303,7 @@
 		border-color: var(--sig-border-strong);
 	}
 
-	:global(.refresh-icon) {
+	:global(.insights-panel .refresh-icon) {
 		width: 10px;
 		height: 10px;
 	}

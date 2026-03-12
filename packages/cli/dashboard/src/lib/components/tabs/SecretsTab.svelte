@@ -792,7 +792,7 @@ onMount(() => {
 		height: 28px !important;
 	}
 
-	:global(.add-input:focus) {
+	:global(.secrets-add-input:focus) {
 		border-color: var(--sig-highlight) !important;
 	}
 
@@ -1096,7 +1096,8 @@ onMount(() => {
 		height: 28px !important;
 	}
 
-	:global(.op-input:focus) {
+	:global(.secrets-op-input:focus),
+	:global(.secrets-op-input-sm:focus) {
 		border-color: var(--sig-highlight) !important;
 	}
 
