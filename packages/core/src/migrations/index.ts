@@ -85,12 +85,9 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 3,
 		name: "unique-content-hash",
 		up: uniqueContentHash,
-		artifacts: {
-			columns: [
-				{ table: "memories", column: "why" },
-				{ table: "memories", column: "project" },
-			],
-		},
+		// No artifact declarations: v3 creates idx_memories_content_hash_unique
+		// (an index), but MigrationArtifacts has no `indexes` field. The columns
+		// it touches (why, project) are part of the v1 baseline, not v3.
 	},
 	{
 		version: 4,
@@ -538,12 +535,21 @@ function verifyArtifacts(db: MigrationDb, migration: Migration): void {
  */
 export function hasPendingMigrations(db: MigrationDb): boolean {
 	ensureMetaTables(db);
-	// Fetch applied versions once and pass to findPhantomVersions to avoid
-	// a redundant second query inside it.
+	// Single query for applied versions; reused by all three checks below.
 	const applied = appliedVersions(db);
+	// Derive the bogus-version signal from the already-fetched set rather than
+	// calling hasBogusVersion(db) which issues a separate SELECT MAX(version).
+	// v0.1.65 bug: version >= 2 stamped but content_hash column is absent.
+	const isBogus =
+		applied.has(2) &&
+		!db
+			.prepare("PRAGMA table_info(memories)")
+			.all()
+			.filter(hasStringName)
+			.some((r) => r.name === "content_hash");
 	const hasNew = MIGRATIONS.some((m) => !applied.has(m.version));
 	const phantoms = findPhantomVersions(db, applied);
-	return hasBogusVersion(db) || hasNew || phantoms.size > 0;
+	return isBogus || hasNew || phantoms.size > 0;
 }
 
 /** The highest migration version defined. */

@@ -500,16 +500,18 @@ describe("migration framework", () => {
 		db = createFreshDb();
 		runMigrations(db);
 
-		// Simulate phantom state: keep schema_migrations rows for v14-16
-		// but drop the actual tables they created. repairPhantomMigrations
-		// should detect the mismatch, remove the stale records, and allow
-		// the set-based runner to re-execute those migrations.
+		// Simulate phantom state: keep schema_migrations rows but drop the
+		// tables those migrations created. Dropping session_memories also
+		// cascades to v20, v23, and v25 (they declare columns on that table),
+		// so repairPhantomMigrations removes records for v14, v15, v16, v20,
+		// v23, and v25. The set-based runner then re-executes all six in order;
+		// v15 re-creates session_memories before v20's addColumnIfMissing runs.
 		db.run("DROP TABLE IF EXISTS telemetry_events");
 		db.run("DROP TABLE IF EXISTS session_memories");
 		db.run("DROP TABLE IF EXISTS session_checkpoints");
 
-		// Re-run — phantom repair detects missing tables, removes the
-		// stale records, set-based runner fills the gaps
+		// Re-run — phantom repair removes stale records, set-based runner
+		// fills all gaps in version order
 		runMigrations(db);
 
 		// All tables restored
