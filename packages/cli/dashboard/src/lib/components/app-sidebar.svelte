@@ -375,4 +375,14 @@ function activateItem(item: NavItem): void {
 		filter: drop-shadow(0 0 6px var(--sig-highlight)) drop-shadow(0 0 12px var(--sig-highlight));
 		transform: scale(1.15);
 	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sidebar-signet-icon {
+			transition: none;
+		}
+
+		:global([data-sidebar="menu-button"]):hover .sidebar-signet-icon {
+			transform: none;
+		}
+	}
 </style>

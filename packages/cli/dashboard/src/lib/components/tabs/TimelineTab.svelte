@@ -705,7 +705,7 @@ onMount(() => {
 					</div>
 
 					<div class="timeline-mix-grid">
-						<div class="timeline-mix-card timeline-mix-card--type rounded-lg p-2">
+						<div class="timeline-mix-card timeline-mix-card--type p-2">
 							<p class="timeline-mix-header mb-1">Type mix</p>
 							{#if activeBucket.typeBreakdown.length === 0}
 								<p class="sig-label text-[var(--sig-text-muted)]">No type signals</p>
@@ -719,7 +719,7 @@ onMount(() => {
 							{/if}
 						</div>
 
-						<div class="timeline-mix-card timeline-mix-card--source rounded-lg p-2">
+						<div class="timeline-mix-card timeline-mix-card--source p-2">
 							<p class="timeline-mix-header mb-1">Source mix</p>
 							{#if activeBucket.sourceBreakdown.length === 0}
 								<p class="sig-label text-[var(--sig-text-muted)]">No source signals</p>
@@ -733,7 +733,7 @@ onMount(() => {
 							{/if}
 						</div>
 
-						<div class="timeline-mix-card timeline-mix-card--tags rounded-lg p-2">
+						<div class="timeline-mix-card timeline-mix-card--tags p-2">
 							<p class="timeline-mix-header mb-1">Top tags</p>
 							{#if activeBucket.topTags.length === 0}
 								<p class="sig-label text-[var(--sig-text-muted)]">No tags this era</p>
