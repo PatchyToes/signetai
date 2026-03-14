@@ -143,10 +143,12 @@ interface RegistryState {
 	models: Map<string, ModelRegistryEntry[]>;
 	lastRefreshAt: number;
 	refreshTimer: ReturnType<typeof setInterval> | null;
+	epoch: number;
 }
 
 let state: RegistryState | null = null;
 let refreshInFlight: Promise<void> | null = null;
+let registryEpoch = 0;
 
 // ---------------------------------------------------------------------------
 // Discovery functions
@@ -237,10 +239,12 @@ export function initModelRegistry(
 		clearInterval(state.refreshTimer);
 	}
 
+	registryEpoch++;
 	state = {
 		models: new Map(),
 		lastRefreshAt: 0,
 		refreshTimer: null,
+		epoch: registryEpoch,
 	};
 
 	// Seed with known models
@@ -291,6 +295,7 @@ export async function refreshRegistry(ollamaBaseUrl?: string, anthropicApiKey?: 
 
 async function _refreshRegistryInner(ollamaBaseUrl?: string, anthropicApiKey?: string): Promise<void> {
 	if (!state) return;
+	const startEpoch = state.epoch;
 
 	logger.debug("model-registry", "Refreshing model registry");
 
@@ -300,7 +305,8 @@ async function _refreshRegistryInner(ollamaBaseUrl?: string, anthropicApiKey?: s
 		discoverAnthropicModels(anthropicApiKey),
 	]);
 
-	if (!state) return; // registry may have been stopped during discovery
+	// Bail if registry was stopped or re-initialized during discovery
+	if (!state || state.epoch !== startEpoch) return;
 
 	if (ollamaModels.length > 0) {
 		// Merge discovered with known, dedup by id
@@ -332,8 +338,9 @@ async function _refreshRegistryInner(ollamaBaseUrl?: string, anthropicApiKey?: s
  */
 export function getAvailableModels(provider?: string, includeDeprecated = false): ModelRegistryEntry[] {
 	if (!state) {
-		// Return known models if registry not initialized
-		const all = provider ? (KNOWN_MODELS[provider] ?? []) : Object.values(KNOWN_MODELS).flat();
+		// Return known models with deprecation marks if registry not initialized
+		const raw = provider ? (KNOWN_MODELS[provider] ?? []) : Object.values(KNOWN_MODELS).flat();
+		const all = markDeprecatedVersions(raw);
 		return includeDeprecated ? all : all.filter((m) => !m.deprecated);
 	}
 
@@ -353,7 +360,7 @@ export function getModelsByProvider(): Record<string, ModelRegistryEntry[]> {
 	const result: Record<string, ModelRegistryEntry[]> = {};
 	if (!state) {
 		for (const [provider, models] of Object.entries(KNOWN_MODELS)) {
-			result[provider] = models.filter((m) => !m.deprecated);
+			result[provider] = markDeprecatedVersions(models).filter((m) => !m.deprecated);
 		}
 		return result;
 	}
