@@ -26,8 +26,6 @@
 			{/if}
 		</div>
 	</div>
-	<!-- Coordinate markers -->
-	<span class="banner-coord banner-coord--tl" aria-hidden="true">0,0</span>
 	<span class="banner-coord banner-coord--br" aria-hidden="true">■</span>
 </div>
 
@@ -39,8 +37,8 @@
 		min-height: 32px;
 		padding: 6px var(--space-md);
 		overflow: hidden;
-		background: var(--sig-surface);
-		margin-bottom: 2rem;
+		background: transparent;
+		margin-bottom: var(--space-sm);
 	}
 
 	/* Content layout — grid keeps side slots in flow to prevent overlap */
@@ -100,13 +98,41 @@
 		z-index: 1;
 	}
 
-	.banner-coord--tl {
-		top: 4px;
-		left: 8px;
-	}
-
 	.banner-coord--br {
 		bottom: 4px;
 		right: 8px;
+	}
+
+	@media (max-width: 1023px) {
+		.banner {
+			padding: 6px var(--space-sm);
+			margin-bottom: 0.75rem;
+		}
+
+		.banner-content {
+			grid-template-columns: 1fr;
+			justify-items: center;
+			gap: 0.25rem;
+		}
+
+		.banner-left {
+			justify-self: center;
+			flex-wrap: wrap;
+			justify-content: center;
+			padding-left: var(--mobile-header-inset);
+			padding-right: var(--mobile-header-inset);
+		}
+
+		.banner-right {
+			justify-self: center;
+		}
+
+		.banner-text {
+			margin: 0.75rem 0 0;
+		}
+
+		.banner-title {
+			font-size: 12px;
+		}
 	}
 </style>

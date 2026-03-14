@@ -158,7 +158,7 @@ function activateItem(item: NavItem): void {
 					{#snippet child({ props })}
 						<div {...props}>
 							<span
-								class="inline-block h-2.5 w-2.5 shrink-0 relative
+								class="sidebar-signet-icon inline-block h-2.5 w-2.5 shrink-0 relative
 									before:absolute before:w-px before:h-full before:left-1/2
 									before:bg-[var(--sig-highlight)]
 									after:absolute after:w-full after:h-px after:top-1/2
@@ -362,7 +362,6 @@ function activateItem(item: NavItem): void {
 		color: var(--sig-text-bright) !important;
 	}
 
-
 	/* Sidebar footer separator — etched line */
 	:global(.sidebar-carbon-footer) {
 		border-top: 1px solid var(--sig-border-strong);
@@ -371,5 +370,25 @@ function activateItem(item: NavItem): void {
 
 	:root[data-theme="light"] :global(.sidebar-carbon-footer) {
 		box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.4);
+	}
+
+	.sidebar-signet-icon {
+		filter: drop-shadow(0 0 3px var(--sig-highlight-dim));
+		transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease);
+	}
+
+	:global([data-sidebar="menu-button"]):hover .sidebar-signet-icon {
+		filter: drop-shadow(0 0 6px var(--sig-highlight)) drop-shadow(0 0 12px var(--sig-highlight));
+		transform: scale(1.15);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.sidebar-signet-icon {
+			transition: none;
+		}
+
+		:global([data-sidebar="menu-button"]):hover .sidebar-signet-icon {
+			transform: none;
+		}
 	}
 </style>

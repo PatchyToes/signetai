@@ -1284,4 +1284,10 @@ onMount(() => {
 		from { transform: rotate(0deg); }
 		to { transform: rotate(360deg); }
 	}
+
+	@media (max-width: 1023px) {
+		.tab-header {
+			padding-left: var(--mobile-header-inset);
+		}
+	}
 </style>

@@ -240,6 +240,22 @@ $effect(() => {
 		onthemetoggle={toggleTheme}
 		onprefetchembeddings={prefetchEmbeddingsTab}
 	/>
+	<Sidebar.Trigger
+		unstyled={true}
+		class="mobile-sidebar-trigger fixed z-40 size-5 p-0 bg-transparent border-none shadow-none rounded-sm hover:bg-[color-mix(in_srgb,var(--sig-surface-raised)_60%,transparent)] transition-all items-center justify-center flex"
+		style="top: calc(var(--titlebar-h, 0px) + var(--space-sm, 8px) + 3px); left: calc(var(--space-sm, 8px) + 1px);"
+		mobileOnly={true}
+	>
+		<span
+			class="inline-block size-3.5 shrink-0 relative
+				before:absolute before:w-px before:h-full before:left-1/2
+				before:bg-[var(--sig-highlight)]
+				after:absolute after:w-full after:h-px after:top-1/2
+				after:bg-[var(--sig-highlight)]"
+			style="filter: drop-shadow(0 0 3px var(--sig-highlight));"
+			aria-hidden="true"
+		></span>
+	</Sidebar.Trigger>
 	<main data-page-content="true" class="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden
 		bg-[var(--sig-bg)]">
 
@@ -280,3 +296,12 @@ $effect(() => {
 		class: "!font-[family-name:var(--font-mono)] !text-[12px] !border-[var(--sig-border-strong)] !bg-[var(--sig-surface-raised)] !text-[var(--sig-text-bright)]",
 	}}
 />
+
+<style>
+	@media (prefers-reduced-motion: reduce) {
+		:global(.mobile-sidebar-trigger) {
+			transition: none !important;
+		}
+	}
+</style>
+

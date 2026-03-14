@@ -111,6 +111,7 @@ svg.lucide {
     --space-lg: 24px;
     --space-xl: 48px;
     --space-2xl: 80px;
+    --mobile-header-inset: 2.5rem;
 
     --font-size-xs: 10px;
     --font-size-sm: 11px;
