@@ -1863,11 +1863,15 @@ export function backfillSkippedSessions(
 
 	const limit = options?.limit ?? 50;
 
-	const tableExists = accessor.withReadDb((db) =>
-		db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'summary_jobs'").get(),
-	);
+	const tableExists = accessor.withReadDb((db) => {
+		const jobs = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'summary_jobs'").get();
+		const summaries = db
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'")
+			.get();
+		return jobs && summaries;
+	});
 	if (!tableExists) {
-		return { action, success: true, affected: 0, message: "summary_jobs table not found" };
+		return { action, success: true, affected: 0, message: "required tables not found" };
 	}
 
 	const skipped = accessor.withReadDb((db) =>
