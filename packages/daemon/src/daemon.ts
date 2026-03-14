@@ -102,6 +102,7 @@ import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
 import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
 import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
 import { type LogEntry, logger } from "./logger";
+import { migrateConfig } from "./config-migration";
 import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
 import {
 	getAttributesForAspectFiltered,
@@ -9186,6 +9187,9 @@ async function main() {
 	// Write PID file
 	writeFileSync(PID_FILE, process.pid.toString());
 	logger.info("daemon", "Process ID", { pid: process.pid });
+
+	// Migrate config defaults before watcher starts (one-time, guarded by configVersion)
+	migrateConfig(AGENTS_DIR);
 
 	// Start file watcher
 	startFileWatcher();

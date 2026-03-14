@@ -1866,6 +1866,13 @@ async function existingSetupWizard(
 						: options.extractionProvider === "opencode"
 							? "anthropic/claude-haiku-4-5-20251001"
 							: "glm-4.7-flash"),
+				semanticContradictionEnabled: true,
+				graphEnabled: true,
+				rerankerEnabled: true,
+				autonomousEnabled: true,
+				allowUpdateDelete: true,
+				predictor: { enabled: true },
+				predictorPipeline: { agentFeedback: true, trainingTelemetry: false },
 			};
 		}
 
@@ -2838,6 +2845,7 @@ ${agentName} is a helpful assistant.
 					provider: extractionProvider,
 					model: extractionModel,
 				},
+				semanticContradictionEnabled: true,
 				graph: { enabled: true },
 				reranker: { enabled: true },
 				autonomous: {
@@ -2845,6 +2853,8 @@ ${agentName} is a helpful assistant.
 					allowUpdateDelete: true,
 					maintenanceMode: "execute",
 				},
+				predictor: { enabled: true },
+				predictorPipeline: { agentFeedback: true, trainingTelemetry: false },
 			};
 		}
 

@@ -32,7 +32,7 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 	enabled: true,
 	shadowMode: false,
 	mutationsFrozen: false,
-	semanticContradictionEnabled: false,
+	semanticContradictionEnabled: true,
 	semanticContradictionTimeoutMs: 45000,
 	extraction: {
 		provider: "claude-code",
@@ -174,7 +174,7 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 	},
 	predictorPipeline: {
 		agentFeedback: true,
-		trainingTelemetry: true,
+		trainingTelemetry: false,
 	},
 };
 
