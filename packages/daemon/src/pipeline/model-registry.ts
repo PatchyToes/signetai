@@ -309,12 +309,12 @@ async function _refreshRegistryInner(ollamaBaseUrl?: string, anthropicApiKey?: s
 	if (!state || state.epoch !== startEpoch) return;
 
 	if (ollamaModels.length > 0) {
-		// Merge discovered with known, dedup by id
+		// Merge discovered with known, dedup by id, then mark deprecations
 		const known = KNOWN_MODELS.ollama ?? [];
 		const merged = new Map<string, ModelRegistryEntry>();
 		for (const m of known) merged.set(m.id, m);
 		for (const m of ollamaModels) merged.set(m.id, m);
-		state.models.set("ollama", [...merged.values()]);
+		state.models.set("ollama", markDeprecatedVersions([...merged.values()]));
 	}
 
 	if (anthropicModels.length > 0) {
