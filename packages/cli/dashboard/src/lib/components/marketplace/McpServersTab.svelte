@@ -55,6 +55,13 @@ interface McpDetailItem {
 
 const filteredCatalog = $derived(getFilteredMarketplaceMcpCatalog());
 const sourceOptions = $derived(getMarketplaceMcpSourceOptions());
+
+const MCP_PAGE_SIZE = 60;
+let visibleCount = $state(MCP_PAGE_SIZE);
+$effect(() => { filteredCatalog; visibleCount = MCP_PAGE_SIZE; });
+const visibleCatalog = $derived(filteredCatalog.slice(0, visibleCount));
+const hasMore = $derived(visibleCount < filteredCatalog.length);
+const remaining = $derived(filteredCatalog.length - visibleCount);
 const installedCatalogIds = $derived(
 	new Set(mcpMarket.installed.flatMap((s) => (s.catalogId ? [`${s.source}:${s.catalogId}`] : []))),
 );
@@ -147,6 +154,27 @@ function getMonogramBg(name: string): string {
 	}
 	return MONOGRAM_COLORS[Math.abs(hash) % MONOGRAM_COLORS.length] ?? MONOGRAM_COLORS[0];
 }
+
+function getAvatarUrl(sourceUrl: string | undefined): string | null {
+	if (!sourceUrl) return null;
+	const match = sourceUrl.match(/github\.com\/([^/]+)/);
+	if (match?.[1]) return `https://github.com/${match[1]}.png?size=40`;
+	return null;
+}
+
+function getAvatarFromSource(source: string | undefined): string | null {
+	if (!source) return null;
+	if (source.includes("/")) return `https://github.com/${source.split("/")[0]}.png?size=40`;
+	return null;
+}
+
+function getHueRotate(name: string): string {
+	let hash = 0;
+	for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) & 0xffff;
+	return `hue-rotate(${hash % 360}deg)`;
+}
+
+const avatarErrors = $state(new Set<string>());
 
 function openInstallSheet(entry: MarketplaceMcpCatalogEntry): void {
 	selectedCatalogEntry = entry;
@@ -316,6 +344,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 			{:else}
 				<div class="catalog-grid">
 					{#each mcpMarket.installed as server (server.id)}
+						{@const sAvatar = getAvatarFromSource(server.source)}
 						<div
 							class="catalog-card"
 							role="button"
@@ -324,8 +353,12 @@ async function removeFromDetail(serverId: string): Promise<void> {
 							onkeydown={(event) => onInstalledCardKeydown(event, server)}
 						>
 							<div class="catalog-top">
-								<div class="mcp-icon" style={`background: ${getMonogramBg(server.name)};`}>
-									{getMonogram(server.name)}
+								<div class="mcp-icon" style={`background: ${sAvatar && !avatarErrors.has(server.id) ? 'transparent' : getMonogramBg(server.name)};`}>
+									{#if sAvatar && !avatarErrors.has(server.id)}
+										<img src={sAvatar} alt={server.name} class="mcp-avatar" style="filter: {getHueRotate(server.name)};" onerror={() => { avatarErrors.add(server.id); }} />
+									{:else}
+										{getMonogram(server.name)}
+									{/if}
 								</div>
 								<div class="catalog-name">{server.name}</div>
 							</div>
@@ -373,7 +406,8 @@ async function removeFromDetail(serverId: string): Promise<void> {
 			</div>
 		{:else}
 			<div class="catalog-grid">
-				{#each filteredCatalog as entry (entry.id)}
+				{#each visibleCatalog as entry (entry.id)}
+					{@const avatar = getAvatarUrl(entry.sourceUrl)}
 					<div
 						class="catalog-card"
 						role="button"
@@ -382,8 +416,12 @@ async function removeFromDetail(serverId: string): Promise<void> {
 						onkeydown={(event) => onCatalogCardKeydown(event, entry)}
 					>
 						<div class="catalog-top">
-							<div class="mcp-icon" style={`background: ${getMonogramBg(entry.name)};`}>
-								{getMonogram(entry.name)}
+							<div class="mcp-icon" style={`background: ${avatar && !avatarErrors.has(entry.id) ? 'transparent' : getMonogramBg(entry.name)};`}>
+								{#if avatar && !avatarErrors.has(entry.id)}
+									<img src={avatar} alt={entry.name} class="mcp-avatar" style="filter: {getHueRotate(entry.name)};" onerror={() => { avatarErrors.add(entry.id); }} />
+								{:else}
+									{getMonogram(entry.name)}
+								{/if}
 							</div>
 							<div class="catalog-name">{entry.name}</div>
 						</div>
@@ -431,6 +469,15 @@ async function removeFromDetail(serverId: string): Promise<void> {
 					</div>
 				{/each}
 			</div>
+			{#if hasMore}
+				<button
+					type="button"
+					class="show-more"
+					onclick={() => (visibleCount += MCP_PAGE_SIZE)}
+				>
+					Show more ({remaining} remaining)
+				</button>
+			{/if}
 		{/if}
 	</div>
 </div>
@@ -618,34 +665,28 @@ async function removeFromDetail(serverId: string): Promise<void> {
 	.catalog-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-		gap: 8px;
-		padding: var(--space-md);
-		border: 1px solid var(--sig-border-strong);
-		border-radius: 8px;
-		background: var(--sig-surface);
+		gap: var(--space-sm);
+		background: transparent;
 	}
 
 	.catalog-card {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
-		padding: 9px;
+		gap: 6px;
+		padding: var(--space-sm);
 		border: 1px solid var(--sig-border);
-		background:
-			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 8%, transparent), transparent 45%),
-			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 94%, black) 0%, var(--sig-surface) 65%);
+		background: var(--sig-surface);
+		border-radius: var(--radius);
 		cursor: pointer;
-		transition: border-color 0.15s, background 0.15s;
-		min-height: 140px;
+		transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+		min-height: 0;
 		width: 100%;
 		text-align: left;
 	}
 
 	.catalog-card:hover {
-		border-color: var(--sig-highlight);
-		background:
-			radial-gradient(circle at 15% 120%, color-mix(in srgb, var(--sig-accent) 11%, transparent), transparent 45%),
-			linear-gradient(to right, color-mix(in srgb, var(--sig-surface-raised) 91%, black) 0%, var(--sig-surface) 65%);
+		border-color: var(--sig-border-strong);
+		background: var(--sig-surface-raised);
 	}
 
 	.catalog-card:focus {
@@ -667,7 +708,7 @@ async function removeFromDetail(serverId: string): Promise<void> {
 	.catalog-name {
 		font-family: var(--font-display);
 		font-size: 12px;
-		color: var(--sig-highlight);
+		color: var(--sig-text-bright);
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
 	}
@@ -686,6 +727,13 @@ async function removeFromDetail(serverId: string): Promise<void> {
 		color: var(--sig-icon-fg);
 		text-transform: uppercase;
 		flex-shrink: 0;
+		overflow: hidden;
+	}
+
+	.mcp-avatar {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
 	}
 
 	.catalog-desc {
@@ -693,12 +741,10 @@ async function removeFromDetail(serverId: string): Promise<void> {
 		font-size: 10px;
 		line-height: 1.45;
 		color: var(--sig-text-muted);
-		line-clamp: 4;
 		display: -webkit-box;
-		-webkit-line-clamp: 4;
+		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
-		min-height: 56px;
 	}
 
 	.catalog-meta {
@@ -733,6 +779,28 @@ async function removeFromDetail(serverId: string): Promise<void> {
 		align-items: center;
 		gap: 6px;
 		margin-top: auto;
+	}
+
+	.show-more {
+		display: block;
+		width: 100%;
+		padding: var(--space-sm) var(--space-md);
+		background: transparent;
+		border: 1px dashed var(--sig-border);
+		border-radius: 6px;
+		color: var(--sig-text-muted);
+		font-family: var(--font-mono);
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		cursor: pointer;
+		transition: border-color 0.15s, color 0.15s;
+		margin-top: var(--space-sm);
+	}
+
+	.show-more:hover {
+		border-color: var(--sig-accent);
+		color: var(--sig-text-bright);
 	}
 
 	.catalog-link {

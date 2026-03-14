@@ -525,45 +525,73 @@ function parseCatalogMarkdown(markdown: string, page: number): ParsedCatalogPage
 }
 
 export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpCatalogEntry[] {
-	const sectionStart = markdown.indexOf("## 🌟 Reference Servers");
-	if (sectionStart < 0) return [];
+	const entries: MarketplaceMcpCatalogEntry[] = [];
+	const seen = new Set<string>();
 
-	const after = markdown.slice(sectionStart);
-	const archivedIdx = after.indexOf("### Archived");
-	const nextHeadingIdx = after.indexOf("## ", 1);
-	let section = after;
-	if (archivedIdx >= 0) {
-		section = after.slice(0, archivedIdx);
-	} else if (nextHeadingIdx >= 0) {
-		section = after.slice(0, nextHeadingIdx);
+	// Parse reference servers (src/ links)
+	const refStart = markdown.indexOf("## 🌟 Reference Servers");
+	if (refStart >= 0) {
+		const refAfter = markdown.slice(refStart);
+		const refEnd = Math.min(
+			...[refAfter.indexOf("### Archived"), refAfter.indexOf("## ", 1)].filter((i) => i > 0),
+		);
+		const refSection = refEnd < Infinity ? refAfter.slice(0, refEnd) : refAfter;
+		const re = /^-\s+\*\*\[([^\]]+)\]\(src\/([^)]+)\)\*\*\s+-\s+(.+)$/gm;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(refSection)) !== null) {
+			const name = m[1].trim();
+			const path = m[2].trim();
+			const desc = m[3].trim();
+			const slug = path.split("/").at(-1) ?? path;
+			if (!name || !slug) continue;
+			const id = makeCatalogEntryId("modelcontextprotocol/servers", slug);
+			if (seen.has(id)) continue;
+			seen.add(id);
+			entries.push({
+				id,
+				source: "modelcontextprotocol/servers",
+				catalogId: slug,
+				name,
+				description: desc,
+				category: inferCategory(`${name} ${desc}`),
+				official: true,
+				sponsor: false,
+				popularityRank: entries.length + 1,
+				sourceUrl: `https://github.com/modelcontextprotocol/servers/tree/main/src/${path}`,
+			});
+		}
 	}
 
-	const entries: MarketplaceMcpCatalogEntry[] = [];
-	const re = /^-\s+\*\*\[([^\]]+)\]\(src\/([^)]+)\)\*\*\s+-\s+(.+)$/gm;
-	let m: RegExpExecArray | null;
-
-	while ((m = re.exec(section)) !== null) {
-		const name = m[1].trim();
-		const path = m[2].trim();
-		const description = m[3].trim();
-		if (!name || !path) continue;
-
-		const slug = path.split("/").at(-1) ?? path;
-		const catalogId = slug.trim();
-		if (!catalogId) continue;
-
-		entries.push({
-			id: makeCatalogEntryId("modelcontextprotocol/servers", catalogId),
-			source: "modelcontextprotocol/servers",
-			catalogId,
-			name,
-			description,
-			category: inferCategory(`${name} ${description}`),
-			official: true,
-			sponsor: false,
-			popularityRank: entries.length + 1,
-			sourceUrl: `https://github.com/modelcontextprotocol/servers/tree/main/src/${path}`,
-		});
+	// Parse third-party servers (external GitHub links)
+	const tpStart = markdown.indexOf("## 🤝 Third-Party Servers");
+	if (tpStart >= 0) {
+		const tpAfter = markdown.slice(tpStart);
+		const tpEnd = tpAfter.indexOf("## 📚 Frameworks");
+		const tpSection = tpEnd > 0 ? tpAfter.slice(0, tpEnd) : tpAfter;
+		const re = /^-\s+(?:<img[^>]*>\s*)?\*\*\[([^\]]+)\]\((https?:\/\/[^)]+)\)\*\*\s+-\s+(.+)$/gm;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(tpSection)) !== null) {
+			const name = m[1].trim();
+			const url = m[2].trim();
+			const desc = m[3].replace(/<[^>]*>/g, "").trim();
+			if (!name || !url) continue;
+			const slug = url.replace(/\/$/, "").split("/").at(-1) ?? name;
+			const id = makeCatalogEntryId("modelcontextprotocol/servers", slug);
+			if (seen.has(id)) continue;
+			seen.add(id);
+			entries.push({
+				id,
+				source: "modelcontextprotocol/servers",
+				catalogId: slug,
+				name,
+				description: desc,
+				category: inferCategory(`${name} ${desc}`),
+				official: false,
+				sponsor: false,
+				popularityRank: entries.length + 1,
+				sourceUrl: url,
+			});
+		}
 	}
 
 	return entries;

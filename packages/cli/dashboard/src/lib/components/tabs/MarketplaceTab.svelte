@@ -1115,6 +1115,7 @@ $effect(() => {
 		min-height: 0;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) 250px;
+		grid-template-rows: 1fr auto;
 		gap: var(--space-sm);
 		padding: var(--space-sm);
 	}
@@ -1124,6 +1125,7 @@ $effect(() => {
 		flex-direction: column;
 		min-height: 0;
 		overflow: hidden;
+		flex: 1;
 	}
 
 	.module-head {
@@ -1380,7 +1382,34 @@ $effect(() => {
 		}
 	}
 
-	@media (max-width: 1023px) {
+	@media (max-width: 767px) {
+		.store-grid {
+			padding-bottom: 3.5rem;
+		}
+
+		.store-rail {
+			display: contents;
+		}
+
+		.store-rail > :global(.rail-panel) {
+			position: fixed;
+			bottom: var(--space-sm);
+			z-index: 30;
+			width: calc(50% - 1.5rem);
+			max-width: none;
+			border-radius: var(--radius);
+		}
+
+		.store-rail > :global(.rail-panel:first-child) {
+			left: 1rem;
+		}
+
+		.store-rail > :global(.rail-panel:last-child) {
+			right: 1rem;
+		}
+	}
+
+	@media (max-width: 767px) {
 		.tab-header {
 			flex-wrap: wrap;
 			gap: var(--space-sm);
