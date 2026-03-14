@@ -119,11 +119,8 @@
 			justify-self: center;
 			flex-wrap: wrap;
 			justify-content: center;
-		}
-
-		:global(:has(.mobile-sidebar-trigger)) .banner-left {
-			padding-left: 4.5rem; /* clear fixed sidebar trigger */
-			padding-right: 4.5rem; /* symmetric balance */
+			padding-left: 2rem;
+			padding-right: 2rem;
 		}
 
 		.banner-right {

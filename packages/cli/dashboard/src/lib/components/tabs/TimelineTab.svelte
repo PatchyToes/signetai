@@ -615,7 +615,7 @@ onMount(() => {
 			</section>
 
 			<div class="timeline-content-split flex-1 min-h-0 gap-3">
-				<section class="timeline-detail-panel flex min-h-0 flex-col gap-3 overflow-auto rounded-[10.5px] border-2 border-[var(--sig-border-strong)] bg-[var(--sig-surface)] p-3">
+				<section class="timeline-detail-panel flex min-h-0 flex-col gap-3 overflow-x-hidden overflow-y-auto rounded-[10.5px] border-2 border-[var(--sig-border-strong)] bg-[var(--sig-surface)] p-3">
 					<div class="timeline-era-head">
 						<div class="timeline-era-title-row">
 							<p class="sig-heading timeline-era-title">
