@@ -588,6 +588,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 		const tpSection = nextSection > 0 ? tpAfter.slice(0, nextSection) : tpAfter;
 		const re = /^-\s+(?:<img[^>]*>\s*)?\*\*\[([^\]]+)\]\((https?:\/\/[^)]+)\)\*\*\s+-\s+(.+)$/gm;
 		let m: RegExpExecArray | null;
+		let tpRank = 0;
 		while ((m = re.exec(tpSection)) !== null) {
 			const name = m[1].trim();
 			const url = m[2].trim();
@@ -599,6 +600,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 			const id = makeCatalogEntryId("github", slug);
 			if (seen.has(id)) continue;
 			seen.add(id);
+			tpRank++;
 			entries.push({
 				id,
 				source: "github",
@@ -608,7 +610,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 				category: inferCategory(`${name} ${desc}`),
 				official: false,
 				sponsor: false,
-				popularityRank: entries.length + 1,
+				popularityRank: tpRank,
 				sourceUrl: url,
 			});
 		}
@@ -821,7 +823,7 @@ async function fetchMcpServersOrgDetail(catalogId: string): Promise<DetailConfig
 		throw new Error(`detail fetch failed: ${res.status}`);
 	}
 
-	const markdown = await res.text();
+	const markdown = await readCapped(res);
 	return extractStandardMcpConfig(markdown);
 }
 
@@ -841,11 +843,25 @@ async function fetchReferenceServerDetail(catalogId: string): Promise<DetailConf
 		throw new Error(`reference detail fetch failed: ${res.status}`);
 	}
 
-	const markdown = await res.text();
+	const markdown = await readCapped(res);
 	return extractStandardMcpConfig(markdown);
 }
 
 const GITHUB_RAW_HOST = "https://raw.githubusercontent.com" as const;
+const MAX_README_BYTES = 2 * 1024 * 1024; // 2 MB cap on fetched READMEs
+
+/** Read response body with a size cap to prevent memory exhaustion. */
+async function readCapped(res: Response): Promise<string> {
+	const len = res.headers.get("content-length");
+	if (len && parseInt(len, 10) > MAX_README_BYTES) {
+		throw new Error(`response too large: ${len} bytes`);
+	}
+	const text = await res.text();
+	if (text.length > MAX_README_BYTES) {
+		throw new Error(`response too large: ${text.length} chars`);
+	}
+	return text;
+}
 
 /**
  * Fetch README.md from a GitHub repo to extract MCP server config.
@@ -869,13 +885,13 @@ async function fetchGithubServerDetail(catalogId: string): Promise<DetailConfig>
 		if (res.status === 404) {
 			const fallback = `${GITHUB_RAW_HOST}/${encodedPath}/master/README.md`;
 			const res2 = await fetch(fallback, { headers, signal: AbortSignal.timeout(timeout) });
-			if (res2.ok) return extractStandardMcpConfig(await res2.text());
+			if (res2.ok) return extractStandardMcpConfig(await readCapped(res2));
 			throw new Error(`github detail fetch failed: main 404, master ${res2.status}`);
 		}
 		throw new Error(`github detail fetch failed: ${res.status}`);
 	}
 
-	const markdown = await res.text();
+	const markdown = await readCapped(res);
 	return extractStandardMcpConfig(markdown);
 }
 
