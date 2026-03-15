@@ -633,7 +633,7 @@ async function fetchReferenceCatalogEntries(): Promise<readonly MarketplaceMcpCa
 		throw new Error(`reference catalog fetch failed: ${res.status}`);
 	}
 
-	const markdown = await res.text();
+	const markdown = await readCapped(res);
 	const entries = parseReferenceServersMarkdown(markdown);
 	referenceCatalogCache = { fetchedAt: now, entries };
 	return entries;
@@ -656,7 +656,7 @@ async function fetchCatalogPage(page: number): Promise<ParsedCatalogPage> {
 		throw new Error(`catalog page fetch failed: ${res.status}`);
 	}
 
-	const markdown = await res.text();
+	const markdown = await readCapped(res);
 	const parsed = parseCatalogMarkdown(markdown, page);
 	catalogCache.set(page, { fetchedAt: now, page: parsed });
 	return parsed;
