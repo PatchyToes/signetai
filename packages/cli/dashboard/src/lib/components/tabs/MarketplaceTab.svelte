@@ -115,6 +115,7 @@ const activeSecondarySortLabel = $derived.by(() => {
 	}
 	if (mcpMarket.source === "mcpservers.org") return "MCP Registry";
 	if (mcpMarket.source === "modelcontextprotocol/servers") return "MCP GitHub";
+	if (mcpMarket.source === "github") return "GitHub";
 	return "All sources";
 });
 
