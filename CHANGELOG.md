@@ -2,6 +2,15 @@
 
 All notable changes to Signet are documented here.
 
+## [0.58.2] - 2026-03-16
+
+### Bug Fixes
+
+- address round-2 review — shared locale constant, anchored boundaries, regex docs
+- address review — widen locale regex, use locale-prefixed detail URLs
+- MCP catalog parser — third-party section boundary and mcpservers.org locale
+
+
 ## [0.58.1] - 2026-03-15
 
 ### Bug Fixes
