@@ -495,13 +495,13 @@ function parseCatalogMarkdown(markdown: string, page: number): ParsedCatalogPage
 
 	const entries: MarketplaceMcpCatalogEntry[] = [];
 	const seen = new Set<string>();
-	const re = /\[([^\]]+)\]\((https:\/\/mcpservers\.org\/servers\/[^)]+)\)/g;
+	const re = /\[([^\]]+)\]\((https:\/\/mcpservers\.org\/(?:[a-z]{2}\/)?servers\/[^)]+)\)/g;
 	let m: RegExpExecArray | null;
 
 	while ((m = re.exec(markdown)) !== null) {
 		const rawText = m[1].replace(/\s+/g, " ").trim();
 		const url = m[2].trim();
-		const catalogId = url.replace(/^https:\/\/mcpservers\.org\/servers\//, "");
+		const catalogId = url.replace(/^https:\/\/mcpservers\.org\/(?:[a-z]{2}\/)?servers\//, "");
 		if (!catalogId || seen.has(catalogId)) continue;
 		seen.add(catalogId);
 
@@ -551,7 +551,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 	if (refStart >= 0) {
 		const refAfter = markdown.slice(refStart);
 		// Find earliest section boundary; empty filter → Math.min() → Infinity → use whole remainder
-		const boundaries = [refAfter.indexOf("### Archived"), refAfter.indexOf("## ", 1)].filter((i) => i > 0);
+		const boundaries = [refAfter.indexOf("### Archived"), refAfter.indexOf("\n## ", 1)].filter((i) => i > 0);
 		const refEnd = boundaries.length > 0 ? Math.min(...boundaries) : refAfter.length;
 		const refSection = refAfter.slice(0, refEnd);
 		const re = /^-\s+\*\*\[([^\]]+)\]\(src\/([^)]+)\)\*\*\s+-\s+(.+)$/gm;
@@ -584,7 +584,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 	const tpStart = markdown.indexOf("## 🤝 Third-Party Servers");
 	if (tpStart >= 0) {
 		const tpAfter = markdown.slice(tpStart);
-		const nextSection = tpAfter.indexOf("## ", 1);
+		const nextSection = tpAfter.indexOf("\n## ", 1);
 		const tpSection = nextSection > 0 ? tpAfter.slice(0, nextSection) : tpAfter;
 		const re = /^-\s+(?:<img[^>]*>\s*)?\*\*\[([^\]]+)\]\((https?:\/\/[^)]+)\)\*\*\s+-\s+(.+)$/gm;
 		let m: RegExpExecArray | null;
