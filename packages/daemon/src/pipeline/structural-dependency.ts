@@ -289,25 +289,37 @@ async function processDependencyBatch(
 		factContents,
 	);
 
-	// Call LLM
-	let raw: string;
-	try {
-		raw = await deps.provider.generate(prompt, { temperature: 0.1 });
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		logger.warn("structural-dependency", "LLM call failed", { error: msg });
-		deps.accessor.withWriteTx((db) => {
-			for (const idx of validIndices) {
-				failJob(db, jobs[idx].id, msg, jobs[idx].attempts + 1, jobs[idx].max_attempts);
+	// Call LLM — retry once if parsing fails (qwen3 sometimes emits
+	// verbose reasoning instead of JSON on the first attempt)
+	let results: readonly DependencyResult[] = [];
+	for (let attempt = 0; attempt < 2; attempt++) {
+		let raw: string;
+		try {
+			raw = await deps.provider.generate(prompt, { temperature: 0.1 });
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			logger.warn("structural-dependency", "LLM call failed", { error: msg });
+			if (attempt === 1) {
+				deps.accessor.withWriteTx((db) => {
+					for (const idx of validIndices) {
+						failJob(db, jobs[idx].id, msg, jobs[idx].attempts + 1, jobs[idx].max_attempts);
+					}
+				});
+				return;
 			}
-		});
-		return;
-	}
+			continue;
+		}
 
-	// Parse response
-	const stripped = stripFences(raw);
-	const parsed = tryParseJson(stripped);
-	const results = validateDependencyResults(parsed, validPayloads.length);
+		const stripped = stripFences(raw);
+		const parsed = tryParseJson(stripped);
+		results = validateDependencyResults(parsed, validPayloads.length);
+		if (results.length > 0) break;
+
+		logger.info("structural-dependency", "Empty parse, retrying", {
+			entityName,
+			attempt,
+		});
+	}
 
 	// Apply results — LLM indices (1-based) map into validPayloads,
 	// which maps back to jobs via validIndices.
