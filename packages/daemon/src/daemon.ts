@@ -9412,7 +9412,9 @@ async function main() {
 	const extractionOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(
 		extractionOpenCodeBaseUrl,
 	);
-	if (effectiveExtractionProvider === "opencode") {
+	if (effectiveExtractionProvider === "none") {
+		logger.info("config", "Extraction provider set to none — pipeline extraction disabled");
+	} else if (effectiveExtractionProvider === "opencode") {
 		if (extractionOpenCodeShouldManage) {
 			const serverReady = await ensureOpenCodeServer(4096);
 			if (!serverReady) {
@@ -9518,8 +9520,9 @@ async function main() {
 	});
 
 	// Create LLM provider once, register as daemon-wide singleton
-	const llmProvider =
-		effectiveExtractionProvider === "anthropic" && anthropicApiKey
+	const llmProvider = effectiveExtractionProvider === "none"
+		? null
+		: effectiveExtractionProvider === "anthropic" && anthropicApiKey
 			? createAnthropicProvider({
 					model: effectiveExtractionModel || "haiku",
 					apiKey: anthropicApiKey,
@@ -9557,7 +9560,7 @@ async function main() {
 									}
 									: {}),
 							});
-	initLlmProvider(llmProvider);
+	if (llmProvider) initLlmProvider(llmProvider);
 
 	// Initialize model registry for dynamic model discovery
 	if (memoryCfg.pipelineV2.modelRegistry.enabled) {
