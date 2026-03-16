@@ -677,7 +677,7 @@ export function loadPipelineConfig(
 			enabled: resolveBool(synthesisRaw?.enabled, undefined, d.synthesis.enabled),
 			provider: (() => {
 				const p = synthesisRaw?.provider;
-				if (p === "ollama" || p === "claude-code" || p === "opencode" || p === "anthropic") return p;
+				if (p === "none" || p === "ollama" || p === "claude-code" || p === "opencode" || p === "anthropic") return p;
 				return d.synthesis.provider;
 			})(),
 			model:

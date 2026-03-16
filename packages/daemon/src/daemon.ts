@@ -9584,7 +9584,7 @@ async function main() {
 
 	// Create synthesis provider — separate from extraction because synthesis
 	// needs a smarter model that can reason across long context
-	if (memoryCfg.pipelineV2.synthesis.enabled) {
+	if (memoryCfg.pipelineV2.synthesis.enabled && memoryCfg.pipelineV2.synthesis.provider !== "none") {
 		let effectiveSynthesisProvider = memoryCfg.pipelineV2.synthesis.provider;
 		const synthesisOllamaBaseUrl = normalizeRuntimeBaseUrl(
 			memoryCfg.pipelineV2.synthesis.endpoint,
