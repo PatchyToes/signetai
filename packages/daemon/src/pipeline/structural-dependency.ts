@@ -346,6 +346,9 @@ async function processDependencyBatch(
 			);
 
 			if (targetEntity) {
+				// Not wrapped in withWriteTx — both upsertAspect and upsertDependency
+				// acquire their own write tx internally, and DbAccessor uses
+				// BEGIN IMMEDIATE (no savepoints), so nesting throws.
 				try {
 					const aspect = upsertAspect(deps.accessor, {
 						entityId: payload.entity_id,

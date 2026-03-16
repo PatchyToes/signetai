@@ -170,17 +170,20 @@ function extractBalancedJsonObject(raw: string): string | null {
 	return null;
 }
 
-/** Find the last balanced JSON array in a string (handles "explanation then JSON" pattern). */
+/**
+ * Find the first balanced JSON array in a string, scanning forward with
+ * string-awareness so brackets inside quoted values are ignored.
+ * Uses the same forward-scan approach as extractBalancedJsonObject.
+ */
 export function extractBalancedJsonArray(raw: string): string | null {
-	// Search backwards — the JSON array is typically at the end after verbose reasoning
-	const last = raw.lastIndexOf("[");
-	if (last < 0) return null;
+	const start = raw.indexOf("[");
+	if (start < 0) return null;
 
 	let depth = 0;
 	let inString = false;
 	let escaping = false;
 
-	for (let i = last; i < raw.length; i++) {
+	for (let i = start; i < raw.length; i++) {
 		const ch = raw[i];
 
 		if (inString) {
@@ -194,7 +197,7 @@ export function extractBalancedJsonArray(raw: string): string | null {
 		if (ch === "[") depth++;
 		if (ch === "]") {
 			depth--;
-			if (depth === 0) return raw.slice(last, i + 1);
+			if (depth === 0) return raw.slice(start, i + 1);
 		}
 	}
 
