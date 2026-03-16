@@ -55,6 +55,33 @@ interface DependencyResult {
 
 const VALID_DEP_TYPES = new Set<string>(DEPENDENCY_TYPES);
 
+// One-line descriptions to steer the LLM toward consistent type selection.
+// Included in the extraction prompt so the model disambiguates similar pairs
+// (e.g. uses vs depends_on, informs vs teaches, precedes vs follows).
+const DEP_DESCRIPTIONS: Record<string, string> = {
+	uses: "actively calls or consumes at runtime",
+	requires: "cannot function without (hard prerequisite)",
+	owned_by: "maintained or governed by",
+	blocks: "prevents progress of",
+	informs: "sends data or signals to",
+	built: "was created or constructed by",
+	depends_on: "needs but does not directly call (soft dependency)",
+	related_to: "associated loosely, no directional dependency",
+	learned_from: "acquired knowledge from",
+	teaches: "transfers knowledge to",
+	knows: "is aware of or references",
+	assumes: "presupposes as true without verifying",
+	contradicts: "conflicts with or negates",
+	supersedes: "replaces or obsoletes",
+	part_of: "is a component or subset of",
+	precedes: "must happen before (temporal)",
+	follows: "happens after (temporal)",
+	triggers: "causes to start or execute",
+	impacts: "change here affects (blast radius)",
+	produces: "generates as output",
+	consumes: "takes as input",
+};
+
 // ---------------------------------------------------------------------------
 // Job leasing
 // ---------------------------------------------------------------------------
@@ -146,7 +173,8 @@ function buildDependencyPrompt(
 Entity: ${entityName} (${entityType})
 Aspects: ${aspectList}
 
-Dependency types: ${DEPENDENCY_TYPES.join(", ")}
+Dependency types:
+${DEPENDENCY_TYPES.map((t) => `- ${t}: ${DEP_DESCRIPTIONS[t]}`).join("\n")}
 
 ${factList}
 
@@ -303,18 +331,20 @@ async function processDependencyBatch(
 
 			if (targetEntity) {
 				try {
-					const aspect = upsertAspect(deps.accessor, {
-						entityId: payload.entity_id,
-						agentId: "default",
-						name: result.aspect,
-					});
-					upsertDependency(deps.accessor, {
-						sourceEntityId: payload.entity_id,
-						targetEntityId: targetEntity.id,
-						agentId: "default",
-						aspectId: aspect.id,
-						dependencyType: result.dep_type as DependencyType,
-						strength: 0.5,
+					deps.accessor.withWriteTx(() => {
+						const aspect = upsertAspect(deps.accessor, {
+							entityId: payload.entity_id,
+							agentId: "default",
+							name: result.aspect,
+						});
+						upsertDependency(deps.accessor, {
+							sourceEntityId: payload.entity_id,
+							targetEntityId: targetEntity.id,
+							agentId: "default",
+							aspectId: aspect.id,
+							dependencyType: result.dep_type as DependencyType,
+							strength: 0.5,
+						});
 					});
 					depsCreated++;
 				} catch (e) {
@@ -323,6 +353,8 @@ async function processDependencyBatch(
 						entity: payload.entity_id,
 						target: targetEntity.id,
 					});
+					// Skip processedJobIndices — job retries on next tick
+					continue;
 				}
 			}
 		}
