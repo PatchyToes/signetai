@@ -1767,7 +1767,12 @@ function extractSubstantiveWords(text: string): string[] {
 	const words = cleaned
 		.toLowerCase()
 		.split(/\W+/)
-		.filter((word) => word.length >= 3 && !RECALL_STOPWORDS.has(word) && !/^\d+$/.test(word));
+		.filter((word) =>
+			word.length >= 3 &&
+			!RECALL_STOPWORDS.has(word) &&
+			!/^\d+$/.test(word) &&
+			!/\.(js|ts|py|md|txt|json|csv|yml|yaml|sh|css|html|jsx|tsx|sql|env)$/.test(word),
+		);
 
 	// Deduplicate: hyphenated first (more specific), then words
 	const seen = new Set<string>();
@@ -1896,13 +1901,13 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 				query: vectorQuery,
 				keywordQuery: keywordTerms.join(" OR "),
 				limit: 10,
-				importance_min: 0.3,
+				importance_min: 0.5,
 			},
 			cfg,
 			fetchEmbedding,
 		);
 
-		if (recall.results.length === 0 || typeof recall.results[0]?.score !== "number" || recall.results[0].score < 0.4) {
+		if (recall.results.length === 0 || typeof recall.results[0]?.score !== "number" || recall.results[0].score < 0.6) {
 			return { inject: metadataHeader, memoryCount: 0 };
 		}
 
