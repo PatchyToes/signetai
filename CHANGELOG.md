@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.59.0] - 2026-03-16
+
+### Bug Fixes
+
+- reduce auto-recall noise with stricter thresholds and keyword filtering
+
+
 ## [0.58.2] - 2026-03-16
 
 ### Features
