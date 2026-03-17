@@ -121,9 +121,9 @@ Starting partially fresh isn't always a loss. A lot of what accumulates in ChatG
 
 If you're a developer using AI as a coding assistant, the web-based migration covers your casual usage. But your real workflow probably lives in the terminal — Claude Code, custom toolchains, project-specific context that doesn't belong in a global memory store.
 
-This is where the ChatGPT-to-Claude migration intersects with a deeper problem: **AI memory isn't portable.** ChatGPT memories live on OpenAI's servers. Claude memories live on Anthropic's servers. Neither gives you a local, inspectable copy. Neither lets you use the same context across multiple platforms.
+This is where the ChatGPT-to-Claude migration intersects with a deeper problem: **AI memory isn't portable.** ChatGPT memories live on OpenAI's servers. Claude memories live on Anthropic's servers. Neither gives you a local, inspectable copy. Neither lets you use the same context across multiple platforms. And both rely on the AI itself to decide what's worth remembering — the same stateless model that forgets everything between sessions is in charge of its own memory.
 
-[Signet](/) solves this by storing your agent's [[memory]] locally in a SQLite database on your machine. The same memory, identity, and preferences power your agent across Claude Code, [OpenClaw](https://github.com/openclaw/openclaw), OpenCode, Cursor — whatever you use. No cloud dependency, no vendor lock-in, no starting over when you switch tools.
+[Signet](/) takes a different approach entirely. Your agent's [[memory]] lives locally in a SQLite database on your machine. A distillation engine extracts knowledge from sessions after they end — no agent involvement, no memory tools. A predictive model injects the right context before every prompt. The same memory, identity, and preferences power your agent across Claude Code, [OpenClaw](https://github.com/openclaw/openclaw), OpenCode, Cursor — whatever you use. No cloud dependency, no vendor lock-in, no starting over when you switch tools.
 
 For a ChatGPT-to-Claude migration specifically, Signet means:
 

@@ -15,13 +15,13 @@
 
 **Your agent is an investment. Signet is where its value accumulates.**
 
-Signet is an open protocol for agent identity, knowledge, and trust.
-It defines how an agent should persist across sessions, learn from
-its operator, and carry its identity between tools. The reference
-implementation ships a distillation engine that turns raw conversation
-into structured insights, a knowledge graph that maps how those
-insights connect, and a portable identity layer that follows your
-agent into any harness you use.
+Signet is a persistent cognition layer for AI agents. It gives your
+agent memory that works the way memory actually works — ambient,
+automatic, and not dependent on the agent deciding to remember.
+Your agent doesn't call a "save memory" tool. It doesn't search a
+database when it needs context. Signet extracts knowledge after
+sessions, builds a knowledge graph, and injects the right context
+before every prompt. The agent just has its memory. Like you have yours.
 
 Everything runs locally. You own the data. The agent is yours.
 
@@ -39,11 +39,21 @@ worked on yesterday. It doesn't know your preferences, your projects,
 or the decisions you've already made together. Every session is a
 first date.
 
-Signet fixes this. Not with a vector store that regurgitates old
-conversations — with a distillation engine that extracts structured
-insights from every session, maps them into a knowledge graph, and
-assembles the right context for the right moment. Your agent doesn't
-just remember. It *understands*.
+The industry's answer to this has been to give agents memory tools —
+"remember this," "recall that." That's not memory. That's a filing
+cabinet the agent sometimes opens. It puts the LLM in charge of
+deciding what's important, when to store it, and when to retrieve it.
+This isn't how memory works for humans. You don't query a database to
+remember your coworker's name. It surfaces because it's relevant.
+
+Signet takes a fundamentally different approach. The agent is not in
+the loop. A distillation engine extracts structured insights from
+every session after it ends — no tool calls, no agent involvement.
+A knowledge graph maps how those insights connect. And a predictive
+model, trained on your interaction patterns, injects the right context
+before every prompt — before the agent asks.
+
+Your agent doesn't manage its memory. It just has it.
 
 The same agent follows you across Claude Code, OpenCode, and
 OpenClaw. Same personality, same knowledge, same secrets. Switch
@@ -81,13 +91,29 @@ fragments hoping something useful is in there.
   <img src="public/constellation.jpg" alt="Signet constellation view — knowledge graph visualization with entity clusters and force-directed layout" width="720" />
 </p>
 
-### The index
+### The predictive scorer
 
-Every insight is embedded and indexed. Retrieval blends keyword
-search, semantic similarity, and graph traversal into a single
-ranked result. The constellation view in the dashboard lets you see
-your agent's knowledge topology — what's connected, what's isolated,
-what's going stale.
+Most memory systems wait for queries. Signet anticipates them.
+
+A neural network trained on your interaction patterns runs alongside
+the LLM at inference time. It observes the conversation context and
+predicts which memories will be needed — before the agent asks,
+before a search is triggered. Entity weights in the knowledge graph
+inform traversal, so the system doesn't just find text that looks
+similar — it walks the relationships that matter.
+
+The scorer is unique to each user. Your weights never leave your
+machine. With consent, anonymized training signals from the community
+feed a shared base model that ships with every install — so your
+agent starts smart on day one, then gets smarter for you specifically.
+Federated learning applied to agent memory. Nobody else has this data.
+
+### Retrieval
+
+Retrieval blends graph traversal, keyword search, and semantic
+similarity into a single ranked result. The constellation view in the
+dashboard lets you see your agent's knowledge topology — what's
+connected, what's isolated, what's central.
 
 ### Document ingest
 
@@ -152,7 +178,7 @@ Harness support
 |---|---|---|
 | Claude Code | Supported | Hooks + CLAUDE.md sync |
 | OpenCode | Supported | Plugin + AGENTS.md sync |
-| OpenClaw | Supported | Runtime adapter + bootstrap |
+| OpenClaw | Supported | Runtime plugin + NemoClaw compatible |
 | Codex | In progress | WIP |
 | Gemini CLI | Planned | WIP |
 
@@ -160,6 +186,12 @@ Harness support
 
 What Signet is building
 ===
+
+If OpenClaw is the operating system for AI agents, Signet is
+the home directory. The place where identity, knowledge, skills,
+and secrets persist between sessions, between platforms, between
+reboots. An OS without persistent storage isn't an OS. Signet is
+that storage.
 
 Signet is a protocol, not just a product. The reference implementation
 is the proof that the protocol works. Here's the full picture:
@@ -193,6 +225,12 @@ knowledge graph with entities, aspects, attributes, and dependency
 edges. The difference is the difference between a pile of sticky
 notes and an actual understanding of the domain.
 
+And critically — the agent doesn't do this. The distillation engine
+does. No memory tools cluttering the agent's context window. No
+reliance on the LLM deciding what's worth keeping. The extraction
+happens outside the session, the injection happens before the prompt.
+Your agent focuses on the work. Signet handles the rest.
+
 ### Trust and security
 
 Secrets are libsodium-encrypted at rest. Your agent can use secrets
@@ -224,6 +262,8 @@ Daemon (@signet/daemon, localhost:3850)
   |-- HTTP API (90+ endpoints across 18 domains)
   |-- Distillation Layer
   |     extraction -> decision -> graph -> retention
+  |-- Predictive Scorer
+  |     entity-weight traversal, per-user trained model
   |-- Document Worker
   |     ingest -> chunk -> embed -> index
   |-- Maintenance Worker
