@@ -2,6 +2,29 @@
 
 All notable changes to Signet are documented here.
 
+## [0.58.3] - 2026-03-17
+
+### Features
+
+- add dependency reason field and cross-entity synthesis worker
+- expand knowledge graph dependency types from 5 to 18
+
+### Bug Fixes
+
+- drain in-flight tick on stop, use display names in existing targets, add dst.agent_id
+- add agent_id to markSynthesized, only mark when upserts succeed
+- use ISO timestamps in markSynthesized, add tick-in-progress guard
+- use canonical_name in loadExistingTargets for consistent normalization
+- two-pass string-aware extractBalancedJsonArray, document assumptions
+- forward-scan extractBalancedJsonArray, document atomicity, relax test assertion
+- add agent_id scoping and use config batch size in synthesis worker
+- address pr-reviewer feedback on dependency extraction
+- improve extraction resilience for flaky model output
+- atomic upserts, retry on failure, type descriptions in prompt
+- guard upsert pair with try/catch, cap aspect name length
+- derive prompt types from DEPENDENCY_TYPES, thread aspectId
+
+
 ## [0.58.2] - 2026-03-16
 
 ### Bug Fixes
