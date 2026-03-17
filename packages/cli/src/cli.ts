@@ -7,6 +7,7 @@
 import { spawn, spawnSync } from "child_process";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	copyFileSync,
 	existsSync,
@@ -19,6 +20,7 @@ import {
 	rmSync,
 	statSync,
 	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { homedir, platform } from "os";
@@ -377,9 +379,64 @@ async function getDaemonStatus(): Promise<{
 	return { running: false, pid: null, uptime: null, version: null };
 }
 
+async function downloadDaemonBinary(): Promise<void> {
+	let version: string | undefined;
+	try {
+		const raw = readFileSync(join(__dirname, "..", "package.json"), "utf8");
+		version = (JSON.parse(raw) as { version?: string }).version;
+	} catch {
+		return;
+	}
+	if (!version) return;
+
+	const plat = process.platform;
+	const arch = process.arch;
+	const supported = new Set(["linux:x64", "darwin:x64", "darwin:arm64", "win32:x64"]);
+	if (!supported.has(`${plat}:${arch}`)) return;
+
+	const ext = plat === "win32" ? ".exe" : "";
+	const name = `signet-daemon-${plat}-${arch}${ext}`;
+	const binDir = join(__dirname, "..", "bin");
+	const dest = join(binDir, name);
+	if (existsSync(dest)) return;
+
+	const url = `https://github.com/Signet-AI/signetai/releases/download/v${version}/${name}`;
+	process.stdout.write(`  Downloading Rust daemon binary (${name})...`);
+
+	try {
+		const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(30_000) });
+		if (!res.ok) {
+			process.stdout.write(` skipped (${res.status})\n`);
+			return;
+		}
+		mkdirSync(binDir, { recursive: true });
+		const bytes = await res.arrayBuffer();
+		writeFileSync(dest, Buffer.from(bytes));
+		if (plat !== "win32") chmodSync(dest, 0o755);
+		process.stdout.write(` done\n`);
+	} catch {
+		process.stdout.write(` skipped (download failed)\n`);
+		try {
+			unlinkSync(dest);
+		} catch {}
+	}
+}
+
 async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boolean> {
 	if (await isDaemonRunning()) {
 		return true;
+	}
+
+	// Download Rust shadow daemon binary if shadow mode is configured
+	try {
+		const raw = parseSimpleYaml(readFileSync(join(agentsDir, "agent.yaml"), "utf8"));
+		const mem = raw?.memory as Record<string, unknown> | undefined;
+		const p2 = mem?.pipelineV2 as Record<string, unknown> | undefined;
+		if (p2?.shadowEnabled === true) {
+			await downloadDaemonBinary();
+		}
+	} catch {
+		// non-fatal — agent.yaml may not exist yet
 	}
 
 	const daemonDir = join(agentsDir, ".daemon");

@@ -31,6 +31,7 @@ export type { PipelineFlag, PipelineV2Config };
 export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 	enabled: true,
 	shadowMode: false,
+	shadowEnabled: false,
 	mutationsFrozen: false,
 	semanticContradictionEnabled: true,
 	semanticContradictionTimeoutMs: 45000,
@@ -306,6 +307,7 @@ export function loadPipelineConfig(
 	return {
 		enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
 		shadowMode: typeof raw.shadowMode === "boolean" ? raw.shadowMode : d.shadowMode,
+		shadowEnabled: typeof raw.shadowEnabled === "boolean" ? raw.shadowEnabled : d.shadowEnabled,
 		mutationsFrozen:
 			typeof raw.mutationsFrozen === "boolean" ? raw.mutationsFrozen : d.mutationsFrozen,
 		semanticContradictionEnabled:

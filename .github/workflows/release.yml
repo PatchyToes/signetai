@@ -184,8 +184,51 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+
+  build-daemon:
+    needs: release
+    if: needs.release.outputs.skip != 'true' && needs.release.outputs.version != ''
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: signet-daemon-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: signet-daemon-darwin-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: signet-daemon-darwin-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: signet-daemon-win32-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build daemon
+        run: cargo build --release --target "${{ matrix.target }}" -p signet-daemon
+        working-directory: packages/daemon-rs
+      - name: Upload to release
+        shell: bash
+        run: |
+          EXT=""
+          [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
+          BINARY="packages/daemon-rs/target/${{ matrix.target }}/release/signet-daemon${EXT}"
+          gh release upload "v${{ needs.release.outputs.version }}" "${BINARY}#${{ matrix.asset }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish:
-    needs: [release, build-predictor]
+    needs: [release, build-predictor, build-daemon]
     runs-on: ubuntu-latest
     # Run even if some build-predictor matrix legs fail — partial binary
     # coverage is better than blocking the entire release. Release job must

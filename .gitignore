@@ -65,7 +65,8 @@ marketing/
 web/.wrangler/
 web/.dev.vars*
 
-# Rust sidecar build artifacts
+# Rust build artifacts
 packages/predictor/target/
+packages/daemon-rs/target/
 
 

@@ -241,6 +241,7 @@ export interface PipelineV2Config {
 	// Master switches (flat)
 	readonly enabled: boolean;
 	readonly shadowMode: boolean;
+	readonly shadowEnabled: boolean;
 	readonly mutationsFrozen: boolean;
 	readonly semanticContradictionEnabled: boolean;
 	readonly semanticContradictionTimeoutMs: number;
