@@ -112,6 +112,10 @@ function spawnHidden(cmd: string[], options?: { env?: Record<string, string | un
 	const [bin, ...args] = cmd;
 	const resolvedBin = Bun.which(bin);
 	if (resolvedBin === null) {
+		// Throws synchronously — same behaviour as Bun.spawn with a missing
+		// binary. All call sites are guarded: available() wraps in try/catch,
+		// and callClaude/callCodex run inside withSemaphore whose try/finally
+		// releases the semaphore before the rejection propagates.
 		throw new Error(`spawnHidden: binary "${bin}" not found on PATH`);
 	}
 	const sanitizedEnv: Record<string, string> = {};

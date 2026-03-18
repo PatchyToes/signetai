@@ -9559,6 +9559,7 @@ async function main() {
 			});
 		}
 	} else if (effectiveExtractionProvider === "claude-code") {
+		// Resolve full path so .cmd wrappers on Windows are found correctly.
 		const resolvedClaude = Bun.which("claude");
 		if (resolvedClaude === null) {
 			logger.warn("config", "Claude Code CLI not found, falling back to ollama for extraction");
@@ -9807,6 +9808,7 @@ async function main() {
 				effectiveSynthesisProvider = "ollama";
 			}
 		} else if (effectiveSynthesisProvider === "claude-code") {
+			// Re-resolve here; extraction and synthesis may use different providers.
 			const resolvedClaude = Bun.which("claude");
 			if (resolvedClaude === null) {
 				logger.warn("config", "Claude Code CLI not found, falling back to ollama for synthesis");
