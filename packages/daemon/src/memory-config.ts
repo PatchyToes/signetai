@@ -280,9 +280,10 @@ export function loadPipelineConfig(
 		| "opencode"
 		| "codex"
 		| "anthropic"
-		| "openrouter";
+		| "openrouter"
+		| "none";
 	const VALID_PROVIDERS: ReadonlySet<string> = new Set<ProviderKind>([
-		"codex", "opencode", "claude-code", "ollama", "anthropic", "openrouter",
+		"none", "codex", "opencode", "claude-code", "ollama", "anthropic", "openrouter",
 	]);
 
 	function isValidProvider(v: unknown): v is ProviderKind {
@@ -689,6 +690,7 @@ export function loadPipelineConfig(
 			provider: (() => {
 				const p = synthesisRaw?.provider;
 				if (
+					p === "none" ||
 					p === "ollama" ||
 					p === "claude-code" ||
 					p === "opencode" ||
