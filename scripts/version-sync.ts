@@ -137,19 +137,13 @@ function resolveWorkspaceProtocols(
 		const raw = readFileSync(file, "utf8");
 		const pkg = JSON.parse(raw) as Record<string, unknown>;
 		// Only resolve for packages that will be published
-		if (!pkg.publishConfig && !pkg.private) continue;
-		if (pkg.publishConfig === undefined) continue;
+		if (!pkg.publishConfig || pkg.private) continue;
 
 		let changed = raw;
-		// Replace workspace:* and workspace:^ with the resolved version
-		changed = changed.replace(
-			/"workspace:\*"/g,
-			`"${version}"`,
-		);
-		changed = changed.replace(
-			/"workspace:\^"/g,
-			`"^${version}"`,
-		);
+		// Replace workspace: protocols with resolved versions
+		changed = changed.replace(/"workspace:\*"/g, `"${version}"`);
+		changed = changed.replace(/"workspace:\^"/g, `"^${version}"`);
+		changed = changed.replace(/"workspace:~"/g, `"~${version}"`);
 		if (changed !== raw) {
 			writeFileSync(file, changed);
 			patched.push(file);
