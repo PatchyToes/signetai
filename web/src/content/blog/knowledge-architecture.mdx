@@ -29,7 +29,7 @@ Knowledge doesn't arrive structured. It arrives messy.
 
 A session produces hundreds of observations. A document produces thousands of sentences. The agent encounters facts in passing, half-formed, buried in context. None of it is immediately useful in the form it arrives.
 
-The extraction [[pipeline]] is the refinery. Over time, continuously and in the background, it takes raw material and distills it:
+The extraction [[pipeline]] is the refinery. It runs outside the conversation — the agent is never involved. No memory tools, no "remember this" commands. The distillation engine reviews sessions after they end, and over time, continuously and in the background, it takes raw material and distills it:
 
 ```
 sparse facts
@@ -143,15 +143,15 @@ This is the broader principle: the memory system is set and forget. **The user's
 
 ## The Graph That Walks Itself
 
-The fundamental shift this architecture makes is from *search* to *traversal*.
+We call this concept [[docs/desire-paths|desire paths]] — like the worn trails in a park that reveal where people actually walk, the knowledge graph learns which traversals are productive and reinforces them over time. The fundamental shift this architecture makes is from *search* to *traversal*.
 
 Current memory systems find relevant knowledge by asking: what is semantically similar to this query? They embed the query, embed the memories, compute cosine distances, retrieve the closest matches. This works. It's also expensive, probabilistic, and structurally blind — it finds things that *sound related*, not things that *are structurally required*.
 
 In Signet's knowledge architecture, session-start can ask a different question: what entity is this session about? Walk its aspects. Pull its attributes and constraints. Follow its dependencies. You now have the minimum structured context needed to act — without an embedding call, without a vector search, without scoring thousands of candidates.
 
-Signet's predictive scorer still runs on top of this. It learns which aspects matter most for which kinds of sessions, which attributes to prioritize, which dependencies are worth following. It adds an adaptive intelligence layer. But it operates on a candidate pool that's already structurally coherent — not a flat bag of facts.
+Signet's predictive scorer runs on top of this — a neural network trained on your interaction patterns that already holds the highest relevance accuracy of any retrieval method in the system. It learns which aspects matter most for which kinds of sessions, which attributes to prioritize, which dependencies are worth following. It anticipates what context will be needed before the agent asks, before a prompt is submitted. It operates on a candidate pool that's already structurally coherent — not a flat bag of facts.
 
-The floor is better. The ceiling is higher.
+The floor is better. The ceiling is higher. For the deterministic guarantees that protect knowledge during distillation, see [[docs/lcm-patterns|Lossless Context Patterns]].
 
 ## What You'll See
 

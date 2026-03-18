@@ -9,6 +9,9 @@
  * path for dedup safety.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { readStaticIdentity } from "@signet/core";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi, OpenClawToolResult } from "./openclaw-types.js";
 
@@ -354,6 +357,18 @@ export async function isDaemonRunning(daemonUrl = DEFAULT_DAEMON_URL): Promise<b
 }
 
 // ============================================================================
+// Static identity fallback when daemon is unreachable
+// ============================================================================
+
+// Wraps @signet/core's readStaticIdentity to produce a SessionStartResult.
+function staticFallback(): SessionStartResult | null {
+	const dir = process.env.SIGNET_PATH ?? join(homedir(), ".agents");
+	const inject = readStaticIdentity(dir);
+	if (!inject) return null;
+	return { identity: { name: "signet" }, memories: [], inject };
+}
+
+// ============================================================================
 // Lifecycle callbacks
 // ============================================================================
 
@@ -366,17 +381,23 @@ export async function onSessionStart(
 		sessionKey?: string;
 	} = {},
 ): Promise<SessionStartResult | null> {
-	return daemonFetch(options.daemonUrl || DEFAULT_DAEMON_URL, "/api/hooks/session-start", {
-		method: "POST",
-		body: {
-			harness,
-			agentId: options.agentId,
-			context: options.context,
-			sessionKey: options.sessionKey,
-			runtimePath: RUNTIME_PATH,
+	const result = await daemonFetch<SessionStartResult>(
+		options.daemonUrl || DEFAULT_DAEMON_URL,
+		"/api/hooks/session-start",
+		{
+			method: "POST",
+			body: {
+				harness,
+				agentId: options.agentId,
+				context: options.context,
+				sessionKey: options.sessionKey,
+				runtimePath: RUNTIME_PATH,
+			},
+			timeout: READ_TIMEOUT,
 		},
-		timeout: READ_TIMEOUT,
-	});
+	);
+	if (result) return result;
+	return staticFallback();
 }
 
 export async function onUserPromptSubmit(

@@ -149,7 +149,13 @@ export interface PipelineEscalationConfig {
 }
 
 export interface PipelineExtractionConfig {
-	readonly provider: "ollama" | "claude-code" | "opencode" | "codex" | "anthropic";
+	readonly provider:
+		| "ollama"
+		| "claude-code"
+		| "opencode"
+		| "codex"
+		| "anthropic"
+		| "openrouter";
 	readonly model: string;
 	readonly strength: "low" | "medium" | "high";
 	readonly endpoint?: string;
@@ -241,6 +247,7 @@ export interface PipelineV2Config {
 	// Master switches (flat)
 	readonly enabled: boolean;
 	readonly shadowMode: boolean;
+	readonly nativeShadowEnabled: boolean;
 	readonly mutationsFrozen: boolean;
 	readonly semanticContradictionEnabled: boolean;
 	readonly semanticContradictionTimeoutMs: number;
@@ -310,7 +317,12 @@ export interface PipelineEmbeddingTrackerConfig {
 
 export interface PipelineSynthesisConfig {
 	readonly enabled: boolean;
-	readonly provider: "ollama" | "claude-code" | "opencode" | "anthropic";
+	readonly provider:
+		| "ollama"
+		| "claude-code"
+		| "opencode"
+		| "anthropic"
+		| "openrouter";
 	readonly model: string;
 	readonly endpoint?: string;
 	readonly timeout: number;
@@ -333,6 +345,10 @@ export interface PipelineStructuralConfig {
 	readonly classifyBatchSize: number;
 	readonly dependencyBatchSize: number;
 	readonly pollIntervalMs: number;
+	readonly synthesisEnabled: boolean;
+	readonly synthesisIntervalMs: number;
+	readonly synthesisTopEntities: number;
+	readonly synthesisMaxFacts: number;
 }
 
 export interface PipelineFeedbackConfig {
@@ -588,7 +604,19 @@ export type AttributeKind = (typeof ATTRIBUTE_KINDS)[number];
 export const ATTRIBUTE_STATUSES = ["active", "superseded", "deleted"] as const;
 export type AttributeStatus = (typeof ATTRIBUTE_STATUSES)[number];
 
-export const DEPENDENCY_TYPES = ["uses", "requires", "owned_by", "blocks", "informs"] as const;
+export const DEPENDENCY_TYPES = [
+	// core
+	"uses", "requires", "owned_by", "blocks", "informs",
+	// knowledge
+	"built", "depends_on", "related_to", "learned_from",
+	"teaches", "knows", "assumes",
+	// structural
+	"contradicts", "supersedes", "part_of",
+	// temporal / execution flow
+	"precedes", "follows", "triggers",
+	// impact
+	"impacts", "produces", "consumes",
+] as const;
 export type DependencyType = (typeof DEPENDENCY_TYPES)[number];
 
 export const TASK_STATUSES = ["open", "in_progress", "blocked", "done", "cancelled"] as const;
@@ -629,6 +657,7 @@ export interface EntityDependency {
 	readonly aspectId: string | null;
 	readonly dependencyType: DependencyType;
 	readonly strength: number;
+	readonly reason: string | null;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }

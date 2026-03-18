@@ -54,7 +54,9 @@ Signet sits between agents and models.
 
 Most AI memory systems store conversations — they save what was said and search it later. That works, but it gets noisier over time. More data doesn't mean better understanding.
 
-Signet takes a different approach. Instead of storing conversations, it extracts knowledge from them. The extraction [[pipeline]] runs in the background, continuously refining raw session data into structured understanding:
+Worse, most of them put the agent in charge. They give the LLM memory tools — "remember this," "recall that" — and trust the stateless reasoning engine to decide what's worth keeping. That's not memory. That's a filing cabinet the agent sometimes opens.
+
+Signet takes a fundamentally different approach. The agent is not in the loop. It doesn't call memory tools. It doesn't decide what to keep. A distillation engine runs outside the conversation, in the background, continuously refining raw session data into structured understanding:
 
 - **Sparse facts** — raw observations, unprocessed, high volume
 - **Observational facts** — extracted and validated, but not yet connected
@@ -74,18 +76,18 @@ Each entity has aspects (dimensions of what matters about it), attributes (speci
 
 When a session starts, the system doesn't search through thousands of memories looking for what's relevant. It identifies which entities matter for this session and walks the graph — loading aspects, attributes, constraints, and following dependencies. The result is a bounded, structured context that's deterministic and fast.
 
-This is the shift from search to traversal. Embedding search still exists for discovering things the graph hasn't connected yet, but the graph walk is the primary path.
+This is the shift from search to traversal — what we call [[docs/desire-paths|desire paths]]. Like the worn trails in a park that reveal where people actually walk, the graph learns which traversals are productive and reinforces them. Embedding search still exists for discovering things the graph hasn't connected yet, but the graph walk is the primary path. For the deterministic guarantees underneath, see [[docs/lcm-patterns|Lossless Context Patterns]].
 
 
 ## The Predictive Scorer
 
-Today, Signet uses a decay formula and keyword matching to decide which memories to surface. That's the baseline.
+A neural network, unique to each user, runs alongside the LLM at inference time. It's trained on your interaction patterns — which memories actually helped in past sessions, what time of day certain projects matter, which entity relationships are relevant to your current work. It predicts which context will be needed before the agent asks, before a prompt is submitted.
 
-What we're building toward is a predictive model — a small neural network unique to each user, trained on their own interaction patterns. It learns which memories actually helped in past sessions, what time of day certain projects matter, which aspects to prioritize, and which memories just took up space.
+The scorer already holds the highest relevance accuracy of any retrieval method in the system. Entity weights in the knowledge graph inform traversal, so the system doesn't just find text that looks similar — it walks the relationships that matter.
 
-The model runs locally. No cloud, no shared weights. It earns its influence by proving it outperforms the baseline in controlled comparisons. If it doesn't help, it gets rolled back automatically.
+Your weights never leave your machine. No cloud, no shared weights. With consent, anonymized training signals from across the community feed a shared base model that ships with every new install — so your agent starts smart on day one, then gets sharper for you specifically. Federated learning applied to agent memory. The training signal is first-order ground truth: the agent itself reporting what helped, on every prompt, accumulated across real sessions.
 
-This is what transforms Signet from a memory system into something closer to a mind — a system that doesn't just store what happened, but learns to predict what you'll need next.
+Nobody else has this data. The rest of the market is building better search. We're building a system that knows what you need before you search.
 
 
 ## Skills

@@ -17,11 +17,15 @@ And the difference matters.
 
 ## The Wrong Mental Model
 
-The current generation of AI memory tools mostly does the same thing: store conversations in a vector database, retrieve relevant chunks when prompted, and inject them back into context. Some do it well. Some add hosted [[dashboard|dashboards]] or cloud sync. But the underlying idea is the same — save what the AI said, search it later.
+The current generation of AI memory tools mostly does the same thing: give the agent memory tools — store, recall, search, reflect — and trust the LLM to decide what's worth remembering.
 
-That's useful. It's also not what we're building.
+Think about that. You're asking a stateless reasoning engine that forgets everything between sessions to manage its own memory. It's like asking someone with amnesia to maintain their own medical records.
 
-Signet doesn't store conversations. It doesn't compete with mem0 or supermemory or whatever the next hosted memory API is. Those tools answer the question "how do I give my AI a longer memory?" Signet answers a different question entirely.
+Some tools skip the tools and store conversations in a vector database instead, retrieving relevant chunks by cosine distance. Some add hosted [[dashboard|dashboards]] or cloud sync. But whether the approach is tool-based or retrieval-based, the underlying assumption is the same: memory is either a filing cabinet the agent opens, or a search engine the agent queries.
+
+Neither of those is memory. Memory is what you already know when you walk into the room.
+
+Signet doesn't give agents memory tools. It doesn't compete with mem0 or supermemory or whatever the next hosted memory API is. Those tools answer the question "how do I give my AI a longer memory?" Signet answers a different question entirely.
 
 ## The Actual Question
 
@@ -78,7 +82,9 @@ That's a different kind of product than a memory API.
 
 Most AI memory systems store what happened. Signet tries to learn what matters.
 
-The [[pipeline]] doesn't save your chat logs. It extracts knowledge from conversations — preferences, decisions, project context, relationships, tool usage patterns — and maintains that knowledge over time through decay, deduplication, and relevance scoring. If you want to understand how that extraction works at a deeper level, [[blog/knowledge-architecture|The Database Knows What You Did Last Summer]] walks through the full [[docs/knowledge-architecture|knowledge architecture]].
+The [[pipeline]] doesn't save your chat logs. It extracts knowledge from conversations — preferences, decisions, project context, relationships, tool usage patterns — and maintains that knowledge over time through a knowledge graph with [[docs/desire-paths|desire paths]] that learn which traversals are productive. Critically, the agent never participates in this process. The distillation engine runs after sessions end. The injection happens before the next prompt. The agent focuses on the work. Signet handles the rest.
+
+If you want to understand how extraction works at a deeper level, [[blog/knowledge-architecture|The Database Knows What You Did Last Summer]] walks through the full [[docs/knowledge-architecture|knowledge architecture]]. For the deterministic guarantees that protect knowledge during this process, see [[docs/lcm-patterns|Lossless Context Patterns]].
 
 The difference is subtle but significant.
 
@@ -86,7 +92,7 @@ Storing conversations gives you: "here's everything that was said."
 
 Maintaining knowledge gives you: "here's what the system actually learned."
 
-One grows unbounded and gets noisier over time. The other gets sharper. The [[pipeline]] prunes what's stale, reinforces what's confirmed, and surfaces what's relevant. Your agent doesn't just remember more — it understands better.
+One grows unbounded and gets noisier over time. The other gets sharper. A predictive model trained on your interaction patterns learns which memories actually help and injects them before you ask — not through search, but through graph traversal over entity relationships. Your agent doesn't just remember more — it understands better. And it gets better at understanding the longer you use it.
 
 ## What This Makes Possible
 
@@ -108,9 +114,9 @@ There's a line from our [[docs/vision|vision]] document that captures it:
 
 Memory systems give AI a longer recall window. Signet gives agents a persistent existence. The model handles reasoning. The surrounding system handles everything else — who the agent is, what it knows, what it's allowed to access, and how it evolves over time.
 
-LLMs are powerful reasoning engines. But they forget everything.
+LLMs are powerful reasoning engines. But they forget everything. And the solution is not to hand them a filing cabinet and call it memory. The solution is a system that handles memory the way memory actually works — ambient, automatic, already there when you need it. An architecture where the agent is not in the loop.
 
-Signet is the layer that remembers.
+Signet is the home directory for AI agents. The place where identity, knowledge, and skills persist between sessions, between platforms, between reboots.
 
 ---
 

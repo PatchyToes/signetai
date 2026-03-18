@@ -18,6 +18,8 @@ const CATALOG_PAGE_SIZE = 30;
 const CATALOG_MAX_PAGES = 10;
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 const TOOLS_TTL_MS = 30 * 1000;
+/** mcpservers.org locale prefix — shared across catalog listing, detail fetch, and homepage URLs. */
+const MCPSERVERS_LOCALE = "en";
 
 export type MarketplaceMcpTransport = "stdio" | "http";
 export type MarketplaceMcpCatalogSource = "mcpservers.org" | "modelcontextprotocol/servers" | "github";
@@ -495,13 +497,14 @@ function parseCatalogMarkdown(markdown: string, page: number): ParsedCatalogPage
 
 	const entries: MarketplaceMcpCatalogEntry[] = [];
 	const seen = new Set<string>();
-	const re = /\[([^\]]+)\]\((https:\/\/mcpservers\.org\/servers\/[^)]+)\)/g;
+	// Locale segment is intentionally loose ([a-z][a-z-]{1,9}) to cover BCP-47 codes (en, zh-cn, pt-br)
+	const re = /\[([^\]]+)\]\((https:\/\/mcpservers\.org\/(?:[a-z][a-z-]{1,9}\/)?servers\/[^)]+)\)/g;
 	let m: RegExpExecArray | null;
 
 	while ((m = re.exec(markdown)) !== null) {
 		const rawText = m[1].replace(/\s+/g, " ").trim();
 		const url = m[2].trim();
-		const catalogId = url.replace(/^https:\/\/mcpservers\.org\/servers\//, "");
+		const catalogId = url.replace(/^https:\/\/mcpservers\.org\/(?:[a-z][a-z-]{1,9}\/)?servers\//, "");
 		if (!catalogId || seen.has(catalogId)) continue;
 		seen.add(catalogId);
 
@@ -551,7 +554,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 	if (refStart >= 0) {
 		const refAfter = markdown.slice(refStart);
 		// Find earliest section boundary; empty filter → Math.min() → Infinity → use whole remainder
-		const boundaries = [refAfter.indexOf("### Archived"), refAfter.indexOf("## ", 1)].filter((i) => i > 0);
+		const boundaries = [refAfter.indexOf("\n### Archived"), refAfter.indexOf("\n## ", 1)].filter((i) => i > 0);
 		const refEnd = boundaries.length > 0 ? Math.min(...boundaries) : refAfter.length;
 		const refSection = refAfter.slice(0, refEnd);
 		const re = /^-\s+\*\*\[([^\]]+)\]\(src\/([^)]+)\)\*\*\s+-\s+(.+)$/gm;
@@ -584,7 +587,7 @@ export function parseReferenceServersMarkdown(markdown: string): MarketplaceMcpC
 	const tpStart = markdown.indexOf("## 🤝 Third-Party Servers");
 	if (tpStart >= 0) {
 		const tpAfter = markdown.slice(tpStart);
-		const nextSection = tpAfter.indexOf("## ", 1);
+		const nextSection = tpAfter.indexOf("\n## ", 1);
 		const tpSection = nextSection > 0 ? tpAfter.slice(0, nextSection) : tpAfter;
 		const re = /^-\s+(?:<img[^>]*>\s*)?\*\*\[([^\]]+)\]\((https?:\/\/[^)]+)\)\*\*\s+-\s+(.+)$/gm;
 		let m: RegExpExecArray | null;
@@ -646,7 +649,7 @@ async function fetchCatalogPage(page: number): Promise<ParsedCatalogPage> {
 		return cached.page;
 	}
 
-	const url = `https://r.jina.ai/http://mcpservers.org/all?page=${page}`;
+	const url = `https://r.jina.ai/http://mcpservers.org/${MCPSERVERS_LOCALE}/all?page=${page}`;
 	const res = await fetch(url, {
 		headers: { "User-Agent": "signet-daemon-marketplace" },
 		signal: AbortSignal.timeout(20_000),
@@ -813,7 +816,7 @@ function writeInstalledServers(servers: readonly InstalledMarketplaceMcpServer[]
 }
 
 async function fetchMcpServersOrgDetail(catalogId: string): Promise<DetailConfig> {
-	const url = `https://r.jina.ai/http://mcpservers.org/servers/${catalogId}`;
+	const url = `https://r.jina.ai/http://mcpservers.org/${MCPSERVERS_LOCALE}/servers/${catalogId}`;
 	const res = await fetch(url, {
 		headers: { "User-Agent": "signet-daemon-marketplace" },
 		signal: AbortSignal.timeout(25_000),
@@ -1337,7 +1340,7 @@ export function mountMarketplaceRoutes(app: Hono): void {
 				? `https://github.com/modelcontextprotocol/servers/tree/main/src/${catalogId}`
 				: selection.source === "github"
 					? `https://github.com/${catalogId}`
-					: `https://mcpservers.org/servers/${catalogId}`;
+					: `https://mcpservers.org/${MCPSERVERS_LOCALE}/servers/${catalogId}`;
 
 		const server: InstalledMarketplaceMcpServer = {
 			id,

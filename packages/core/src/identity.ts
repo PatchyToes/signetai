@@ -302,6 +302,46 @@ export function getMissingIdentityFiles(basePath: string): string[] {
 }
 
 /**
+ * Character budgets for static identity fallback, matching daemon inject budgets.
+ */
+const STATIC_BUDGETS: ReadonlyArray<{ file: string; header: string; budget: number }> = [
+	{ file: "AGENTS.md", header: "Agent Instructions", budget: 12_000 },
+	{ file: "SOUL.md", header: "Soul", budget: 4_000 },
+	{ file: "IDENTITY.md", header: "Identity", budget: 2_000 },
+	{ file: "USER.md", header: "About Your User", budget: 6_000 },
+	{ file: "MEMORY.md", header: "Working Memory", budget: 10_000 },
+];
+
+/**
+ * Read identity files directly from disk and compose a degraded inject string.
+ * Used as fallback when the daemon is unreachable during session-start.
+ *
+ * Returns null if no identity files exist.
+ */
+export function readStaticIdentity(agentsDir: string): string | null {
+	if (!existsSync(agentsDir)) return null;
+
+	const parts: string[] = [];
+
+	for (const { file, header, budget } of STATIC_BUDGETS) {
+		const path = join(agentsDir, file);
+		if (!existsSync(path)) continue;
+		try {
+			const raw = readFileSync(path, "utf-8").trim();
+			if (!raw) continue;
+			const content = raw.length <= budget ? raw : `${raw.slice(0, budget)}\n[truncated]`;
+			parts.push(`## ${header}\n\n${content}`);
+		} catch {
+			// skip unreadable files
+		}
+	}
+
+	if (parts.length === 0) return null;
+
+	return `[signet: daemon offline — running with static identity]\n\n${parts.join("\n\n")}`;
+}
+
+/**
  * Generate a summary of the identity for display
  */
 export function summarizeIdentity(identity: IdentityMap): string {

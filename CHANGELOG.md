@@ -2,334 +2,84 @@
 
 All notable changes to Signet are documented here.
 
-## [0.58.2] - 2026-03-16
+## [0.61.0] - 2026-03-18
 
 ### Features
 
-- pipeline defaults everything ON by default
-- tactile aluminum design system for dashboard
-- dynamic model registry and extraction strength controls
-- custom window decorations and UI scaling for Tauri desktop app
-- dashboard UI polish — readout panel design language
-- add `secret get` and `secret exec` CLI subcommands
-- implement LCM foundation patterns for memory pipeline
-- add user-prompt-submit hook to OpenCode plugin
-- **native**: add batch cosine similarity, KNN edges, axis normalization, and hybrid score merging
-- inject date/time metadata on every user-prompt-submit hook
-- **tray**: embed dashboard via frontendDist, complete Phase 1
-- **tray**: evolve system tray into full desktop application
-- **dashboard**: pinterest-inspired theme refresh
-- add per-session bypass toggle for hook suppression
-- **daemon**: add cross-agent messaging and ACP relay
-- **dashboard**: add Home tab as default landing page
-- **dashboard**: add Updates tab for roadmap and changelog
-- **dashboard**: add knowledge graph overlay to constellation view
-- **mcp**: register memory_feedback tool in MCP server
-- **predictor**: agent feedback, training telemetry, and theory tests
-- knowledge architecture KA-2 — two-pass structural assignment pipeline
-- knowledge architecture KA-1 — schema, types, and graph helpers
-- procedural memory P1 — skill_meta, enrichment, graph nodes, reconciler
-- comprehensive keyboard navigation for dashboard
-- **web**: add scroll-animated marketing lead capture page
+- **shadow**: Rust daemon shadow proxy — auto-install, request tap, divergence logging
+- **daemon-rs**: v0.59.0 parity — dep reason, 21 dep types, synthesis worker
+- **daemon-rs**: Rust daemon rewrite — full implementation
 
 ### Bug Fixes
 
-- add 'none' to synthesis provider validation + guard synthesis startup
-- respect extraction.provider=none in pipeline config (v0.58.2)
-- address review — clear stale notes, dev-mode catch log, DOMParser strip
-- address review — early return on missing version, catch, stale guard
-- upgrade banner persistence, changelog link, and mobile trigger overlap
-- apply readCapped to catalog and reference fetchers
-- cap README response size, fix third-party popularityRank
-- lift catalog Map to store, anchor avatar URL regex
-- refEnd boundary, SSRF hardening, documentation coverage
-- mobile rail layout, O(n) catalog scan, explicit avatar source match
-- tighten URL regex, strip markdown images, clear avatar errors
-- use SvelteSet for reactive avatar error tracking, improve error msg
-- add missing 'GitHub' label in secondary sort dropdown
-- skip non-GitHub third-party entries, reset avatarFailed on URL change
-- address review — github source filter, branch fallback, catalogId validation
-- complete "github" source support for third-party MCP servers
-- add "github" to MarketplaceMcpCatalogSource type system
-- address round-2 review — third-party source, sidebar offset, avatar cleanup
-- address PR review — ID collisions, section bounds, avatar namespaces
-- marketplace UI refresh — card consistency, MCP catalog, GitHub avatars
-- **dashboard**: restore sidebar closing speed after breakpoint regression
-- **daemon**: add session_summaries table guard to backfillSkippedSessions
-- resolve two CI build failures on main
-- restore left border on mobile mix cards in 1-column layout
-- remove mix-grid padding gap, add unstyled trigger prop
-- merge duplicate .timeline-mix-grid selector into single block
-- move mix-grid bottom border to container for robustness
-- remove duplicate --mobile-header-inset from light theme block
-- **daemon**: address round 4 review feedback
-- address review — timeline margin token, light theme inset, sidebar var
-- **daemon**: address round 3 review feedback
-- extract mobile header padding into --mobile-header-inset token
-- shrink mobile trigger, increase header padding to prevent tap overlap
-- **daemon**: harden chunked summarization edge cases
-- address pr-reviewer round-7 — effect cleanup, refresh throttle, dead export
-- **daemon**: chunked map-reduce summarization for long transcripts
-- add 3s timeout to execFileSync calls in detectGitBranch
-- **daemon**: address review feedback on transcript sanitization
-- use execFileSync to prevent shell injection in detectGitBranch
-- address round 3 review feedback on config migration
-- address round 2 review feedback
-- **cli**: surface spawn errors in startup.log diagnostic output
-- address PR review feedback on migration 030
-- make memory_jobs.memory_id nullable for document ingest jobs
-- address code review feedback on pipeline defaults
-- integer version comparison, correct label generation order
-- reactive registry fetch, clarify strength token label
-- remove :has() layout-shift coupling, prevent WebKit overflow-x
-- skip Ollama discovery when provider is not Ollama
-- apply markDeprecatedVersions to merged Ollama discovery results
-- scope mobile-only styles to prevent Tauri regressions
-- address round-6 review — seed deprecation, clear model on provider reset
-- mobile mix-card double border, trigger reduced-motion guard
-- restore banner desktop spacing, add mix-grid bottom border
-- address round-5 review — epoch guard, deprecation on fallback paths
-- typed mobileOnly prop, symmetric banner padding, mobile mix-card layout
-- address round-4 review — catch handler, strength priority, timeout floor
-- hide mobile trigger in Tauri desktop mode via isMobile guard
-- address remaining review regressions — trigger overlap, landscape, flex stretch
-- **migrations**: complete artifact declarations for v22 and v24
-- address round-3 review — refresh serialization, lease safety, deprecation
-- remove rounded-lg on zero-gap mix cards, add reduced-motion guard
-- address round-2 review — registry key resolution, null guard, error logging
-- address round-3 PR review feedback on timeline and trigger
-- address PR review feedback — maxTokens forwarding, Ollama URL, type safety
-- address round-2 PR review feedback on mobile trigger and timeline
-- address PR review feedback on sheet width and timeline overflow
-- dashboard UI improvements — mobile sidebar, banner spacing, and QOS
-- **migrations**: address round 9 Greptile feedback
-- auto-detect git sync branch instead of hardcoding "main"
-- **migrations**: address round 8 review feedback
-- **migrations**: replace hardcoded 26 with MIGRATIONS.length in all tests
-- **migrations**: address round 6 review feedback
-- **migrations**: address round 5 review feedback
-- **migrations**: address round 4 review feedback
-- **migrations**: address round 3 review feedback
-- **migrations**: address round 2 review feedback
-- **migrations**: address review feedback on PR #199
-- **migrations**: self-heal phantom migrations with artifact verification
-- **daemon**: harden ollama fallback max-context validation
-- **daemon**: remove hardcoded qwen fallback model
-- **daemon**: sanitize session transcripts and remove truncation
-- inline wheel modifier check and guard old index-based localStorage values
-- store scale value instead of index in localStorage for ui-scale
-- address CodeRabbit/Greptile round-2 feedback on WindowTitlebar
-- add aria-labels to zoom buttons and SSR guard localStorage writes
-- address CodeRabbit review feedback on window-decorations PR
-- add focus-visible styles to refresh and action buttons in SuggestedInsights
-- address greptile/coderabbit CSS regression from class rename
-- address greptile review feedback on SecretsTab
-- address coderabbit review feedback on dashboard UI PR
-- address greptile review feedback on dashboard UI PR
-- document overlap >= 3 threshold and add config ref entry
-- address review feedback on contradiction timeout PR
-- enable positional options on secret command to prevent CLI crash
-- make semantic contradiction timeout configurable
-- log patchLoadPaths outcome at setup time
-- remove double-logging of patchLoadPaths warnings at call site
-- guard scalar plugins.load values, widen ECONNREFUSED detection
-- distinguish timeout errors in secret exec with actionable message
-- send secret-get not-found message to stderr
-- filter load.paths entries, surface patchLoadPaths warnings, guard mkdirSync
-- retry install on missing cached package, preserve non-symlink extensions
-- validate secret names are valid POSIX env var identifiers
-- guard patchLoadPaths against legacy array plugins, surface rmSync errors
-- clarify --secret must precede command token in exec
-- expand ~ in OPENCLAW_STATE_DIR env vars and honor OPENCLAW_STATE_HOME
-- escape \$ in exec args to block command substitution injection
-- warn when resolveGlobalPackagePath returns undefined after install
-- switch to double-quoting for exec args to allow \$VAR expansion
-- address second greptile/coderabbit round
-- shell-escape exec args, use exitCode to avoid truncating output
-- address greptile review — yarn berry, dedup resolve, load.paths dir
-- passThroughOptions for exec, note streaming limitation
-- **daemon**: redact provider URLs and harden fallback bases
-- openclaw plugin discovery — symlink + load.paths fallback
-- variadic exec args, null exit code, document secrets map
-- address review — add ok check in secret get, extend exec timeout
-- **daemon**: align opencode endpoint wiring and fallback handling
-- **daemon**: harden loopback parsing and summary worker guards
-- **daemon**: normalize loopback fallbacks for provider probes
-- **daemon**: address PR review regressions and doc gaps
-- **daemon**: harden VPS runtime config and pipeline behavior
-- use date-versioned model IDs for sonnet/opus Anthropic aliases
-- add HTTP 504 to retryable status set for Anthropic provider
-- use SHA-256 fingerprint for provider cache key rotation detection
-- address Greptile review items for 5/5 confidence
-- use NonRetryableError for empty-response throw in callAnthropic
-- improve deadline-expiry diagnostics and warn on unknown kill signal
-- reset model to qwen3:4b on Ollama fallback in summary-worker
-- guard SIGTERM calls in timeout callbacks against already-exited processes
-- clear SIGKILL grace timer on process exit and clarify cache comment
-- replace brittle substring matching with NonRetryableError sentinel
-- tighten isRetryableStatus and add TTL to provider cache
-- cache summary-worker provider and harden spawnHidden kill signal
-- apply Promise.race timeout to codex provider
-- recompute deadline inside semaphore to account for contention
-- don't retry fatal 4xx Anthropic HTTP errors
-- guard Anthropic provider construction against missing API key
-- acquire semaphore per-attempt so backoff doesn't hold slots idle
-- wrap anthropic in semaphore, gate synthesis key lookup, use /v1/models for available()
-- address review feedback — model fallback, model IDs, available() auth, empty-response retry
-- address reviewer feedback on Anthropic provider and subprocess handling
-- replace node:child_process with Bun.spawn for reliable subprocess I/O
-- honour extractionModel flat key when no provider is set
-- eliminate double config load and cap requeue batch budget
-- remove stale flat-model leak and merge requeue into single tx
-- **pipeline**: pass memoryCfg to scoreContinuity, add maxTokens
-- **pipeline**: add .catch() guards to callClaude stream reads
-- **pipeline**: replace deleted LLM_TIMEOUT_MS with synthesis config
-- **pipeline**: pass maxTokens and timeout to summary LLM calls
-- **pipeline**: indent withSemaphore callback bodies
-- **pipeline**: remove unused now variable in summary requeue
-- **pipeline**: NaN deadlock guard, remove dead codex synthesis case
-- **pipeline**: semaphore env var edge case, summary uses synthesis config
-- **pipeline**: address bot review feedback on PR #180
-- **pipeline**: global concurrency limiter and summary job requeue (#181)
-- **pipeline**: address second round of PR #180 review comments
-- **pipeline**: address PR #180 review comments
-- **pipeline**: config resolution pairing, codex error capture, DAG upsert
-- **sdk,daemon**: address CodeRabbit critical and nitpick findings
-- **dag**: preserve row id on DAG write retry via ON CONFLICT DO UPDATE
-- **sdk**: strict typescript discipline - remove unsafe casts, add type guards, discriminated unions
-- **retention**: address coderabbit pass-5 findings
-- **lcm**: address coderabbit pass-4 findings
-- **retention**: add original_row_json for truly lossless cold archival
-- **lcm**: address greptile pass-2 findings
-- **sdk**: align sdk contracts with daemon responses
-- address Greptile review findings
-- address review feedback on prompt-submit hook
-- cap pendingInject map to prevent unbounded growth
-- match toCanonicalName() whitespace collapse in migration 027
-- **tray**: address PR #172 round 2 feedback
-- **native**: address Greptile review — epsilon parity and dead export TODO
-- resolve UNIQUE constraint crash in skill reconciler
-- **tray**: address PR #172 review feedback
-- **windows**: truncate embedding vectors before UMAP projection
-- **dashboard**: center PageBanner title on pages without side slots (#170)
-- **windows**: replace Bun.spawn with Node spawn for windowsHide support
-- **windows**: normalize path separators in memory file watcher
-- **dashboard**: address remaining PR #168 review comments
-- **dashboard**: Address third round of review findings
-- **dashboard**: Address second round of review findings
-- **dashboard**: Address Greptile and CodeRabbit review findings
-- **dashboard**: address Greptile review feedback
-- **openclaw**: resolve package.json merge conflict with main
-- **openclaw-adapter**: assert before_prompt_build hook priority
-- **openclaw**: address additional PR review feedback
-- **openclaw**: address PR review edge cases
-- **openclaw**: sync connector and adapter compatibility
-- **mcp**: flatten agent_message_send schema and clarify agent_peers description
-- resolve merge conflict and address final review notes
-- **daemon**: scope cross-agent SSE presence by project
-- error when --off used without session key
-- **daemon**: harden cross-agent prompt and routing safety
-- address reviewer feedback from CodeRabbit and Greptile
-- **daemon**: harden cross-agent auth and ACP relay
-- address PR feedback — TOCTOU guard and toast on toggle failure
-- **dashboard**: address PR review feedback on page shell decomposition
-- **release**: rebase before version bump, undraft before npm publish
-- **predictor**: address PR review feedback before merge
-- **predictor**: fix binary name, config fallback, and redirect guard
-- **predictor**: distribute binary, enable by default, fix traversal cache bug
-- **runtime**: ignore generated memory artifacts and rebuild core on start
-- **predictor**: harden sidecar status and dashboard hot paths
-- **dashboard**: fix broken predictor tab — double-portal, fetch mutex, config persistence
-- **dashboard**: rework project docs navigation
-- **upgrade**: harden upgrade path for total-recall merge
-- **embedding**: add warn logging for silent embedding failures
-- **provider**: track timeout flag in claude-code provider
-- **search**: sanitize FTS5 keyword queries to prevent syntax errors
-- **reconciler**: handle entities.name UNIQUE constraint collision
-- **config**: enforce minAspectWeight <= maxAspectWeight
-- **predictor**: add drift detection corrective actions and RFC 4180 CSV export
-- **predictor**: use 17-element feature vectors matching sidecar contract
-- **dashboard**: resolve 4 constellation view bugs from dogfood report
-- **dashboard**: budget hierarchy and dependency edges in constellation renderer
-- **knowledge-graph**: address three bugs found in review
-- **knowledge-graph**: prune entity bloat and fix hierarchy inversion
-- **hooks**: cap assistant term budget and preserve hyphenated identifiers
-- **hooks**: prevent recall query pollution from assistant messages and metadata
-- **hooks**: deduplicate session-start and prompt-submit token injection
-- **openclaw**: strip metadata JSON envelope from user messages
-- **build**: use hoisted linker for workspace symlink resolution
-- **pipeline**: decouple structural classification from new fact writes
-- **harness**: stop generating ~/.claude/CLAUDE.md (redundant with hook injection)
-- address PR #152 review comments — security, predictor, knowledge graph, diagnostics
-- **reconciler**: remove dead buildFrontmatterFingerprint call
-- **predictor**: wire agent feedback into training labels, guard EMA on predictor scores
-- **predictor**: address PR #152 review feedback — 3 logic bugs, 2 auth gaps, 2 style fixes
-- **predictor**: QA fixes — drift wiring, health penalties, error handling
-- **predictor**: implement observability + dashboard tab (Sprint 4)
-- **predictor**: implement session-end comparison + training trigger (Sprint 3)
-- **predictor**: implement daemon scoring integration (Sprint 1 + Sprint 2)
-- **knowledge**: implement ka-6 feedback loop
-- **knowledge**: implement ka-5 continuity and dashboard
-- **predictor**: record structural comparison signals
-- **daemon**: implement KA-3 traversal retrieval wiring
-- add missing agent_id scoping to knowledge-graph queries
-- remove duplicate handleGlobalKey in MarketplaceTab, SecretsTab ArrowLeft sidebar return
-- SettingsTab defaultPrevented guard + SecretsTab item ArrowUp sidebar return
-- address remaining Greptile review findings
-- address keyboard navigation review comments (wave 6)
-- MarketplaceTab filter nav broken, dead focusout, MemoryTab no-op Escape
-- ArrowLeft from any task in first column returns to sidebar
-- sort 1Password focus targets by data-focus-index
-- add missing Escape content→tabs transition for memory group
-- address fourth wave of keyboard navigation review comments
-- address third wave of keyboard navigation review comments
-- use closest for doc-card detection and listitem role for secret rows
-- address second wave of keyboard navigation review comments
-- address all keyboard navigation review comments
-- use %CD% instead of $(pwd) for Windows hook commands
-- **synthesis**: address Greptile follow-up feedback
-- address review feedback on windows-spawn-hide PR
-- **synthesis**: close shutdown lock races
-- **synthesis**: expose drain timeout status
-- **synthesis**: tighten shutdown lock handling
-- **synthesis**: harden shutdown and tests
-- **synthesis**: serialize legacy writes and drain shutdown
-- **windows**: prevent console window flashing from spawn calls
-- **codex**: address post-merge Greptile follow-ups (#153)
+- **ci**: use openssl for sha256 — portable across linux/macos/windows runners
+- **shadow**: address PR review feedback
+- **daemon-rs**: address round-3 review feedback
+- **daemon-rs**: address round-2 review feedback
+- **daemon-rs**: address code review feedback
 
-### Performance
 
-- replace polling with onResized event listener in WindowTitlebar
+## [0.60.1] - 2026-03-18
 
-### Refactoring
+### Features
 
-- extract shared card utils, tighten github validation, add docs
-- **dashboard**: decompose +page.svelte into focused layout components
-- **dashboard**: unify settings and config into single page
+- **memory**: add openrouter provider for extraction and synthesis
 
-### Docs
+### Bug Fixes
 
-- add dashboard and constellation screenshots to README
-- refactor AGENTS.md into behavioral contract with backlinks
-- add desire paths epic with 15 stories across 5 phases
-- update RESEARCH-LCM-ACP.md frontmatter
-- add GitNexus pattern analysis and integrate into architecture docs
-- research docs, LCM patterns spec, ACP integration vision, README rewrite
-- add PR screenshots for theme refresh
-- add bypass toggle to API, CLI, hooks, MCP, and dashboard docs
-- add bypass toggle to API endpoints, env vars, and CLI docs
-- delete duplicates
-- add frontmatter to docs missing metadata
-- add Desire Paths concept spec for graph-native retrieval
-- address review feedback on specs, dashboard, and vision
-- add Figma MCP integration rules to AGENTS.md
-- full overhaul for total-recall branch
-- testing philosophy and research paper outline
-- KA-3 through KA-6 sprint briefs and exploration philosophy
-- KA-2 sprint brief with two-pass structural assignment architecture
-- update KA spec for agent_id scoping, add KA-1 sprint brief
-- add frontmatter to IDEAL-SIGNET.md
-- **synthesis**: document drain() precondition on SynthesisWorkerHandle
+- **memory**: address openrouter review feedback
+
+
+## [0.60.0] - 2026-03-18
+
+### Bug Fixes
+
+- vec_embeddings backfill race — use direct LEFT JOIN instead of count comparison
+
+
+## [0.59.0] - 2026-03-18
+
+### Features
+
+- website-dashboard visual convergence — tokens, textures, fonts, and copy
+- add NemoClaw ecosystem positioning blog post, refine all existing content
+
+### Bug Fixes
+
+- eliminate budget duplication, fix CLI JSON shape (PR review)
+- fall back to static identity files when daemon is unreachable (#219)
+
+
+## [0.58.3] - 2026-03-17
+
+### Features
+
+- add dependency reason field and cross-entity synthesis worker
+- expand knowledge graph dependency types from 5 to 18
+
+### Bug Fixes
+
+- drain in-flight tick on stop, use display names in existing targets, add dst.agent_id
+- add agent_id to markSynthesized, only mark when upserts succeed
+- use ISO timestamps in markSynthesized, add tick-in-progress guard
+- use canonical_name in loadExistingTargets for consistent normalization
+- two-pass string-aware extractBalancedJsonArray, document assumptions
+- forward-scan extractBalancedJsonArray, document atomicity, relax test assertion
+- add agent_id scoping and use config batch size in synthesis worker
+- address pr-reviewer feedback on dependency extraction
+- improve extraction resilience for flaky model output
+- atomic upserts, retry on failure, type descriptions in prompt
+- guard upsert pair with try/catch, cap aspect name length
+- derive prompt types from DEPENDENCY_TYPES, thread aspectId
+
+
+## [0.58.2] - 2026-03-16
+
+### Bug Fixes
+
+- address round-2 review — shared locale constant, anchored boundaries, regex docs
+- address review — widen locale regex, use locale-prefixed detail URLs
+- MCP catalog parser — third-party section boundary and mcpservers.org locale
 
 
 ## [0.58.1] - 2026-03-15

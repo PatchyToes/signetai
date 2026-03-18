@@ -5,8 +5,10 @@
  */
 
 import { spawn, spawnSync } from "child_process";
+import { createHash } from "crypto";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	copyFileSync,
 	existsSync,
@@ -19,6 +21,7 @@ import {
 	rmSync,
 	statSync,
 	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { homedir, platform } from "os";
@@ -53,6 +56,7 @@ import {
 	resolvePrimaryPackageManager,
 	runMigrations,
 	symlinkSkills,
+	readStaticIdentity,
 	unifySkills,
 } from "@signet/core";
 import chalk from "chalk";
@@ -376,9 +380,84 @@ async function getDaemonStatus(): Promise<{
 	return { running: false, pid: null, uptime: null, version: null };
 }
 
+async function downloadDaemonBinary(): Promise<void> {
+	let version: string | undefined;
+	try {
+		const raw = readFileSync(join(__dirname, "..", "package.json"), "utf8");
+		version = (JSON.parse(raw) as { version?: string }).version;
+	} catch {
+		return;
+	}
+	if (!version) return;
+
+	const plat = process.platform;
+	const arch = process.arch;
+	const supported = new Set(["linux:x64", "darwin:x64", "darwin:arm64", "win32:x64"]);
+	if (!supported.has(`${plat}:${arch}`)) return;
+
+	const ext = plat === "win32" ? ".exe" : "";
+	const name = `signet-daemon-${plat}-${arch}${ext}`;
+	const binDir = join(__dirname, "..", "bin");
+	const dest = join(binDir, name);
+	if (existsSync(dest)) return;
+
+	const base = `https://github.com/Signet-AI/signetai/releases/download/v${version}`;
+	process.stdout.write(`  Downloading Rust daemon binary (${name})...`);
+
+	try {
+		// Fetch checksum first — abort if unavailable so we don't run an unverified binary
+		const checksumRes = await fetch(`${base}/${name}.sha256`, {
+			redirect: "follow",
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!checksumRes.ok) {
+			process.stdout.write(` skipped (checksum unavailable: ${checksumRes.status})\n`);
+			return;
+		}
+		const expectedHash = (await checksumRes.text()).trim().split(/\s+/)[0];
+
+		const res = await fetch(`${base}/${name}`, { redirect: "follow", signal: AbortSignal.timeout(30_000) });
+		if (!res.ok) {
+			process.stdout.write(` skipped (${res.status})\n`);
+			return;
+		}
+		mkdirSync(binDir, { recursive: true });
+		const bytes = await res.arrayBuffer();
+		const buf = Buffer.from(bytes);
+
+		// Verify integrity before writing to disk
+		const actual = createHash("sha256").update(buf).digest("hex");
+		if (actual !== expectedHash) {
+			process.stdout.write(` skipped (checksum mismatch — possible tampering)\n`);
+			return;
+		}
+
+		writeFileSync(dest, buf);
+		if (plat !== "win32") chmodSync(dest, 0o755);
+		process.stdout.write(` done\n`);
+	} catch {
+		process.stdout.write(` skipped (download failed)\n`);
+		try {
+			unlinkSync(dest);
+		} catch {}
+	}
+}
+
 async function startDaemon(agentsDir: string = AGENTS_DIR): Promise<boolean> {
 	if (await isDaemonRunning()) {
 		return true;
+	}
+
+	// Download Rust shadow daemon binary if shadow mode is configured
+	try {
+		const raw = parseSimpleYaml(readFileSync(join(agentsDir, "agent.yaml"), "utf8"));
+		const mem = raw?.memory as Record<string, unknown> | undefined;
+		const p2 = mem?.pipelineV2 as Record<string, unknown> | undefined;
+		if (p2?.nativeShadowEnabled === true) {
+			await downloadDaemonBinary();
+		}
+	} catch {
+		// non-fatal — agent.yaml may not exist yet
 	}
 
 	const daemonDir = join(agentsDir, ".daemon");
@@ -960,7 +1039,13 @@ function formatDetectionSummary(detection: SetupDetection): string {
 
 type HarnessChoice = "claude-code" | "opencode" | "openclaw" | "codex";
 type EmbeddingProviderChoice = "native" | "ollama" | "openai" | "none";
-type ExtractionProviderChoice = "claude-code" | "ollama" | "opencode" | "codex" | "none";
+type ExtractionProviderChoice =
+	| "claude-code"
+	| "ollama"
+	| "opencode"
+	| "codex"
+	| "openrouter"
+	| "none";
 type OpenClawRuntimeChoice = "plugin" | "legacy";
 
 interface SetupWizardOptions {
@@ -982,7 +1067,7 @@ interface SetupWizardOptions {
 
 const SETUP_HARNESS_CHOICES: readonly HarnessChoice[] = ["claude-code", "opencode", "openclaw", "codex"];
 const EMBEDDING_PROVIDER_CHOICES: readonly EmbeddingProviderChoice[] = ["native", "ollama", "openai", "none"];
-const EXTRACTION_PROVIDER_CHOICES: readonly ExtractionProviderChoice[] = ["claude-code", "ollama", "opencode", "codex", "none"];
+const EXTRACTION_PROVIDER_CHOICES: readonly ExtractionProviderChoice[] = ["claude-code", "ollama", "opencode", "codex", "openrouter", "none"];
 const OPENCLAW_RUNTIME_CHOICES: readonly OpenClawRuntimeChoice[] = ["plugin", "legacy"];
 
 function collectListOption(value: string, previous: string[]): string[] {
@@ -1877,6 +1962,8 @@ async function existingSetupWizard(
 								? "gpt-5.3-codex"
 							: options.extractionProvider === "opencode"
 								? "anthropic/claude-haiku-4-5-20251001"
+							: options.extractionProvider === "openrouter"
+								? "openai/gpt-4o-mini"
 								: "glm-4.7-flash"),
 				},
 				semanticContradictionEnabled: true,
@@ -2245,7 +2332,7 @@ async function setupWizard(options: SetupWizardOptions) {
 				);
 			}
 			if (!migrationExtractionProvider) {
-				failNonInteractiveSetup("Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, or none).");
+				failNonInteractiveSetup("Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, openrouter, or none).");
 			}
 
 			await existingSetupWizard(basePath, existing, existingConfig, {
@@ -2436,7 +2523,7 @@ async function setupWizard(options: SetupWizardOptions) {
 	}
 
 	if (nonInteractive && !requestedExtractionProvider) {
-		failNonInteractiveSetup("Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, or none).");
+		failNonInteractiveSetup("Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, openrouter, or none).");
 	}
 
 	let embeddingProvider: EmbeddingProviderChoice;
@@ -2534,6 +2621,8 @@ async function setupWizard(options: SetupWizardOptions) {
 			? "codex"
 			: hasCommand("opencode")
 				? "opencode"
+				: !!normalizeStringValue(process.env.OPENROUTER_API_KEY)
+					? "openrouter"
 				: hasCommand("ollama")
 					? "ollama"
 					: "none";
@@ -2559,6 +2648,10 @@ async function setupWizard(options: SetupWizardOptions) {
 			{
 				value: "opencode" as const,
 				name: `OpenCode (uses the OpenCode CLI or local server)${detectedProvider === "opencode" ? " — detected" : ""}`,
+			},
+			{
+				value: "openrouter" as const,
+				name: `OpenRouter (cloud API, requires OPENROUTER_API_KEY)${detectedProvider === "openrouter" ? " — detected" : ""}`,
 			},
 			{
 				value: "ollama" as const,
@@ -2629,6 +2722,36 @@ async function setupWizard(options: SetupWizardOptions) {
 					{
 						value: "google/gemini-2.5-flash",
 						name: "Gemini 2.5 Flash (fast, multimodal)",
+					},
+				],
+			})) as string;
+		}
+	} else if (extractionProvider === "openrouter") {
+		if (nonInteractive) {
+			extractionModel =
+				normalizeStringValue(options.extractionModel) ||
+				normalizeStringValue(existingMemory.pipelineV2?.extractionModel) ||
+				"openai/gpt-4o-mini";
+		} else {
+			console.log();
+			extractionModel = (await select({
+				message: "Which OpenRouter model for extraction? (provider/model format)",
+				choices: [
+					{
+						value: "openai/gpt-4o-mini",
+						name: "openai/gpt-4o-mini (fast, recommended)",
+					},
+					{
+						value: "openai/gpt-4o",
+						name: "openai/gpt-4o (higher quality)",
+					},
+					{
+						value: "anthropic/claude-sonnet-4-6",
+						name: "anthropic/claude-sonnet-4-6 (high quality)",
+					},
+					{
+						value: "google/gemini-2.5-flash",
+						name: "google/gemini-2.5-flash (balanced)",
 					},
 				],
 			})) as string;
@@ -3545,7 +3668,7 @@ program
 	)
 	.option("--embedding-provider <provider>", "Embedding provider in non-interactive mode (ollama, openai, none)")
 	.option("--embedding-model <model>", "Embedding model in non-interactive mode")
-	.option("--extraction-provider <provider>", "Extraction provider in non-interactive mode (claude-code, codex, ollama, opencode, none)")
+	.option("--extraction-provider <provider>", "Extraction provider in non-interactive mode (claude-code, codex, ollama, opencode, openrouter, none)")
 	.option("--extraction-model <model>", "Extraction model in non-interactive mode")
 	.option("--search-balance <alpha>", "Search balance alpha in non-interactive mode (0-1)")
 	.option("--openclaw-runtime-path <mode>", "OpenClaw runtime path in non-interactive mode (plugin, legacy)")
@@ -5325,7 +5448,17 @@ hookCmd
 		});
 
 		if (!data) {
-			process.stderr.write("[signet] daemon not running, hook skipped\n");
+			const fallback = readStaticIdentity(AGENTS_DIR);
+			if (fallback) {
+				process.stderr.write("[signet] daemon offline — using static identity\n");
+				if (options.json) {
+					console.log(JSON.stringify({ inject: fallback, identity: { name: "signet" }, memories: [] }));
+				} else {
+					console.log(fallback);
+				}
+			} else {
+				process.stderr.write("[signet] daemon not running, no identity files found\n");
+			}
 			process.exit(0);
 		}
 

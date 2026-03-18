@@ -153,6 +153,12 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 - Update checker
 
 **@signet/daemon** - Background service
+
+> **Rust parity rule**: `packages/daemon-rs/` is a shadow rewrite of this package.
+> Any behavioral change made to `@signet/daemon` must also be reflected in `packages/daemon-rs/`.
+> The shadow proxy (`shadowEnabled: true` in agent.yaml) runs both in parallel and logs divergences
+> to `~/.agents/.daemon/logs/shadow-divergences.jsonl`.
+
 - Hono HTTP server on port 3850
 - File watching with debounced sync
 - Auto-commit on config changes

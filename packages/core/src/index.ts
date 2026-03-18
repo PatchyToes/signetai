@@ -139,6 +139,7 @@ export {
 	hasValidIdentity,
 	getMissingIdentityFiles,
 	summarizeIdentity,
+	readStaticIdentity,
 } from "./identity";
 export type {
 	IdentityFileSpec,

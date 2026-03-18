@@ -11,7 +11,10 @@
  * ```
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
+import { readStaticIdentity } from "@signet/core";
 import { createDaemonClient } from "./daemon-client.js";
 import { createTools } from "./tools.js";
 import {
@@ -74,6 +77,18 @@ function readRuntimeEnv(name: string): string | undefined {
 }
 
 // ============================================================================
+// Static identity fallback when daemon is unreachable
+// ============================================================================
+
+// Thin wrapper: uses readRuntimeEnv for safe env access (OpenCode may run in
+// non-standard runtimes where process.env is not directly accessible), then
+// delegates all file reading and budget logic to @signet/core.
+function staticFallback(): string {
+	const dir = readRuntimeEnv("SIGNET_PATH") ?? join(homedir(), ".agents");
+	return readStaticIdentity(dir) ?? "";
+}
+
+// ============================================================================
 // Plugin
 // ============================================================================
 
@@ -101,7 +116,8 @@ export const SignetPlugin: Plugin = async ({ directory }) => {
 		);
 		sessionContext = result?.inject ?? result?.recentContext ?? "";
 	} catch {
-		// daemon not running — continue without memory context
+		// daemon not running — fall back to static identity files
+		sessionContext = staticFallback();
 	}
 
 	return {

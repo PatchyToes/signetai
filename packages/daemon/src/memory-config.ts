@@ -31,6 +31,7 @@ export type { PipelineFlag, PipelineV2Config };
 export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 	enabled: true,
 	shadowMode: false,
+	nativeShadowEnabled: false,
 	mutationsFrozen: false,
 	semanticContradictionEnabled: true,
 	semanticContradictionTimeoutMs: 45000,
@@ -145,6 +146,10 @@ export const DEFAULT_PIPELINE_V2: PipelineV2Config = {
 		classifyBatchSize: 8,
 		dependencyBatchSize: 5,
 		pollIntervalMs: 10000,
+		synthesisEnabled: true,
+		synthesisIntervalMs: 60_000,
+		synthesisTopEntities: 20,
+		synthesisMaxFacts: 10,
 	},
 	feedback: {
 		enabled: true,
@@ -269,10 +274,15 @@ export function loadPipelineConfig(
 	const flatProvider = raw.extractionProvider;
 	const flatModel = raw.extractionModel;
 
-	type ProviderKind = "ollama" | "claude-code" | "opencode" | "codex" | "anthropic" | "none";
+	type ProviderKind =
+		| "ollama"
+		| "claude-code"
+		| "opencode"
+		| "codex"
+		| "anthropic"
+		| "openrouter";
 	const VALID_PROVIDERS: ReadonlySet<string> = new Set<ProviderKind>([
-		"none",
-		"codex", "opencode", "claude-code", "ollama", "anthropic",
+		"codex", "opencode", "claude-code", "ollama", "anthropic", "openrouter",
 	]);
 
 	function isValidProvider(v: unknown): v is ProviderKind {
@@ -303,6 +313,7 @@ export function loadPipelineConfig(
 	return {
 		enabled: typeof raw.enabled === "boolean" ? raw.enabled : d.enabled,
 		shadowMode: typeof raw.shadowMode === "boolean" ? raw.shadowMode : d.shadowMode,
+		nativeShadowEnabled: typeof raw.nativeShadowEnabled === "boolean" ? raw.nativeShadowEnabled : d.nativeShadowEnabled,
 		mutationsFrozen:
 			typeof raw.mutationsFrozen === "boolean" ? raw.mutationsFrozen : d.mutationsFrozen,
 		semanticContradictionEnabled:
@@ -677,7 +688,15 @@ export function loadPipelineConfig(
 			enabled: resolveBool(synthesisRaw?.enabled, undefined, d.synthesis.enabled),
 			provider: (() => {
 				const p = synthesisRaw?.provider;
-				if (p === "none" || p === "ollama" || p === "claude-code" || p === "opencode" || p === "anthropic") return p;
+				if (
+					p === "ollama" ||
+					p === "claude-code" ||
+					p === "opencode" ||
+					p === "anthropic" ||
+					p === "openrouter"
+				) {
+					return p;
+				}
 				return d.synthesis.provider;
 			})(),
 			model:
@@ -760,6 +779,27 @@ export function loadPipelineConfig(
 				2000,
 				120000,
 				d.structural.pollIntervalMs,
+			),
+			synthesisEnabled: resolveBool(
+				structuralRaw?.synthesisEnabled, undefined, d.structural.synthesisEnabled,
+			),
+			synthesisIntervalMs: clampPositive(
+				structuralRaw?.synthesisIntervalMs,
+				10000,
+				600000,
+				d.structural.synthesisIntervalMs,
+			),
+			synthesisTopEntities: clampPositive(
+				structuralRaw?.synthesisTopEntities,
+				5,
+				100,
+				d.structural.synthesisTopEntities,
+			),
+			synthesisMaxFacts: clampPositive(
+				structuralRaw?.synthesisMaxFacts,
+				3,
+				50,
+				d.structural.synthesisMaxFacts,
 			),
 		},
 

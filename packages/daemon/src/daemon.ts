@@ -5,7 +5,8 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { execFileSync, spawn } from "child_process";
+import { type ChildProcess, execFileSync, spawn } from "child_process";
+import { copyFileSync } from "fs";
 import { createHash } from "crypto";
 import {
 	appendFileSync,
@@ -146,6 +147,7 @@ import {
 	createCodexProvider,
 	createOllamaProvider,
 	createOpenCodeProvider,
+	createOpenRouterProvider,
 	ensureOpenCodeServer,
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	stopOpenCodeServer,
@@ -284,6 +286,11 @@ function resolveRegistryOllamaBaseUrl(provider: string, endpoint: string | undef
 	return normalizeRuntimeBaseUrl(endpoint, "http://127.0.0.1:11434");
 }
 
+function resolveRegistryOpenRouterBaseUrl(provider: string, endpoint: string | undefined): string | undefined {
+	if (provider !== "openrouter") return undefined;
+	return normalizeRuntimeBaseUrl(endpoint, "https://openrouter.ai/api/v1");
+}
+
 function isManagedOpenCodeLocalEndpoint(baseUrl: string): boolean {
 	try {
 		const parsed = new URL(baseUrl);
@@ -357,6 +364,7 @@ const repairLimiter = createRateLimiter();
 let telemetryRef: TelemetryCollector | undefined;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
 let predictorClientRef: PredictorClient | null = null;
+let shadowProcess: ChildProcess | null = null;
 let skillReconcilerHandle: ReconcilerHandle | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -424,6 +432,66 @@ function getCachedDiagnosticsReport(): DiagnosticsReport {
 		expiresAt: now + DIAGNOSTICS_CACHE_TTL_MS,
 	};
 	return report;
+}
+
+// ---------------------------------------------------------------------------
+// Shadow daemon helpers
+// ---------------------------------------------------------------------------
+
+function resolveDaemonBinary(): string | null {
+	const ext = process.platform === "win32" ? ".exe" : "";
+	const arch = process.arch;
+	const plat = process.platform;
+	// 1. dev build paths
+	const monoRoot = join(import.meta.dir, "..", "..", "..");
+	const devPaths = [
+		join(monoRoot, "packages", "daemon-rs", "target", "release", `signet-daemon${ext}`),
+		join(monoRoot, "packages", "daemon-rs", "target", "debug", `signet-daemon${ext}`),
+		join(process.cwd(), "packages", "daemon-rs", "target", "release", `signet-daemon${ext}`),
+	];
+	for (const p of devPaths) {
+		if (existsSync(p)) return p;
+	}
+	// 2. npm install location (bin/ dir alongside this package)
+	const name = `signet-daemon-${plat}-${arch}${ext}`;
+	const npmPath = join(import.meta.dir, "..", "bin", name);
+	if (existsSync(npmPath)) return npmPath;
+	return null;
+}
+
+function setupShadowDb(agentsDir: string): string {
+	const shadowRoot = join(agentsDir, ".shadow");
+	const shadowMemDir = join(shadowRoot, "memory");
+	mkdirSync(shadowMemDir, { recursive: true });
+
+	const mainDb = join(agentsDir, "memory", "memories.db");
+	const shadowDb = join(shadowMemDir, "memories.db");
+	const stale =
+		!existsSync(shadowDb) ||
+		Date.now() - statSync(shadowDb).mtimeMs > 24 * 60 * 60 * 1000;
+	if (stale && existsSync(mainDb)) {
+		// Copy WAL and SHM alongside the main DB so the shadow starts from a
+		// consistent snapshot — without them it may see uncheckpointed pages as missing.
+		copyFileSync(mainDb, shadowDb);
+		for (const ext of ["-wal", "-shm"]) {
+			const src = mainDb + ext;
+			if (existsSync(src)) copyFileSync(src, shadowDb + ext);
+		}
+		logger.info("shadow", "Shadow DB refreshed");
+	}
+
+	// Copy agent.yaml so the shadow daemon uses real config (auth, pipeline flags, etc.)
+	// rather than built-in defaults.
+	const mainCfg = join(agentsDir, "agent.yaml");
+	const shadowCfg = join(shadowRoot, "agent.yaml");
+	if (existsSync(mainCfg)) copyFileSync(mainCfg, shadowCfg);
+
+	return shadowRoot;
+}
+
+function appendDivergence(agentsDir: string, entry: Record<string, unknown>) {
+	const logPath = join(agentsDir, ".daemon", "logs", "shadow-divergences.jsonl");
+	appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
 }
 
 /**
@@ -1162,6 +1230,43 @@ app.use("*", async (c, next) => {
 	} else if (p.includes("/modify") || p.includes("/forget") || p.includes("/recover")) {
 		analyticsCollector.recordLatency("mutate", duration);
 	}
+});
+
+// Shadow request tap — fire-and-forget replay to Rust daemon on :3851
+app.use("*", async (c, next) => {
+	// Read body before next() — route handlers consume the stream; Hono caches
+	// the result but only after the first read. Pre-reading here ensures mutating
+	// replays carry the correct payload.
+	const method = c.req.method;
+	const bodyP = ["POST", "PUT", "PATCH"].includes(method)
+		? c.req.text().catch(() => undefined)
+		: Promise.resolve(undefined);
+	await next();
+	if (!shadowProcess) return;
+	const reqPath = c.req.path;
+	const search = new URL(c.req.url).search;
+	const primaryStatus = c.res.status;
+	bodyP
+		.then((rawBody) =>
+			fetch(`http://localhost:3851${reqPath}${search}`, {
+				method,
+				headers: Object.fromEntries(c.req.raw.headers),
+				body: rawBody,
+				signal: AbortSignal.timeout(5000),
+			}),
+		)
+		.then((shadow) => {
+			if (primaryStatus !== shadow.status) {
+				appendDivergence(AGENTS_DIR, {
+					path: reqPath,
+					method,
+					primaryStatus,
+					shadowStatus: shadow.status,
+				});
+			}
+			return shadow.body?.cancel();
+		})
+		.catch(() => {});
 });
 
 // Health check
@@ -6670,9 +6775,20 @@ app.post("/api/pipeline/models/refresh", async (c) => {
 			anthropicKey = await getSecret("ANTHROPIC_API_KEY") ?? undefined;
 		} catch { /* ignore */ }
 	}
+	let openRouterKey: string | undefined = process.env.OPENROUTER_API_KEY;
+	if (!openRouterKey) {
+		try {
+			openRouterKey = await getSecret("OPENROUTER_API_KEY") ?? undefined;
+		} catch { /* ignore */ }
+	}
 	await refreshRegistry(
 		resolveRegistryOllamaBaseUrl(cfg.pipelineV2.extraction.provider, cfg.pipelineV2.extraction.endpoint),
 		anthropicKey,
+		openRouterKey,
+		resolveRegistryOpenRouterBaseUrl(
+			cfg.pipelineV2.extraction.provider,
+			cfg.pipelineV2.extraction.endpoint,
+		),
 	);
 	return c.json({
 		models: getModelsByProvider(),
@@ -9202,6 +9318,16 @@ async function cleanup() {
 		skillReconcilerHandle = null;
 	}
 
+	// Kill shadow daemon if running
+	if (shadowProcess) {
+		try {
+			shadowProcess.kill();
+		} catch {
+			// best-effort
+		}
+		shadowProcess = null;
+	}
+
 	// Stop predictor sidecar before pipeline/DB teardown
 	if (predictorClientRef) {
 		try {
@@ -9357,12 +9483,14 @@ async function main() {
 		"opencode",
 		"codex",
 		"anthropic",
+		"openrouter",
 	]);
 	const validSynthesisProviders = new Set([
 		"ollama",
 		"claude-code",
 		"opencode",
 		"anthropic",
+		"openrouter",
 	]);
 
 	providerRuntimeResolution.extraction = {
@@ -9406,6 +9534,10 @@ async function main() {
 	const extractionOpenCodeBaseUrl = normalizeRuntimeBaseUrl(
 		memoryCfg.pipelineV2.extraction.endpoint,
 		"http://127.0.0.1:4096",
+	);
+	const extractionOpenRouterBaseUrl = normalizeRuntimeBaseUrl(
+		memoryCfg.pipelineV2.extraction.endpoint,
+		"https://openrouter.ai/api/v1",
 	);
 	const ollamaFallbackMaxContextTokens =
 		resolveDefaultOllamaFallbackMaxContextTokens();
@@ -9463,23 +9595,52 @@ async function main() {
 			effectiveExtractionProvider = "ollama";
 		}
 	}
+	const keyCache = new Map<"ANTHROPIC_API_KEY" | "OPENROUTER_API_KEY", string | undefined>();
+	const getKey = async (name: "ANTHROPIC_API_KEY" | "OPENROUTER_API_KEY"): Promise<string | undefined> => {
+		if (keyCache.has(name)) return keyCache.get(name);
+		let key = process.env[name];
+		if (!key) {
+			try {
+				key = await getSecret(name) ?? undefined;
+			} catch {
+				logger.warn("config", `Failed to resolve ${name} from secrets store`);
+			}
+		}
+		keyCache.set(name, key);
+		return key;
+	};
+
 	// Resolve Anthropic API key once — shared by extraction and synthesis
 	let anthropicApiKey: string | undefined;
 	const needsAnthropicForSynthesis =
 		memoryCfg.pipelineV2.synthesis.enabled &&
 		memoryCfg.pipelineV2.synthesis.provider === "anthropic";
 	if (effectiveExtractionProvider === "anthropic" || needsAnthropicForSynthesis) {
-		anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-		if (!anthropicApiKey) {
-			try {
-				anthropicApiKey = await getSecret("ANTHROPIC_API_KEY") ?? undefined;
-			} catch {
-				logger.warn("config", "Failed to resolve ANTHROPIC_API_KEY from secrets store");
-			}
-		}
+		anthropicApiKey = await getKey("ANTHROPIC_API_KEY");
 		if (!anthropicApiKey) {
 			logger.error("config", "ANTHROPIC_API_KEY not found — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`");
 			if (effectiveExtractionProvider === "anthropic") {
+				effectiveExtractionProvider = "ollama";
+			}
+		}
+	}
+
+	// Resolve OpenRouter API key once — shared by extraction and synthesis
+	let openRouterApiKey: string | undefined;
+	const needsOpenRouterForSynthesis =
+		memoryCfg.pipelineV2.synthesis.enabled &&
+		memoryCfg.pipelineV2.synthesis.provider === "openrouter";
+	if (
+		effectiveExtractionProvider === "openrouter" ||
+		needsOpenRouterForSynthesis
+	) {
+		openRouterApiKey = await getKey("OPENROUTER_API_KEY");
+		if (!openRouterApiKey) {
+			logger.error(
+				"config",
+				"OPENROUTER_API_KEY not found — falling back to ollama. Set via env or `signet secrets set OPENROUTER_API_KEY`",
+			);
+			if (effectiveExtractionProvider === "openrouter") {
 				effectiveExtractionProvider = "ollama";
 			}
 		}
@@ -9515,6 +9676,8 @@ async function main() {
 				? extractionOllamaFallbackBaseUrl
 				: effectiveExtractionProvider === "opencode"
 					? extractionOpenCodeBaseUrl
+					: effectiveExtractionProvider === "openrouter"
+						? extractionOpenRouterBaseUrl
 					: undefined,
 		),
 	});
@@ -9528,6 +9691,15 @@ async function main() {
 					apiKey: anthropicApiKey,
 					defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 				})
+			: effectiveExtractionProvider === "openrouter" && openRouterApiKey
+				? createOpenRouterProvider({
+						model: effectiveExtractionModel || "openai/gpt-4o-mini",
+						apiKey: openRouterApiKey,
+						baseUrl: extractionOpenRouterBaseUrl,
+						referer: readEnvTrimmed("OPENROUTER_HTTP_REFERER"),
+						title: readEnvTrimmed("OPENROUTER_TITLE"),
+						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+					})
 			: effectiveExtractionProvider === "opencode"
 				? createOpenCodeProvider({
 						model: effectiveExtractionModel || "anthropic/claude-haiku-4-5-20251001",
@@ -9564,21 +9736,17 @@ async function main() {
 
 	// Initialize model registry for dynamic model discovery
 	if (memoryCfg.pipelineV2.modelRegistry.enabled) {
-		let registryAnthropicApiKey = anthropicApiKey;
-		if (!registryAnthropicApiKey) {
-			registryAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
-			if (!registryAnthropicApiKey) {
-				try {
-					registryAnthropicApiKey = (await getSecret("ANTHROPIC_API_KEY")) ?? undefined;
-				} catch {
-					// ignore: registry can still run without Anthropic discovery
-				}
-			}
-		}
+		const registryAnthropicApiKey = anthropicApiKey ?? await getKey("ANTHROPIC_API_KEY");
+		const registryOpenRouterApiKey =
+			openRouterApiKey ?? await getKey("OPENROUTER_API_KEY");
 		initModelRegistry(
 			memoryCfg.pipelineV2.modelRegistry,
 			effectiveExtractionProvider === "ollama" ? extractionOllamaBaseUrl : undefined,
 			registryAnthropicApiKey,
+			registryOpenRouterApiKey,
+			effectiveExtractionProvider === "openrouter"
+				? extractionOpenRouterBaseUrl
+				: undefined,
 		);
 	}
 
@@ -9598,6 +9766,10 @@ async function main() {
 			memoryCfg.pipelineV2.synthesis.endpoint,
 			"http://127.0.0.1:4096",
 		);
+		const synthesisOpenRouterBaseUrl = normalizeRuntimeBaseUrl(
+			memoryCfg.pipelineV2.synthesis.endpoint,
+			"https://openrouter.ai/api/v1",
+		);
 		const synthesisOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(
 			synthesisOpenCodeBaseUrl,
 		);
@@ -9616,6 +9788,11 @@ async function main() {
 		} else if (effectiveSynthesisProvider === "anthropic") {
 			if (!anthropicApiKey) {
 				logger.warn("config", "ANTHROPIC_API_KEY not found for synthesis, falling back to ollama");
+				effectiveSynthesisProvider = "ollama";
+			}
+		} else if (effectiveSynthesisProvider === "openrouter") {
+			if (!openRouterApiKey) {
+				logger.warn("config", "OPENROUTER_API_KEY not found for synthesis, falling back to ollama");
 				effectiveSynthesisProvider = "ollama";
 			}
 		} else if (effectiveSynthesisProvider === "claude-code") {
@@ -9656,6 +9833,8 @@ async function main() {
 					? synthesisOllamaFallbackBaseUrl
 					: effectiveSynthesisProvider === "opencode"
 						? synthesisOpenCodeBaseUrl
+						: effectiveSynthesisProvider === "openrouter"
+							? synthesisOpenRouterBaseUrl
 						: undefined,
 			),
 		});
@@ -9676,6 +9855,15 @@ async function main() {
 						apiKey: anthropicApiKey,
 						defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 					})
+				: effectiveSynthesisProvider === "openrouter" && openRouterApiKey
+					? createOpenRouterProvider({
+							model: effectiveSynthesisModel || "openai/gpt-4o-mini",
+							apiKey: openRouterApiKey,
+							baseUrl: synthesisOpenRouterBaseUrl,
+							referer: readEnvTrimmed("OPENROUTER_HTTP_REFERER"),
+							title: readEnvTrimmed("OPENROUTER_TITLE"),
+							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+						})
 				: effectiveSynthesisProvider === "opencode"
 					? createOpenCodeProvider({
 							model: effectiveSynthesisModel || "anthropic/claude-haiku-4-5-20251001",
@@ -9832,6 +10020,25 @@ async function main() {
 			logger.warn("predictor", "Failed to start predictor sidecar (non-fatal)", {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+	}
+
+	// Spawn Rust daemon shadow if enabled (port 3851, isolated DB)
+	if (memoryCfg.pipelineV2.nativeShadowEnabled) {
+		const binary = resolveDaemonBinary();
+		if (binary) {
+			const shadowAgentsDir = setupShadowDb(AGENTS_DIR);
+			shadowProcess = spawn(binary, [], {
+				env: { ...process.env, SIGNET_PORT: "3851", SIGNET_PATH: shadowAgentsDir },
+				stdio: "ignore",
+			});
+			shadowProcess.unref();
+			logger.info("shadow", "Rust daemon shadow started", {
+				pid: shadowProcess.pid,
+				port: 3851,
+			});
+		} else {
+			logger.warn("shadow", "shadowEnabled but signet-daemon binary not found — skipping");
 		}
 	}
 

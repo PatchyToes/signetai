@@ -43,9 +43,9 @@ This is what "portable identity" actually means. Not "export your data as a JSON
 
 Local-first isn't just about philosophy. It's practical.
 
-**Fast** — SQLite queries are sub-millisecond. No network round trip. No API rate limit. Your agent's recall is as fast as your disk.
+**Fast** — SQLite queries are sub-millisecond. No network round trip. No API rate limit. Your agent's recall is as fast as your disk. The predictive scorer — a neural network trained on your interaction patterns — runs locally too, anticipating what context you'll need before the agent asks.
 
-**Private** — Your memories never leave your machine unless you explicitly set up git sync to your own remote. Even then, it's your repo, your server, your encryption.
+**Private** — Your memories never leave your machine unless you explicitly set up git sync to your own remote. Even then, it's your repo, your server, your encryption. The predictive scorer's weights are unique to you and never leave your machine. With consent, only anonymized training signals feed the community base model.
 
 **Verifiable** — You can read every memory your agent has stored. You can see its reasoning, its confidence scores, its decision to keep or discard a piece of information. Full observability into the [[pipeline]] that shapes your agent's understanding of you.
 
