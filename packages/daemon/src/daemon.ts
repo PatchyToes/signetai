@@ -5,7 +5,8 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { execFileSync, spawn } from "child_process";
+import { type ChildProcess, execFileSync, spawn } from "child_process";
+import { copyFileSync } from "fs";
 import { createHash } from "crypto";
 import {
 	appendFileSync,
@@ -363,6 +364,7 @@ const repairLimiter = createRateLimiter();
 let telemetryRef: TelemetryCollector | undefined;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
 let predictorClientRef: PredictorClient | null = null;
+let shadowProcess: ChildProcess | null = null;
 let skillReconcilerHandle: ReconcilerHandle | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
@@ -430,6 +432,66 @@ function getCachedDiagnosticsReport(): DiagnosticsReport {
 		expiresAt: now + DIAGNOSTICS_CACHE_TTL_MS,
 	};
 	return report;
+}
+
+// ---------------------------------------------------------------------------
+// Shadow daemon helpers
+// ---------------------------------------------------------------------------
+
+function resolveDaemonBinary(): string | null {
+	const ext = process.platform === "win32" ? ".exe" : "";
+	const arch = process.arch;
+	const plat = process.platform;
+	// 1. dev build paths
+	const monoRoot = join(import.meta.dir, "..", "..", "..");
+	const devPaths = [
+		join(monoRoot, "packages", "daemon-rs", "target", "release", `signet-daemon${ext}`),
+		join(monoRoot, "packages", "daemon-rs", "target", "debug", `signet-daemon${ext}`),
+		join(process.cwd(), "packages", "daemon-rs", "target", "release", `signet-daemon${ext}`),
+	];
+	for (const p of devPaths) {
+		if (existsSync(p)) return p;
+	}
+	// 2. npm install location (bin/ dir alongside this package)
+	const name = `signet-daemon-${plat}-${arch}${ext}`;
+	const npmPath = join(import.meta.dir, "..", "bin", name);
+	if (existsSync(npmPath)) return npmPath;
+	return null;
+}
+
+function setupShadowDb(agentsDir: string): string {
+	const shadowRoot = join(agentsDir, ".shadow");
+	const shadowMemDir = join(shadowRoot, "memory");
+	mkdirSync(shadowMemDir, { recursive: true });
+
+	const mainDb = join(agentsDir, "memory", "memories.db");
+	const shadowDb = join(shadowMemDir, "memories.db");
+	const stale =
+		!existsSync(shadowDb) ||
+		Date.now() - statSync(shadowDb).mtimeMs > 24 * 60 * 60 * 1000;
+	if (stale && existsSync(mainDb)) {
+		// Copy WAL and SHM alongside the main DB so the shadow starts from a
+		// consistent snapshot — without them it may see uncheckpointed pages as missing.
+		copyFileSync(mainDb, shadowDb);
+		for (const ext of ["-wal", "-shm"]) {
+			const src = mainDb + ext;
+			if (existsSync(src)) copyFileSync(src, shadowDb + ext);
+		}
+		logger.info("shadow", "Shadow DB refreshed");
+	}
+
+	// Copy agent.yaml so the shadow daemon uses real config (auth, pipeline flags, etc.)
+	// rather than built-in defaults.
+	const mainCfg = join(agentsDir, "agent.yaml");
+	const shadowCfg = join(shadowRoot, "agent.yaml");
+	if (existsSync(mainCfg)) copyFileSync(mainCfg, shadowCfg);
+
+	return shadowRoot;
+}
+
+function appendDivergence(agentsDir: string, entry: Record<string, unknown>) {
+	const logPath = join(agentsDir, ".daemon", "logs", "shadow-divergences.jsonl");
+	appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
 }
 
 /**
@@ -1168,6 +1230,43 @@ app.use("*", async (c, next) => {
 	} else if (p.includes("/modify") || p.includes("/forget") || p.includes("/recover")) {
 		analyticsCollector.recordLatency("mutate", duration);
 	}
+});
+
+// Shadow request tap — fire-and-forget replay to Rust daemon on :3851
+app.use("*", async (c, next) => {
+	// Read body before next() — route handlers consume the stream; Hono caches
+	// the result but only after the first read. Pre-reading here ensures mutating
+	// replays carry the correct payload.
+	const method = c.req.method;
+	const bodyP = ["POST", "PUT", "PATCH"].includes(method)
+		? c.req.text().catch(() => undefined)
+		: Promise.resolve(undefined);
+	await next();
+	if (!shadowProcess) return;
+	const reqPath = c.req.path;
+	const search = new URL(c.req.url).search;
+	const primaryStatus = c.res.status;
+	bodyP
+		.then((rawBody) =>
+			fetch(`http://localhost:3851${reqPath}${search}`, {
+				method,
+				headers: Object.fromEntries(c.req.raw.headers),
+				body: rawBody,
+				signal: AbortSignal.timeout(5000),
+			}),
+		)
+		.then((shadow) => {
+			if (primaryStatus !== shadow.status) {
+				appendDivergence(AGENTS_DIR, {
+					path: reqPath,
+					method,
+					primaryStatus,
+					shadowStatus: shadow.status,
+				});
+			}
+			return shadow.body?.cancel();
+		})
+		.catch(() => {});
 });
 
 // Health check
@@ -9219,6 +9318,16 @@ async function cleanup() {
 		skillReconcilerHandle = null;
 	}
 
+	// Kill shadow daemon if running
+	if (shadowProcess) {
+		try {
+			shadowProcess.kill();
+		} catch {
+			// best-effort
+		}
+		shadowProcess = null;
+	}
+
 	// Stop predictor sidecar before pipeline/DB teardown
 	if (predictorClientRef) {
 		try {
@@ -9908,6 +10017,25 @@ async function main() {
 			logger.warn("predictor", "Failed to start predictor sidecar (non-fatal)", {
 				error: err instanceof Error ? err.message : String(err),
 			});
+		}
+	}
+
+	// Spawn Rust daemon shadow if enabled (port 3851, isolated DB)
+	if (memoryCfg.pipelineV2.nativeShadowEnabled) {
+		const binary = resolveDaemonBinary();
+		if (binary) {
+			const shadowAgentsDir = setupShadowDb(AGENTS_DIR);
+			shadowProcess = spawn(binary, [], {
+				env: { ...process.env, SIGNET_PORT: "3851", SIGNET_PATH: shadowAgentsDir },
+				stdio: "ignore",
+			});
+			shadowProcess.unref();
+			logger.info("shadow", "Rust daemon shadow started", {
+				pid: shadowProcess.pid,
+				port: 3851,
+			});
+		} else {
+			logger.warn("shadow", "shadowEnabled but signet-daemon binary not found — skipping");
 		}
 	}
 
