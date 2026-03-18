@@ -2,6 +2,19 @@
 
 All notable changes to Signet are documented here.
 
+## [0.62.0] - 2026-03-18
+
+### Features
+
+- add Windows and ARM64 Windows support across the codebase
+
+### Bug Fixes
+
+- **sync**: add timeouts for predictor download fetches
+- **sync**: harden runtime artifact sync and warmup
+- **sync**: move runtime downloads from postinstall to signet sync
+
+
 ## [0.61.0] - 2026-03-18
 
 ### Features
