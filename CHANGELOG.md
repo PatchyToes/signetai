@@ -2,6 +2,23 @@
 
 All notable changes to Signet are documented here.
 
+## [0.61.0] - 2026-03-18
+
+### Features
+
+- **shadow**: Rust daemon shadow proxy — auto-install, request tap, divergence logging
+- **daemon-rs**: v0.59.0 parity — dep reason, 21 dep types, synthesis worker
+- **daemon-rs**: Rust daemon rewrite — full implementation
+
+### Bug Fixes
+
+- **ci**: use openssl for sha256 — portable across linux/macos/windows runners
+- **shadow**: address PR review feedback
+- **daemon-rs**: address round-3 review feedback
+- **daemon-rs**: address round-2 review feedback
+- **daemon-rs**: address code review feedback
+
+
 ## [0.60.1] - 2026-03-18
 
 ### Features
