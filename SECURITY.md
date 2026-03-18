@@ -1,4 +1,4 @@
-Security Policy
+# Security Policy
 
 We love responsible reports of (potential) security issues in SignetAI.
 
