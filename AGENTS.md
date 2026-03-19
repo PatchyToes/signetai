@@ -458,6 +458,7 @@ parallel but interfaces must lock before merge.
 
 ## Reference
 
+- [AI Policy](AI_POLICY.md) — expectations for AI-assisted contributions
 - [HTTP API](docs/API.md) — full endpoint catalog
 - [Contributing](docs/CONTRIBUTING.md) — style examples, CI/CD, identity files, reference repos
 - [Dashboard](docs/DASHBOARD.md) — design tokens, component org, Svelte 5 conventions

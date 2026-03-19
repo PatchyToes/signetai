@@ -368,8 +368,9 @@ key. macOS or Linux.
 Contributing
 ===
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Build on existing patterns.
-Open an issue before contributing significant features.
+See [`CONTRIBUTING.md`](./docs/CONTRIBUTING.md). Build on existing patterns.
+Open an issue before contributing significant features. Read the
+[AI Policy](./AI_POLICY.md) before submitting AI-assisted work.
 
 License
 ===

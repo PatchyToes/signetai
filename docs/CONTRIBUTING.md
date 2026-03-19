@@ -217,7 +217,11 @@ Before contributing a connector or adapter, look at how
 are designed to be idempotent — safe to install multiple times. Follow
 that pattern.
 
-Be transparent about AI assistance in PRs where applicable.
+PRs with UI changes (dashboard, web, extension) must include
+screenshots. No screenshots, no merge.
+
+Be transparent about AI assistance in PRs where applicable. See the
+[AI Policy](../AI_POLICY.md) for disclosure requirements and expectations.
 
 Conventional Commits and Versioning
 ---
