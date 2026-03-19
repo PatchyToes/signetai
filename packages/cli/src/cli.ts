@@ -82,7 +82,6 @@ import {
 	isZvecCompatible,
 } from "./python.js";
 import Database from "./sqlite.js";
-import { registerBrowseCommand } from "./browse.js";
 
 // Template directory location (relative to built CLI)
 function getTemplatesDir() {
@@ -7138,12 +7137,6 @@ function formatAge(isoDate: string): string {
 // ============================================================================
 // Default action when no command specified
 // ============================================================================
-
-// ============================================================================
-// signet browse — CDP browser bridge (Phase 1a)
-// ============================================================================
-
-registerBrowseCommand(program);
 
 // Default action when no command specified
 program.action(async () => {

@@ -203,14 +203,6 @@ const {
 	{:catch error}
 		{@render skeletonError(error)}
 	{/await}
-{:else if activeTab === "os"}
-	{#await import("$lib/components/tabs/OsTab.svelte")}
-		{@render skeletonCards()}
-	{:then module}
-		<module.default />
-	{:catch error}
-		{@render skeletonError(error)}
-	{/await}
 {/if}
 </div>
 {/key}
