@@ -52,7 +52,12 @@ export interface MigrationDb {
 
 export interface MigrationArtifacts {
 	readonly tables?: readonly string[];
-	readonly columns?: readonly { readonly table: string; readonly column: string }[];
+	readonly columns?: readonly {
+		readonly table: string;
+		readonly column: string;
+		/** Skip verification when the table itself doesn't exist (conditional/repair migrations). */
+		readonly optional?: boolean;
+	}[];
 }
 
 export interface Migration {
@@ -324,6 +329,9 @@ export const MIGRATIONS: readonly Migration[] = [
 		version: 32,
 		name: "embeddings-vector-column",
 		up: embeddingsVectorColumn,
+		artifacts: {
+			columns: [{ table: "embeddings", column: "vector", optional: true }],
+		},
 	},
 ];
 
@@ -541,6 +549,9 @@ function verifyArtifacts(db: MigrationDb, migration: Migration): void {
 		const colCache = new Map<string, Set<string>>();
 		for (const col of migration.artifacts.columns) {
 			if (!tables.has(col.table)) {
+				// Optional columns skip verification when the table doesn't exist
+				// (conditional/repair migrations that are no-ops on fresh schemas).
+				if (col.optional) continue;
 				throw new Error(
 					`Post-DDL verification failed: migration ${migration.version} (${migration.name}) ` +
 						`declares column "${col.table}.${col.column}" but table does not exist`,
