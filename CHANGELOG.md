@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.65.9] - 2026-03-19
+
+### Features
+
+- retroactive memory supersession (#244)
+
+
 ## [0.65.8] - 2026-03-19
 
 ### Bug Fixes
