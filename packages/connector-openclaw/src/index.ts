@@ -44,6 +44,7 @@ interface OpenClawConfigShape {
 		};
 	};
 	plugins?: {
+		allow?: string[];
 		slots?: {
 			memory?: string;
 		};
@@ -157,6 +158,71 @@ function stripJsonComments(source: string): string {
 	}
 
 	return result;
+}
+
+function mergePluginAllow(
+	pluginsObj: JsonObject,
+	pluginName: string,
+): { changed: boolean; warning?: string } {
+	const rawAllow = pluginsObj.allow;
+	if (rawAllow === undefined) {
+		pluginsObj.allow = [pluginName];
+		return { changed: true };
+	}
+
+	if (!Array.isArray(rawAllow)) {
+		return {
+			changed: false,
+			warning: `plugins.allow has unexpected type (${typeof rawAllow}); cannot safely merge`,
+		};
+	}
+
+	const current = rawAllow.filter(
+		(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+	);
+	const next = current.includes(pluginName)
+		? current
+		: [...current, pluginName];
+	const unchanged =
+		next.length === rawAllow.length &&
+		next.every((entry, i) => entry === rawAllow[i]);
+
+	if (!unchanged) {
+		pluginsObj.allow = next;
+	}
+	return { changed: !unchanged };
+}
+
+function removePluginAllow(
+	pluginsObj: JsonObject,
+	pluginName: string,
+): { changed: boolean; warning?: string } {
+	const rawAllow = pluginsObj.allow;
+	if (rawAllow === undefined) {
+		return { changed: false };
+	}
+
+	if (!Array.isArray(rawAllow)) {
+		return {
+			changed: false,
+			warning: `plugins.allow has unexpected type (${typeof rawAllow}); cannot safely merge`,
+		};
+	}
+
+	const next = rawAllow.filter(
+		(entry): entry is string =>
+			typeof entry === "string" &&
+			entry.trim().length > 0 &&
+			entry !== pluginName,
+	);
+	const unchanged =
+		next.length === rawAllow.length &&
+		next.every((entry, i) => entry === rawAllow[i]);
+
+	if (!unchanged) {
+		pluginsObj.allow = next;
+	}
+	return { changed: !unchanged };
 }
 
 function stripTrailingCommas(source: string): string {
@@ -452,8 +518,11 @@ export class OpenClawConnector extends BaseConnector {
 				},
 			},
 		});
+		const allowResult = this.removePluginFromAllow("signet-memory-openclaw");
 
-		const configsPatched = [...new Set([...hookResult.patched, ...pluginResult.patched])];
+		const configsPatched = [
+			...new Set([...hookResult.patched, ...pluginResult.patched, ...allowResult.patched]),
+		];
 
 		// Remove hook handler files from the first valid base path
 		const basePath = join(this.getHomeDir(), ".agents");
@@ -467,6 +536,51 @@ export class OpenClawConnector extends BaseConnector {
 		}
 
 		return { filesRemoved, configsPatched };
+	}
+
+	private removePluginFromAllow(pluginName: string): {
+		patched: string[];
+		warnings: string[];
+	} {
+		const patched: string[] = [];
+		const warnings: string[] = [];
+
+		for (const configPath of this.getDiscoveredConfigPaths()) {
+			try {
+				const raw = readFileSync(configPath, "utf-8");
+				const config = parseJsonOrJson5(raw);
+				const indent = this.detectIndent(raw);
+
+				if (Array.isArray(config.plugins)) {
+					const warning = `[signet/openclaw] Skipped plugins.allow patch for ${configPath}: plugins is in legacy array format; run install() first`;
+					warnings.push(warning);
+					console.warn(warning);
+					continue;
+				}
+
+				const pluginsObj = isJsonObject(config.plugins) ? config.plugins : {};
+				const allowResult = removePluginAllow(pluginsObj, pluginName);
+				if (allowResult.warning) {
+					const warning = `[signet/openclaw] Skipped plugins.allow patch for ${configPath}: ${allowResult.warning}`;
+					warnings.push(warning);
+					console.warn(warning);
+				}
+				if (!allowResult.changed) {
+					continue;
+				}
+
+				config.plugins = pluginsObj;
+				writeFileSync(configPath, JSON.stringify(config, null, indent));
+				patched.push(configPath);
+			} catch (e) {
+				const message = e instanceof Error ? e.message : String(e);
+				const warning = `[signet/openclaw] Skipped plugins.allow patch for ${configPath}: ${message}`;
+				warnings.push(warning);
+				console.warn(warning);
+			}
+		}
+
+		return { patched, warnings };
 	}
 
 	/**
@@ -679,6 +793,12 @@ export class OpenClawConnector extends BaseConnector {
 		patched: string[];
 		warnings: string[];
 	} {
+		if (isJsonObject(patch.plugins) && patch.plugins.allow !== undefined) {
+			throw new Error(
+				"patchAllConfigsWithPlugin patch must not set plugins.allow; allowlist is merged separately",
+			);
+		}
+
 		const patched: string[] = [];
 		const warnings: string[] = [];
 		const pluginName = "signet-memory-openclaw";
@@ -701,8 +821,8 @@ export class OpenClawConnector extends BaseConnector {
 
 				// Migrate old plugin name "signet-memory" -> "signet-memory-openclaw"
 				{
-					const pluginsObj = (config.plugins ?? {}) as JsonObject;
-					const entriesObj = (pluginsObj.entries ?? {}) as JsonObject;
+					const pluginsObj = isJsonObject(config.plugins) ? config.plugins : {};
+					const entriesObj = isJsonObject(pluginsObj.entries) ? pluginsObj.entries : {};
 					const OLD_NAME = "signet-memory";
 					if (OLD_NAME in entriesObj && !(pluginName in entriesObj)) {
 						entriesObj[pluginName] = entriesObj[OLD_NAME];
@@ -720,10 +840,10 @@ export class OpenClawConnector extends BaseConnector {
 				// Migrate top-level `signet` key into plugin config
 				if (config.signet && typeof config.signet === "object") {
 					const legacySignet = config.signet as JsonObject;
-					const pluginsObj = (config.plugins ?? { entries: {} }) as JsonObject;
-					const entriesObj = (pluginsObj.entries ?? {}) as JsonObject;
+					const pluginsObj = isJsonObject(config.plugins) ? config.plugins : { entries: {} };
+					const entriesObj = isJsonObject(pluginsObj.entries) ? pluginsObj.entries : {};
 					const pluginEntry = (entriesObj[pluginName] ?? { enabled: true }) as JsonObject;
-					const pluginConfig = (pluginEntry.config ?? {}) as JsonObject;
+					const pluginConfig = isJsonObject(pluginEntry.config) ? pluginEntry.config : {};
 
 					if (legacySignet.daemonUrl) {
 						pluginConfig.daemonUrl = legacySignet.daemonUrl;
@@ -735,6 +855,15 @@ export class OpenClawConnector extends BaseConnector {
 					config.plugins = pluginsObj;
 					config.signet = undefined;
 				}
+
+				const pluginsObj = isJsonObject(config.plugins) ? config.plugins : {};
+				const allowResult = mergePluginAllow(pluginsObj, pluginName);
+				if (allowResult.warning) {
+					const warning = `[signet/openclaw] Skipped plugins.allow patch for ${configPath}: ${allowResult.warning}`;
+					warnings.push(warning);
+					console.warn(warning);
+				}
+				config.plugins = pluginsObj;
 
 				deepMerge(config, patch);
 				writeFileSync(configPath, JSON.stringify(config, null, indent));
@@ -787,8 +916,9 @@ export class OpenClawConnector extends BaseConnector {
 	}
 
 	/**
-	 * Narrow config-only update: add `searchPath` to `plugins.load.paths` in
-	 * all discovered configs without re-running the full install flow.
+	 * Narrow config-only update: add `searchPath` to `plugins.load.paths` and
+	 * ensure `plugins.allow` trusts `signet-memory-openclaw` in all discovered
+	 * configs without re-running the full install flow.
 	 *
 	 * `searchPath` should be the **parent** directory of the plugin package
 	 * (e.g. `…/@signetai/`) so OpenClaw can find `signet-memory-openclaw`
@@ -797,6 +927,7 @@ export class OpenClawConnector extends BaseConnector {
 	patchLoadPaths(searchPath: string): { patched: string[]; warnings: string[] } {
 		const patched: string[] = [];
 		const warnings: string[] = [];
+		const pluginName = "signet-memory-openclaw";
 
 		for (const configPath of this.getDiscoveredConfigPaths()) {
 			try {
@@ -841,9 +972,24 @@ export class OpenClawConnector extends BaseConnector {
 					? rawPaths.filter((entry): entry is string => typeof entry === "string")
 					: [];
 
+				let dirty = false;
 				if (!existingPaths.includes(searchPath)) {
 					loadObj.paths = [...existingPaths, searchPath];
 					pluginsObj.load = loadObj;
+					dirty = true;
+				}
+
+				const allowResult = mergePluginAllow(pluginsObj, pluginName);
+				if (allowResult.warning) {
+					const warning = `[signet/openclaw] Skipped plugins.allow patch for ${configPath}: ${allowResult.warning}`;
+					warnings.push(warning);
+					console.warn(warning);
+				}
+				if (allowResult.changed) {
+					dirty = true;
+				}
+
+				if (dirty) {
 					config.plugins = pluginsObj;
 					writeFileSync(configPath, JSON.stringify(config, null, indent));
 					patched.push(configPath);
