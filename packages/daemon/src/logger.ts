@@ -196,7 +196,8 @@ class Logger extends EventEmitter {
 		const reset = "\x1b[0m";
 		const dim = "\x1b[2m";
 
-		const time = entry.timestamp.split("T")[1].slice(0, 8);
+		const parts = entry.timestamp.split("T");
+		const time = (parts[1] ?? "").slice(0, 8) || "00:00:00";
 		const level = entry.level.toUpperCase().padEnd(5);
 		const category = `[${entry.category}]`.padEnd(12);
 
