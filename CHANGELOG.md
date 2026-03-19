@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.65.7] - 2026-03-19
+
+### Bug Fixes
+
+- add missing --project option to pre-compaction hook (#242)
+
+
 ## [0.65.6] - 2026-03-19
 
 ### Bug Fixes
