@@ -8834,6 +8834,25 @@ function startFileWatcher() {
 		logger.info("watcher", "File changed", { path });
 		scheduleAutoCommit(path);
 
+		// Reload auth config when agent.yaml changes on disk
+		const base = basename(path);
+		if (base === "agent.yaml" || base === "AGENT.yaml") {
+			try {
+				const cfg = loadMemoryConfig(AGENTS_DIR);
+				if (!cfg.auth) throw new Error("Missing auth section in agent.yaml");
+				if (!cfg.auth.rateLimits) throw new Error("Missing rateLimits in auth config");
+				authConfig = cfg.auth;
+				const rl = authConfig.rateLimits;
+				authForgetLimiter = rl.forget ? new AuthRateLimiter(rl.forget.windowMs, rl.forget.max) : new AuthRateLimiter(60_000, 30);
+				authModifyLimiter = rl.modify ? new AuthRateLimiter(rl.modify.windowMs, rl.modify.max) : new AuthRateLimiter(60_000, 60);
+				authBatchForgetLimiter = rl.batchForget ? new AuthRateLimiter(rl.batchForget.windowMs, rl.batchForget.max) : new AuthRateLimiter(60_000, 5);
+				authAdminLimiter = rl.admin ? new AuthRateLimiter(rl.admin.windowMs, rl.admin.max) : new AuthRateLimiter(60_000, 10);
+				logger.info("config", "Auth config reloaded from disk");
+			} catch (e) {
+				logger.error("config", "Failed to reload auth config", e as Error);
+			}
+		}
+
 		// If any identity file changed, sync to harness configs
 		const SYNC_TRIGGER_FILES = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"];
 		if (SYNC_TRIGGER_FILES.some((f) => path.endsWith(f))) {

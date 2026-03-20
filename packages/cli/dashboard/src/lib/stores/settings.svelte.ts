@@ -416,6 +416,9 @@ class SettingsStore {
 
 			if (successfulFiles.length > 0) {
 				this.lastSavedAt = new Date().toISOString();
+				// Clear init guard so the next invalidateAll() re-init
+				// picks up the fresh disk state
+				this.lastInitSource = null;
 			}
 
 			if (failed.length === 0 && successfulFiles.length > 0) {
