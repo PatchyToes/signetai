@@ -102,6 +102,7 @@ import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-
 import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
 import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
 import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
+import { closeWidgetProvider, initWidgetProvider } from "./widget-llm";
 import { type LogEntry, logger } from "./logger";
 import { migrateConfig } from "./config-migration";
 import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
@@ -4622,6 +4623,17 @@ setFetchEmbedding(fetchEmbedding);
 // Marketplace routes (MCP servers catalog + routing)
 import { mountMarketplaceRoutes } from "./routes/marketplace.js";
 mountMarketplaceRoutes(app);
+
+import { mountAppTrayRoutes } from "./routes/app-tray.js";
+mountAppTrayRoutes(app);
+
+// Widget generation routes (Signet OS widget rendering)
+import { mountWidgetRoutes } from "./routes/widget.js";
+mountWidgetRoutes(app);
+
+// Event bus routes (Signet OS ambient awareness layer — Phase 3/5)
+import { mountEventBusRoutes } from "./routes/event-bus.js";
+mountEventBusRoutes(app);
 
 // Marketplace review routes (Signet Reviews scaffold)
 import { mountMarketplaceReviewsRoutes } from "./routes/marketplace-reviews.js";
@@ -9389,6 +9401,7 @@ async function cleanup() {
 
 	closeLlmProvider();
 	closeSynthesisProvider();
+	closeWidgetProvider();
 	stopOpenCodeServer();
 	stopModelRegistry();
 
@@ -9926,6 +9939,8 @@ async function main() {
 								: {}),
 						});
 		initSynthesisProvider(synthesisProvider);
+		// Widget provider defaults to synthesis provider (needs smart model for HTML gen)
+		initWidgetProvider(synthesisProvider);
 	} else {
 		providerRuntimeResolution.synthesis = {
 			configured: providerHints.synthesis,
