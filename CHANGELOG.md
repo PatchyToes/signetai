@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.68.2] - 2026-03-20
+
+### Bug Fixes
+
+- settings persist across refresh without daemon restart (#251)
+
+
 ## [0.68.1] - 2026-03-20
 
 ### Bug Fixes
