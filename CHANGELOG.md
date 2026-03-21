@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.71.2] - 2026-03-21
+
+### Bug Fixes
+
+- **tray**: restore npm tauri CLI + convert icons to RGBA (#261)
+
+
 ## [0.71.1] - 2026-03-21
 
 ### Bug Fixes
