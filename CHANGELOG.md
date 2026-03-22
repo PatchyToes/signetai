@@ -2,6 +2,14 @@
 
 All notable changes to Signet are documented here.
 
+## [0.72.7] - 2026-03-22
+
+### Bug Fixes
+
+- **dashboard**: replace @signet/core runtime import with local constant
+- **openclaw**: dedupe marketplace proxy refresh (#281)
+
+
 ## [0.72.6] - 2026-03-22
 
 ### Bug Fixes
