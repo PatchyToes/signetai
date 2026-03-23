@@ -251,7 +251,6 @@ interface MarketplaceExposurePolicy {
 	readonly updatedAt: string;
 }
 
-const PROMPT_DEDUPE_WINDOW_MS = 1_000;
 
 function sanitizeToolSegment(value: string): string {
 	const normalized = value
@@ -740,22 +739,16 @@ function textResult(text: string, details?: Record<string, unknown>): OpenClawTo
 	};
 }
 
-function cleanupRecentPromptTurns(recentTurns: Map<string, number>, now: number): void {
-	for (const [key, ts] of recentTurns) {
-		if (now - ts > PROMPT_DEDUPE_WINDOW_MS) {
-			recentTurns.delete(key);
+// Dedup window for sessionless session-start calls (time-based; these don't
+// have a stable messageCount to key on).
+const SESSIONLESS_DEDUPE_MS = 1_000;
+
+function cleanupTimedMap(map: Map<string, number>, now: number): void {
+	for (const [key, ts] of map) {
+		if (now - ts > SESSIONLESS_DEDUPE_MS) {
+			map.delete(key);
 		}
 	}
-}
-
-function buildPromptTurnKey(params: {
-	sessionKey?: string;
-	agentId?: string;
-	prompt: string;
-	messageCount?: number;
-}): string {
-	const normalizedPrompt = params.prompt.trim().replace(/\s+/g, " ").slice(0, 240);
-	return `${params.sessionKey ?? "-"}|${params.agentId ?? "-"}|${params.messageCount ?? -1}|${normalizedPrompt}`;
 }
 
 function buildInjectionResult(result: UserPromptSubmitResult): { prependContext: string } | undefined {
@@ -1296,7 +1289,16 @@ const signetPlugin = {
 
 		const claimedSessions = new Set<string>();
 		const sessionlessSessionStarts = new Map<string, number>();
-		const recentPromptTurns = new Map<string, number>();
+		// Maps sessionKey → {count, at} for per-turn idempotency. Entries are
+		// evicted on agent_end or lazily after SESSION_TURN_TTL_MS so crash/
+		// SIGKILL sessions don't accumulate indefinitely.
+		const SESSION_TURN_TTL_MS = 4 * 60 * 60 * 1000;
+		const injectedTurns = new Map<string, { count: number; at: number }>();
+		// Tracks turn signatures currently in-flight — provides a synchronous
+		// guard so concurrent before_prompt_build / before_agent_start calls on
+		// the same event-loop tick don't both pass the guard before either await
+		// completes (injectedTurns is only written after the daemon responds).
+		const inFlightTurns = new Set<string>();
 
 		const resolveHookContext = (
 			ctx: unknown,
@@ -1321,10 +1323,10 @@ const signetPlugin = {
 		): Promise<void> => {
 			if (!sessionKey) {
 				const now = Date.now();
-				cleanupRecentPromptTurns(sessionlessSessionStarts, now);
+				cleanupTimedMap(sessionlessSessionStarts, now);
 				const sessionlessKey = buildSessionlessTurnKey(event, agentId);
 				const recentStartAt = sessionlessSessionStarts.get(sessionlessKey);
-				if (typeof recentStartAt === "number" && now - recentStartAt <= PROMPT_DEDUPE_WINDOW_MS) {
+				if (typeof recentStartAt === "number" && now - recentStartAt <= SESSIONLESS_DEDUPE_MS) {
 					return;
 				}
 
@@ -1358,25 +1360,38 @@ const signetPlugin = {
 			sessionKey: string | undefined,
 			agentId: string | undefined,
 		): Promise<unknown> => {
+			// Skip immediately if daemon is known-unreachable — avoids a 5-second
+			// ECONNREFUSED hang on every message turn when the daemon is down.
+			if (!daemonReachable) return undefined;
+
 			const rawPrompt = typeof event.prompt === "string" ? event.prompt : undefined;
 			const prompt = rawPrompt ? extractUserMessage(rawPrompt) : undefined;
 			if (!prompt || prompt.length <= 3) {
 				return undefined;
 			}
 
-			const now = Date.now();
-			cleanupRecentPromptTurns(recentPromptTurns, now);
-			const messageCount = Array.isArray(event.messages) ? event.messages.length : undefined;
-			const promptTurnKey = buildPromptTurnKey({
-				sessionKey,
-				agentId,
-				prompt,
-				messageCount,
-			});
-			const recentTs = recentPromptTurns.get(promptTurnKey);
-			if (typeof recentTs === "number" && now - recentTs <= PROMPT_DEDUPE_WINDOW_MS) {
+			// Deduplicate by (sessionKey, messageCount): both before_prompt_build
+			// and before_agent_start fire on the same turn; only the first should
+			// call the daemon. Sessionless agents (no sessionKey) cannot be
+			// reliably correlated and are allowed to fall through rather than
+			// risk cross-suppressing concurrent independent sessions.
+			const count = Array.isArray(event.messages) ? event.messages.length : undefined;
+			// sig is only defined when we have both a stable session identity and
+			// a message count — the two values that make dedup meaningful.
+			const sig = sessionKey && typeof count === "number" ? `${sessionKey}|${count}` : undefined;
+			// Lazy TTL sweep: evict entries from sessions that ended without agent_end.
+			if (sig) {
+				const now = Date.now();
+				for (const [k, v] of injectedTurns) {
+					if (now - v.at > SESSION_TURN_TTL_MS) injectedTurns.delete(k);
+				}
+			}
+			if (sig && (inFlightTurns.has(sig) || (sessionKey !== undefined && injectedTurns.get(sessionKey)?.count === count))) {
 				return undefined;
 			}
+			// Mark in-flight synchronously before any await so concurrent
+			// invocations in the same event-loop tick see the guard immediately.
+			if (sig) inFlightTurns.add(sig);
 
 			const lastAssistantMessage = extractLastAssistantMessage(event);
 			const result = await onUserPromptSubmit("openclaw", {
@@ -1386,11 +1401,17 @@ const signetPlugin = {
 				lastAssistantMessage,
 				sessionKey,
 			});
+
+			// Always clear in-flight regardless of outcome.
+			if (sig) inFlightTurns.delete(sig);
 			if (!result) {
 				// daemonFetch already logged the specific error (ECONNREFUSED or HTTP status).
 				return undefined;
 			}
-			recentPromptTurns.set(promptTurnKey, Date.now());
+			// Record the completed turn so the other hook sees it on arrival.
+			if (sessionKey && typeof count === "number") {
+				injectedTurns.set(sessionKey, { count, at: Date.now() });
+			}
 			return buildInjectionResult(result);
 		};
 
@@ -1424,6 +1445,7 @@ const signetPlugin = {
 			await onSessionEnd("openclaw", { ...opts, sessionKey });
 			if (sessionKey) {
 				claimedSessions.delete(sessionKey);
+				injectedTurns.delete(sessionKey);
 			}
 			return undefined;
 		});
