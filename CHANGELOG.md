@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.73.2] - 2026-03-23
+
+### Bug Fixes
+
+- normalize remember tags across daemon and openclaw (#285)
+
+
 ## [0.73.1] - 2026-03-22
 
 ### Bug Fixes
