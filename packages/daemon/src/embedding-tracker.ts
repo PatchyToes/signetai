@@ -7,7 +7,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { createHash } from "node:crypto";
 import type { PipelineEmbeddingTrackerConfig } from "@signet/core";
 import type { DbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceExceptHash, syncVecInsert, vectorToBlob } from "./db-helpers";
@@ -114,8 +113,7 @@ export function startEmbeddingTracker(
 				if (!running) break;
 				const vec = await fetchEmbeddingFn(row.content, embeddingCfg);
 				if (vec !== null) {
-					const hash = createHash("sha256").update(row.content).digest("hex");
-					results.push({ row, vector: vec, contentHash: hash });
+					results.push({ row, vector: vec, contentHash: row.contentHash });
 				} else {
 					failed++;
 				}
