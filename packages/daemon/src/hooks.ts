@@ -1645,7 +1645,45 @@ function stripUntrustedMetadata(text: string): string {
 		remaining = [before, after].filter((part) => part.length > 0).join("\n\n");
 	}
 
+	// Strip orphaned code-fenced JSON metadata blocks at the start of the text.
+	// Some harnesses (e.g. OpenClaw) strip their own "Sender (untrusted metadata):"
+	// header before forwarding the message, leaving behind a bare ```json {...} ```
+	// block that pollutes recall queries.
+	remaining = stripLeadingCodeFencedJson(remaining);
+
 	return remaining.trim();
+}
+
+/**
+ * Remove a leading markdown code-fenced JSON block if it looks like
+ * harness/sender metadata (contains keys like "label", "id", "sender",
+ * "chat_type", etc.). Preserves the rest of the message.
+ */
+function stripLeadingCodeFencedJson(text: string): string {
+	const fenceMatch = /^```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```/m.exec(text.trimStart());
+	if (!fenceMatch) return text;
+
+	// Quick heuristic: does the JSON contain metadata-like keys?
+	const jsonStr = fenceMatch[1];
+	const metadataKeys = /["'](?:label|id|sender|chat_type|channel|provider|surface)["']\s*:/i;
+	if (!metadataKeys.test(jsonStr)) return text;
+
+	// Validate it's actually parseable JSON
+	try {
+		JSON.parse(jsonStr);
+	} catch {
+		return text;
+	}
+
+	// Strip the code fence block and any trailing whitespace/newlines
+	const leadingWhitespace = text.length - text.trimStart().length;
+	const blockEnd = leadingWhitespace + fenceMatch[0].length;
+	let rest = text.slice(blockEnd).trimStart();
+
+	// Also strip a leading harness timestamp like "[Tue 2026-03-24 14:51 UTC]"
+	rest = rest.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s+\w+\]\s*/i, "");
+
+	return rest;
 }
 
 const RECALL_STOPWORDS = new Set([
