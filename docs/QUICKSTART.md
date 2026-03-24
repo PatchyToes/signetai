@@ -14,6 +14,75 @@ Get Signet running in about five minutes. For the full
 
 ---
 
+Why Signet
+---
+
+Your agent starts every session from zero. It doesn't know what you
+worked on yesterday. It doesn't know your preferences, your projects,
+or the decisions you've already made together. Every session is a
+first date.
+
+The industry's answer to this has been to give agents memory tools —
+"remember this," "recall that." That's not memory. That's a filing
+cabinet the agent sometimes opens. It puts the LLM in charge of
+deciding what's important, when to store it, and when to retrieve it.
+You don't query a database to remember your coworker's name. It
+surfaces because it's relevant.
+
+Signet takes a different approach. The agent is not in the loop.
+
+### The distillation layer
+
+At the end of every conversation, Signet reviews the session and
+distills it. A local LLM breaks the conversation into atomic facts,
+checks them against what's already known, and decides: file as new,
+update something existing, replace something outdated, or skip
+entirely. Your agent won't store "prefers dark mode" fourteen times.
+
+### The knowledge graph
+
+Named entities — people, projects, tools, concepts — are extracted
+and linked. When you ask about a project, Signet traverses the graph:
+the project's architecture, the people involved, the tools it depends
+on, the constraints that apply. Context arrives structured, not as a
+pile of fragments.
+
+### The predictive scorer
+
+A neural network trained on your interaction patterns runs at inference
+time. It observes the conversation context and predicts which memories
+will be needed — before the agent asks, before a search is triggered.
+The scorer is unique to each user. Your weights never leave your machine.
+
+### Retrieval
+
+Retrieval blends graph traversal, keyword search, and semantic
+similarity into a single ranked result. The constellation view in the
+dashboard lets you see your agent's knowledge topology.
+
+### Document ingest
+
+Feed any document into the distillation layer. PDFs, specs, reference
+pages, URLs. They're chunked, embedded, and indexed alongside your
+agent's insights.
+
+### Safety guarantees
+
+- **Raw-first**: content is persisted before any LLM processing begins
+- **Pinned insights are sacred**: the distillation layer cannot modify
+  them. Only you can.
+- **Everything is recoverable**: deletions are soft, with a recovery
+  window and full audit trail
+
+The same agent follows you across Claude Code, OpenCode, and OpenClaw.
+Same personality, same knowledge, same secrets. Switch tools without
+starting over.
+
+For deeper technical details, see [[architecture]]. For the long-term
+vision, see [VISION.md](../VISION.md).
+
+---
+
 Prerequisites
 ---
 
@@ -76,14 +145,13 @@ for each:
 - OpenCode — plugin + AGENTS.md sync
 - OpenClaw — adapter-openclaw hooks
 - Codex — wrapper install + session hooks
-- Cursor (planned)
-- Windsurf (planned)
 
 **3. Embedding provider**
 
 Embeddings power semantic (meaning-based) memory search. Choose:
 
-- **Ollama** (recommended) — runs locally, free, no API key needed.
+- **Built-in** (recommended) — no extra setup required.
+- **Ollama** — runs locally, free, no API key needed.
   Setup checks your binary, service, and model, and guides install/pull
   when needed.
 - **OpenAI** — uses the OpenAI embeddings API. Requires `OPENAI_API_KEY`.
@@ -105,7 +173,7 @@ search. 0.7 (70% semantic, 30% keyword) works well for most people.
 
 **6. Git & auto-commit**
 
-The wizard can initialize a git repo in `~/.agents/` so every change to
+The wizard can initialize a git repo in `$SIGNET_WORKSPACE/` so every change to
 your agent files is automatically versioned.
 
 After the wizard completes, the [[daemon]] starts automatically and the
@@ -117,7 +185,7 @@ What Gets Created
 ---
 
 ```
-~/.agents/
+$SIGNET_WORKSPACE/
 ├── agent.yaml           # Your config & manifest
 ├── AGENTS.md            # Agent identity & instructions
 ├── SOUL.md              # Personality & tone
@@ -232,16 +300,16 @@ signet recall "signet" --type decision -l 5
 ### View daemon logs
 
 ```bash
-signet logs
-signet logs -n 100
+signet daemon logs
+signet daemon logs -n 100
 ```
 
 ### Stop/start the daemon
 
 ```bash
-signet stop
-signet start
-signet restart
+signet daemon stop
+signet daemon start
+signet daemon restart
 ```
 
 ---
@@ -270,7 +338,7 @@ never see secret values directly.
 Managing Skills
 ---
 
-Skills are packaged instructions in `~/.agents/skills/`. They extend
+Skills are packaged instructions in `$SIGNET_WORKSPACE/skills/`. They extend
 what your agent can do.
 
 ```bash
@@ -295,7 +363,8 @@ Install as a System Service
 To have Signet start automatically on boot:
 
 ```bash
-signet install-service
+cd packages/daemon
+bun run install:service
 ```
 
 **macOS (launchd):**
@@ -316,10 +385,10 @@ Editing Your Agent
 
 Your agent identity lives in two key files:
 
-**`~/.agents/AGENTS.md`** — What the agent knows and how it should
+**`$SIGNET_WORKSPACE/AGENTS.md`** — What the agent knows and how it should
 behave. This is the file that syncs to all your harnesses.
 
-**`~/.agents/SOUL.md`** — Personality, voice, values. Mostly for your
+**`$SIGNET_WORKSPACE/SOUL.md`** — Personality, voice, values. Mostly for your
 own reference or for harnesses that load it separately.
 
 Edit them directly in your editor or via the dashboard's config editor.
@@ -351,8 +420,8 @@ lsof -i :3850
 
 Remove a stale PID file if needed:
 ```bash
-rm ~/.agents/.daemon/pid
-signet start
+rm $SIGNET_WORKSPACE/.daemon/pid
+signet daemon start
 ```
 
 **Embeddings not working**
@@ -378,7 +447,7 @@ signet status
 
 ```bash
 curl http://localhost:3850/health
-signet logs
+signet daemon logs
 ```
 
 ---

@@ -12,6 +12,7 @@ import type { DbAccessor } from "../db-accessor";
 import type { DiagnosticsReport, ProviderTracker } from "../diagnostics";
 import { getDiagnostics } from "../diagnostics";
 import { propagateMemoryStatus } from "../knowledge-graph";
+import { invalidateTraversalCache } from "./graph-traversal";
 import { getLlmProvider } from "../llm";
 import { logger } from "../logger";
 import type { PipelineV2Config } from "../memory-config";
@@ -232,6 +233,19 @@ export function startMaintenanceWorker(
 						});
 					}
 					feedbackPropagatedAttributes += propagateMemoryStatus(accessor, agentId);
+
+					// Retroactive supersession sweep — runs regardless of maintenance health
+					if (cfg.structural.supersessionSweepEnabled) {
+						const { sweepRetroactiveSupersession } = await import("./supersession");
+						const sweep = await sweepRetroactiveSupersession(accessor, agentId, cfg, getLlmProvider());
+						if (sweep.candidates.length > 0) {
+							logger.info("maintenance", "Supersession sweep", {
+								agentId,
+								superseded: sweep.superseded,
+								proposals: sweep.candidates.length,
+							});
+						}
+					}
 				}
 				recordFeedbackTelemetry({
 					feedbackDecayedAspects,
@@ -311,6 +325,20 @@ export function startMaintenanceWorker(
 					});
 				}
 				feedbackPropagatedAttributes += propagateMemoryStatus(accessor, agentId);
+
+				// Retroactive supersession sweep
+				if (cfg.structural.supersessionSweepEnabled) {
+					const { sweepRetroactiveSupersession } = await import("./supersession");
+					const provider = getLlmProvider();
+					const sweep = await sweepRetroactiveSupersession(accessor, agentId, cfg, provider);
+					if (sweep.candidates.length > 0) {
+						logger.info("maintenance", "Supersession sweep", {
+							agentId,
+							superseded: sweep.superseded,
+							proposals: sweep.candidates.length,
+						});
+					}
+				}
 			}
 			recordFeedbackTelemetry({
 				feedbackDecayedAspects,
@@ -346,6 +374,10 @@ export function startMaintenanceWorker(
 			logger.warn("maintenance", "Summary condensation check failed (non-fatal)", {
 				error: e instanceof Error ? e.message : String(e),
 			});
+		}
+
+		if (feedbackDecayedAspects > 0 || feedbackPropagatedAttributes > 0) {
+			invalidateTraversalCache();
 		}
 
 		return {

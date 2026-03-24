@@ -251,7 +251,6 @@ interface MarketplaceExposurePolicy {
 	readonly updatedAt: string;
 }
 
-const PROMPT_DEDUPE_WINDOW_MS = 1_000;
 
 function sanitizeToolSegment(value: string): string {
 	const normalized = value
@@ -353,6 +352,20 @@ export async function isDaemonRunning(daemonUrl = DEFAULT_DAEMON_URL): Promise<b
 		return res.ok;
 	} catch {
 		return false;
+	}
+}
+
+/** Returns the daemon PID if reachable, null otherwise. */
+async function getDaemonPid(daemonUrl: string): Promise<number | null> {
+	try {
+		const res = await fetch(`${daemonUrl}/health`, {
+			signal: AbortSignal.timeout(1000),
+		});
+		if (!res.ok) return null;
+		const body = (await res.json()) as { pid?: number };
+		return typeof body.pid === "number" ? body.pid : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -533,7 +546,7 @@ export async function memoryStore(
 		daemonUrl?: string;
 		type?: string;
 		importance?: number;
-		tags?: string[];
+		tags?: string | readonly string[];
 		who?: string;
 	} = {},
 ): Promise<string | null> {
@@ -544,7 +557,10 @@ export async function memoryStore(
 			content,
 			type: options.type,
 			importance: options.importance,
-			tags: options.tags,
+			tags:
+				typeof options.tags === "string"
+					? options.tags
+					: options.tags?.map((tag) => tag.trim()).filter((tag) => tag.length > 0).join(","),
 			who: options.who || "openclaw",
 		},
 		timeout: WRITE_TIMEOUT,
@@ -690,7 +706,7 @@ export async function remember(
 		daemonUrl?: string;
 		type?: string;
 		importance?: number;
-		tags?: string[];
+		tags?: string | readonly string[];
 		who?: string;
 	} = {},
 ): Promise<string | null> {
@@ -737,22 +753,16 @@ function textResult(text: string, details?: Record<string, unknown>): OpenClawTo
 	};
 }
 
-function cleanupRecentPromptTurns(recentTurns: Map<string, number>, now: number): void {
-	for (const [key, ts] of recentTurns) {
-		if (now - ts > PROMPT_DEDUPE_WINDOW_MS) {
-			recentTurns.delete(key);
+// Dedup window for sessionless session-start calls (time-based; these don't
+// have a stable messageCount to key on).
+const SESSIONLESS_DEDUPE_MS = 1_000;
+
+function cleanupTimedMap(map: Map<string, number>, now: number): void {
+	for (const [key, ts] of map) {
+		if (now - ts > SESSIONLESS_DEDUPE_MS) {
+			map.delete(key);
 		}
 	}
-}
-
-function buildPromptTurnKey(params: {
-	sessionKey?: string;
-	agentId?: string;
-	prompt: string;
-	messageCount?: number;
-}): string {
-	const normalizedPrompt = params.prompt.trim().replace(/\s+/g, " ").slice(0, 240);
-	return `${params.sessionKey ?? "-"}|${params.agentId ?? "-"}|${params.messageCount ?? -1}|${normalizedPrompt}`;
 }
 
 function buildInjectionResult(result: UserPromptSubmitResult): { prependContext: string } | undefined {
@@ -777,6 +787,7 @@ async function registerMarketplaceProxyTools(
 	api: OpenClawPluginApi,
 	options: MarketplaceContextOptions,
 	knownNames: Set<string>,
+	proxyNameByToolKey: Map<string, string>,
 ): Promise<{ registeredNow: number; total: number }> {
 	const [catalog, policy] = await Promise.all([
 		marketplaceToolList({ ...options, refresh: true }),
@@ -815,7 +826,14 @@ async function registerMarketplaceProxyTools(
 
 	let registeredNow = 0;
 	for (const tool of candidates) {
-		const proxyName = buildProxyToolName(usedNames, tool.serverId, tool.toolName);
+		const toolKey = `${tool.serverId}\0${tool.toolName}`;
+		let proxyName = proxyNameByToolKey.get(toolKey);
+		if (!proxyName) {
+			proxyName = buildProxyToolName(usedNames, tool.serverId, tool.toolName);
+			proxyNameByToolKey.set(toolKey, proxyName);
+		} else {
+			usedNames.add(proxyName);
+		}
 		if (knownNames.has(proxyName)) {
 			continue;
 		}
@@ -881,16 +899,18 @@ const signetPlugin = {
 
 		// Instance-scoped health state (safe for multi-register)
 		let daemonReachable = true;
+		let knownPid: number | null = null;
 		let healthTimer: ReturnType<typeof setInterval> | null = null;
 		let marketplaceProxyTimer: ReturnType<typeof setInterval> | null = null;
 		const marketplaceProxyNames = new Set<string>();
 
 		api.logger.info(`signet-memory: registered (daemon: ${daemonUrl})`);
 
-		// Fire-and-forget startup health check
-		isDaemonRunning(daemonUrl).then((ok) => {
-			daemonReachable = ok;
-			if (!ok) {
+		// Fire-and-forget startup health check (also captures initial PID)
+		getDaemonPid(daemonUrl).then((pid) => {
+			daemonReachable = pid !== null;
+			knownPid = pid;
+			if (!daemonReachable) {
 				api.logger.warn(
 					`signet-memory: daemon unreachable at ${daemonUrl}. Memory tools will silently no-op until daemon is running.`,
 				);
@@ -995,7 +1015,7 @@ const signetPlugin = {
 							...opts,
 							type,
 							importance,
-							tags: tags ? tags.split(",").map((t) => t.trim()) : undefined,
+							tags,
 						});
 						if (id) {
 							return textResult(`Memory saved successfully (id: ${id})`, { id });
@@ -1259,8 +1279,10 @@ const signetPlugin = {
 			{ name: "mcp_server_call" },
 		);
 
+		const marketplaceProxyNameByToolKey = new Map<string, string>();
+
 		const refreshMarketplaceProxyTools = (): Promise<void> =>
-			registerMarketplaceProxyTools(api, opts, marketplaceProxyNames)
+			registerMarketplaceProxyTools(api, opts, marketplaceProxyNames, marketplaceProxyNameByToolKey)
 				.then((result) => {
 					if (result.registeredNow > 0) {
 						api.logger.info(
@@ -1283,7 +1305,16 @@ const signetPlugin = {
 
 		const claimedSessions = new Set<string>();
 		const sessionlessSessionStarts = new Map<string, number>();
-		const recentPromptTurns = new Map<string, number>();
+		// Maps sessionKey → {count, at} for per-turn idempotency. Entries are
+		// evicted on agent_end or lazily after SESSION_TURN_TTL_MS so crash/
+		// SIGKILL sessions don't accumulate indefinitely.
+		const SESSION_TURN_TTL_MS = 4 * 60 * 60 * 1000;
+		const injectedTurns = new Map<string, { count: number; at: number }>();
+		// Tracks turn signatures currently in-flight — provides a synchronous
+		// guard so concurrent before_prompt_build / before_agent_start calls on
+		// the same event-loop tick don't both pass the guard before either await
+		// completes (injectedTurns is only written after the daemon responds).
+		const inFlightTurns = new Set<string>();
 
 		const resolveHookContext = (
 			ctx: unknown,
@@ -1308,10 +1339,10 @@ const signetPlugin = {
 		): Promise<void> => {
 			if (!sessionKey) {
 				const now = Date.now();
-				cleanupRecentPromptTurns(sessionlessSessionStarts, now);
+				cleanupTimedMap(sessionlessSessionStarts, now);
 				const sessionlessKey = buildSessionlessTurnKey(event, agentId);
 				const recentStartAt = sessionlessSessionStarts.get(sessionlessKey);
-				if (typeof recentStartAt === "number" && now - recentStartAt <= PROMPT_DEDUPE_WINDOW_MS) {
+				if (typeof recentStartAt === "number" && now - recentStartAt <= SESSIONLESS_DEDUPE_MS) {
 					return;
 				}
 
@@ -1345,25 +1376,38 @@ const signetPlugin = {
 			sessionKey: string | undefined,
 			agentId: string | undefined,
 		): Promise<unknown> => {
+			// Skip immediately if daemon is known-unreachable — avoids a 5-second
+			// ECONNREFUSED hang on every message turn when the daemon is down.
+			if (!daemonReachable) return undefined;
+
 			const rawPrompt = typeof event.prompt === "string" ? event.prompt : undefined;
 			const prompt = rawPrompt ? extractUserMessage(rawPrompt) : undefined;
 			if (!prompt || prompt.length <= 3) {
 				return undefined;
 			}
 
-			const now = Date.now();
-			cleanupRecentPromptTurns(recentPromptTurns, now);
-			const messageCount = Array.isArray(event.messages) ? event.messages.length : undefined;
-			const promptTurnKey = buildPromptTurnKey({
-				sessionKey,
-				agentId,
-				prompt,
-				messageCount,
-			});
-			const recentTs = recentPromptTurns.get(promptTurnKey);
-			if (typeof recentTs === "number" && now - recentTs <= PROMPT_DEDUPE_WINDOW_MS) {
+			// Deduplicate by (sessionKey, messageCount): both before_prompt_build
+			// and before_agent_start fire on the same turn; only the first should
+			// call the daemon. Sessionless agents (no sessionKey) cannot be
+			// reliably correlated and are allowed to fall through rather than
+			// risk cross-suppressing concurrent independent sessions.
+			const count = Array.isArray(event.messages) ? event.messages.length : undefined;
+			// sig is only defined when we have both a stable session identity and
+			// a message count — the two values that make dedup meaningful.
+			const sig = sessionKey && typeof count === "number" ? `${sessionKey}|${count}` : undefined;
+			// Lazy TTL sweep: evict entries from sessions that ended without agent_end.
+			if (sig) {
+				const now = Date.now();
+				for (const [k, v] of injectedTurns) {
+					if (now - v.at > SESSION_TURN_TTL_MS) injectedTurns.delete(k);
+				}
+			}
+			if (sig && (inFlightTurns.has(sig) || (sessionKey !== undefined && injectedTurns.get(sessionKey)?.count === count))) {
 				return undefined;
 			}
+			// Mark in-flight synchronously before any await so concurrent
+			// invocations in the same event-loop tick see the guard immediately.
+			if (sig) inFlightTurns.add(sig);
 
 			const lastAssistantMessage = extractLastAssistantMessage(event);
 			const result = await onUserPromptSubmit("openclaw", {
@@ -1373,11 +1417,17 @@ const signetPlugin = {
 				lastAssistantMessage,
 				sessionKey,
 			});
+
+			// Always clear in-flight regardless of outcome.
+			if (sig) inFlightTurns.delete(sig);
 			if (!result) {
 				// daemonFetch already logged the specific error (ECONNREFUSED or HTTP status).
 				return undefined;
 			}
-			recentPromptTurns.set(promptTurnKey, Date.now());
+			// Record the completed turn so the other hook sees it on arrival.
+			if (sessionKey && typeof count === "number") {
+				injectedTurns.set(sessionKey, { count, at: Date.now() });
+			}
 			return buildInjectionResult(result);
 		};
 
@@ -1411,6 +1461,7 @@ const signetPlugin = {
 			await onSessionEnd("openclaw", { ...opts, sessionKey });
 			if (sessionKey) {
 				claimedSessions.delete(sessionKey);
+				injectedTurns.delete(sessionKey);
 			}
 			return undefined;
 		});
@@ -1424,7 +1475,8 @@ const signetPlugin = {
 			start() {
 				api.logger.info(`signet-memory: service started (daemon: ${daemonUrl})`);
 				healthTimer = setInterval(async () => {
-					const ok = await isDaemonRunning(daemonUrl);
+					const pid = await getDaemonPid(daemonUrl);
+					const ok = pid !== null;
 					if (ok !== daemonReachable) {
 						daemonReachable = ok;
 						if (ok) {
@@ -1433,6 +1485,14 @@ const signetPlugin = {
 							api.logger.warn("signet-memory: daemon became unreachable");
 						}
 					}
+					// Daemon restarted (PID changed). Evict all claimed sessions so
+					// ensureSessionStarted re-inits on next turn, restoring identity
+					// blocks and memory context transparently.
+					if (ok && knownPid !== null && pid !== knownPid) {
+						api.logger.info(`signet-memory: daemon restarted (pid ${knownPid} -> ${pid}), re-initializing sessions`);
+						claimedSessions.clear();
+					}
+					knownPid = pid;
 				}, 60_000);
 			},
 			stop() {

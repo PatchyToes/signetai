@@ -1,6 +1,6 @@
 {
   "name": "@signetai/signet-memory-openclaw",
-  "version": "0.62.0",
+  "version": "0.75.0",
   "description": "Signet adapter for OpenClaw — runtime plugin for AI agent memory",
   "type": "module",
   "main": "dist/index.js",
@@ -28,12 +28,16 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node && tsc --emitDeclarationOnly --declaration --outDir dist",
+    "prepack": "bun run build",
     "dev": "bun --watch src/index.ts",
     "test": "bun test"
   },
   "dependencies": {
-    "@signet/core": "workspace:*",
     "@sinclair/typebox": "0.34.47"
+  },
+  "devDependencies": {
+    "@signet/core": "workspace:*",
+    "@types/node": "^22.0.0"
   },
   "peerDependencies": {
     "openclaw": ">=0.1.0"

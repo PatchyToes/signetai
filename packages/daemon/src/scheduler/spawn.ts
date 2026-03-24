@@ -88,6 +88,10 @@ export async function spawnTask(
 		env: { ...baseEnv, SIGNET_NO_HOOKS: "1" } as NodeJS.ProcessEnv,
 	});
 
+	// Close stdin immediately — we never write to it, and leaving it open
+	// causes CLIs like claude to wait for input before proceeding.
+	child.stdin?.end();
+
 	const procStdout = new ReadableStream<Uint8Array>({
 		start(controller) {
 			child.stdout?.on("data", (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
@@ -108,13 +112,14 @@ export async function spawnTask(
 	});
 
 	let timedOut = false;
+	let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
 	const timer = setTimeout(() => {
 		timedOut = true;
 		child.kill("SIGTERM");
 		// Force kill after 5s if still alive
-		setTimeout(() => {
+		forceKillTimer = setTimeout(() => {
 			try {
-				child.kill("SIGKILL");
+				child.kill();
 			} catch {
 				// already dead
 			}
@@ -129,6 +134,7 @@ export async function spawnTask(
 		]);
 
 		clearTimeout(timer);
+		if (forceKillTimer) clearTimeout(forceKillTimer);
 
 		return {
 			exitCode,
@@ -139,6 +145,7 @@ export async function spawnTask(
 		};
 	} catch (err) {
 		clearTimeout(timer);
+		if (forceKillTimer) clearTimeout(forceKillTimer);
 		return {
 			exitCode: null,
 			stdout: "",

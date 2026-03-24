@@ -73,11 +73,20 @@ export type {
 	PipelineStructuralConfig,
 	PipelineSignificanceConfig,
 	PipelineModelRegistryConfig,
+	PipelineHintsConfig,
 	ModelRegistryEntry,
 } from "./types";
 export { parseManifest, generateManifest } from "./manifest";
 export { parseSoul, generateSoul } from "./soul";
 export { parseMemory, generateMemory } from "./memory";
+export {
+	NETWORK_MODES,
+	normalizeNetworkMode,
+	networkModeFromBindHost,
+	readNetworkMode,
+	resolveNetworkBinding,
+} from "./network";
+export type { NetworkMode } from "./network";
 export {
 	search,
 	vectorSearch,
@@ -235,3 +244,21 @@ export type {
 	DocumentRow,
 	ConnectorRow,
 } from "./connector-types";
+
+// Signet OS types
+export { DEFAULT_APP_SIZE } from "./signet-os-types";
+export type {
+	SignetAppManifest,
+	SignetAppEvents,
+	SignetAppSize,
+	AutoCardToolAction,
+	AutoCardResource,
+	AutoCardManifest,
+	McpProbeResult,
+	AppTrayState,
+	AppTrayEntry,
+	SignetOSEvent,
+	BrowserEventType,
+	EventBusSubscription,
+	ContextSnapshot,
+} from "./signet-os-types";

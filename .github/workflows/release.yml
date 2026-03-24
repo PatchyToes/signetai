@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Check for code changes
         id: changes
@@ -156,6 +156,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: signet-predictor-win32-x64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset: signet-predictor-win32-arm64.exe
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_VERSION: ${{ needs.release.outputs.version }}
@@ -170,7 +173,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install MSVC ARM64 toolchain
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" `
+            modify --installPath "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise" `
+            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --norestart | Out-Null
+          if ($LASTEXITCODE -notin @(0, 3010)) { exit $LASTEXITCODE }
+
       - name: Build predictor
+        shell: bash
         run: cargo build --release --target "$RELEASE_TARGET"
         working-directory: packages/predictor
 
@@ -180,7 +193,15 @@ jobs:
           EXT=""
           [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
           BINARY="packages/predictor/target/${RELEASE_TARGET}/release/signet-predictor${EXT}"
-          gh release upload "v${RELEASE_VERSION}" "${BINARY}#${RELEASE_ASSET}"
+          # Copy binary with the platform-specific asset name into a temp
+          # directory so gh uploads it under the correct name (not just as a
+          # label) and we don't leave artifacts in the repo root.
+          STAGING="${RUNNER_TEMP}/upload"
+          mkdir -p "${STAGING}"
+          cp "${BINARY}" "${STAGING}/${RELEASE_ASSET}"
+          openssl dgst -sha256 -hex "${STAGING}/${RELEASE_ASSET}" | awk '{print $NF}' > "${STAGING}/${RELEASE_ASSET}.sha256"
+          gh release upload "v${RELEASE_VERSION}" "${STAGING}/${RELEASE_ASSET}" --clobber
+          gh release upload "v${RELEASE_VERSION}" "${STAGING}/${RELEASE_ASSET}.sha256" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -206,6 +227,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: signet-daemon-win32-x64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset: signet-daemon-win32-arm64.exe
     runs-on: ${{ matrix.os }}
     env:
       RELEASE_VERSION: ${{ needs.release.outputs.version }}
@@ -218,7 +242,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install MSVC ARM64 toolchain
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" `
+            modify --installPath "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise" `
+            --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --norestart | Out-Null
+          if ($LASTEXITCODE -notin @(0, 3010)) { exit $LASTEXITCODE }
+
       - name: Build daemon
+        shell: bash
         run: cargo build --release --target "$RELEASE_TARGET" -p signet-daemon
         working-directory: packages/daemon-rs
       - name: Upload to release
@@ -227,9 +262,15 @@ jobs:
           EXT=""
           [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
           BINARY="packages/daemon-rs/target/${RELEASE_TARGET}/release/signet-daemon${EXT}"
-          openssl dgst -sha256 -hex "${BINARY}" | awk '{print $NF}' > "${BINARY}.sha256"
-          gh release upload "v${RELEASE_VERSION}" "${BINARY}#${RELEASE_ASSET}"
-          gh release upload "v${RELEASE_VERSION}" "${BINARY}.sha256#${RELEASE_ASSET}.sha256"
+          # Copy binary with the platform-specific asset name into a temp
+          # directory so gh uploads it under the correct name (not just as a
+          # label) and we don't leave artifacts in the repo root.
+          STAGING="${RUNNER_TEMP}/upload"
+          mkdir -p "${STAGING}"
+          cp "${BINARY}" "${STAGING}/${RELEASE_ASSET}"
+          openssl dgst -sha256 -hex "${STAGING}/${RELEASE_ASSET}" | awk '{print $NF}' > "${STAGING}/${RELEASE_ASSET}.sha256"
+          gh release upload "v${RELEASE_VERSION}" "${STAGING}/${RELEASE_ASSET}" --clobber
+          gh release upload "v${RELEASE_VERSION}" "${STAGING}/${RELEASE_ASSET}.sha256" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -263,6 +304,9 @@ jobs:
         run: gh release edit "v${NEW_VERSION}" --draft=false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve workspace protocols
+        run: bun scripts/version-sync.ts --to "$NEW_VERSION"
 
       - name: Publish to npm
         run: |

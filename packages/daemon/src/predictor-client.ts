@@ -10,7 +10,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { type Interface, createInterface } from "node:readline";
 import { DEFAULT_EMBEDDING_DIMENSIONS, type PredictorConfig } from "@signet/core";
 import { logger } from "./logger";
@@ -237,9 +237,8 @@ function newestExistingBinary(candidates: ReadonlyArray<string>): string | null 
 }
 
 function npmLocalBinaryCandidate(): string {
-	// When running from a global npm/bun install, the daemon lives in
-	// .../signetai/dist/daemon.js — the downloaded predictor binary is placed
-	// in .../signetai/bin/ by the postinstall script.
+	// Package-local fallback for global installs where the predictor binary
+	// is shipped or manually placed in the package's bin directory.
 	const platform = process.platform; // 'linux' | 'darwin' | 'win32'
 	const arch = process.arch === "arm64" ? "arm64" : "x64";
 	const ext = platform === "win32" ? ".exe" : "";
@@ -247,21 +246,34 @@ function npmLocalBinaryCandidate(): string {
 	return join(import.meta.dir, "..", "bin", name);
 }
 
+function syncedBinaryCandidate(): string {
+	const platform = process.platform; // 'linux' | 'darwin' | 'win32'
+	const arch = process.arch === "arm64" ? "arm64" : "x64";
+	const ext = platform === "win32" ? ".exe" : "";
+	const name = `signet-predictor-${platform}-${arch}${ext}`;
+	const envPath = process.env.SIGNET_PATH;
+	const agentsDir = typeof envPath === "string" && isAbsolute(envPath)
+		? envPath
+		: join(homedir(), ".agents");
+	return join(agentsDir, ".daemon", "bin", name);
+}
+
 function localBinaryCandidates(): ReadonlyArray<string> {
+	const ext = process.platform === "win32" ? ".exe" : "";
 	const monoRoot = join(import.meta.dir, "..", "..", "..");
 	const repoCandidates = [
-		join(monoRoot, "packages", "predictor", "target", "release", "signet-predictor"),
-		join(monoRoot, "packages", "predictor", "target", "release", "predictor"),
-		join(monoRoot, "packages", "predictor", "target", "debug", "signet-predictor"),
-		join(monoRoot, "packages", "predictor", "target", "debug", "predictor"),
+		join(monoRoot, "packages", "predictor", "target", "release", `signet-predictor${ext}`),
+		join(monoRoot, "packages", "predictor", "target", "release", `predictor${ext}`),
+		join(monoRoot, "packages", "predictor", "target", "debug", `signet-predictor${ext}`),
+		join(monoRoot, "packages", "predictor", "target", "debug", `predictor${ext}`),
 	];
 	const cwdCandidates = [
-		join(process.cwd(), "packages", "predictor", "target", "release", "signet-predictor"),
-		join(process.cwd(), "packages", "predictor", "target", "release", "predictor"),
-		join(process.cwd(), "packages", "predictor", "target", "debug", "signet-predictor"),
-		join(process.cwd(), "packages", "predictor", "target", "debug", "predictor"),
+		join(process.cwd(), "packages", "predictor", "target", "release", `signet-predictor${ext}`),
+		join(process.cwd(), "packages", "predictor", "target", "release", `predictor${ext}`),
+		join(process.cwd(), "packages", "predictor", "target", "debug", `signet-predictor${ext}`),
+		join(process.cwd(), "packages", "predictor", "target", "debug", `predictor${ext}`),
 	];
-	return [...new Set([...repoCandidates, ...cwdCandidates, npmLocalBinaryCandidate()])];
+	return [...new Set([...repoCandidates, ...cwdCandidates, syncedBinaryCandidate(), npmLocalBinaryCandidate()])];
 }
 
 function resolveBinaryPath(configured: string | undefined): string | null {
@@ -316,6 +328,7 @@ export function createPredictorClient(
 	spawnPredictor: PredictorSpawn = (binaryPath, args) =>
 		spawn(binaryPath, [...args], {
 			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 		}),
 ): PredictorClient {
 	let proc: ChildProcess | null = null;
@@ -586,7 +599,7 @@ export function createPredictorClient(
 				await new Promise<void>((resolve) => {
 					const killTimer = setTimeout(() => {
 						try {
-							child.kill("SIGKILL");
+							child.kill();
 						} catch {
 							// already dead
 						}

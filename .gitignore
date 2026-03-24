@@ -3,6 +3,7 @@ node_modules/
 .pnpm-store/
 .bun-tmp/
 .bun-install/
+.gitnexus/
 
 # Build outputs
 dist/
@@ -15,7 +16,16 @@ packages/signetai/bin/signet-predictor-*
 *.tgz
 *.png
 !web/public/blog/*.png
+!web/public/apple-touch-icon.png
+!web/public/Signet-Logo-White.png
+!web/public/Signet-Logo-Black.png
+!public/Signet-Logo-Black.png
+!public/Signet-Logo-White.png
+!public/discord-icon.png
+!packages/cli/dashboard/static/logo-dark.png
+!packages/cli/dashboard/static/logo-light.png
 .ruff_cache
+tmp/
 
 # TypeScript declaration files (generated in wrong locations)
 **/src/*.d.ts
@@ -35,6 +45,8 @@ packages/signetai/bin/signet-predictor-*
 .vscode/
 .playwright-mcp/
 .claude/
+.specstory/
+.cursorindexingignore
 
 # OS
 .DS_Store

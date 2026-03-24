@@ -37,6 +37,15 @@ import { up as losslessRetention } from "./028-lossless-retention";
 import { up as sessionSummaryDag } from "./029-session-summary-dag";
 import { up as nullableMemoryJobMemoryId } from "./030-nullable-memory-job-memory-id";
 import { up as dependencyReason } from "./031-dependency-reason";
+import { up as embeddingsVectorColumn } from "./032-embeddings-vector-column";
+import { up as scope } from "./033-scope";
+import { up as scopeAwareDedup } from "./034-scope-aware-dedup";
+import { up as entityFts } from "./035-entity-fts";
+import { up as dependencyConfidence } from "./036-dependency-confidence";
+import { up as entityCommunities } from "./037-entity-communities";
+import { up as memoryHints } from "./038-memory-hints";
+import { up as dedupEntityDependencies } from "./039-dedup-entity-dependencies";
+import { up as sessionTranscripts } from "./040-session-transcripts";
 
 // -- Public interface consumed by Database.init() --
 
@@ -51,7 +60,12 @@ export interface MigrationDb {
 
 export interface MigrationArtifacts {
 	readonly tables?: readonly string[];
-	readonly columns?: readonly { readonly table: string; readonly column: string }[];
+	readonly columns?: readonly {
+		readonly table: string;
+		readonly column: string;
+		/** Skip verification when the table itself doesn't exist (conditional/repair migrations). */
+		readonly optional?: boolean;
+	}[];
 }
 
 export interface Migration {
@@ -319,6 +333,68 @@ export const MIGRATIONS: readonly Migration[] = [
 			],
 		},
 	},
+	{
+		version: 32,
+		name: "embeddings-vector-column",
+		up: embeddingsVectorColumn,
+		artifacts: {
+			columns: [{ table: "embeddings", column: "vector", optional: true }],
+		},
+	},
+	{
+		version: 33,
+		name: "scope",
+		up: scope,
+		artifacts: {
+			columns: [{ table: "memories", column: "scope" }],
+		},
+	},
+	{
+		version: 34,
+		name: "scope-aware-dedup",
+		up: scopeAwareDedup,
+	},
+	{
+		version: 35,
+		name: "entity-fts",
+		up: entityFts,
+	},
+	{
+		version: 36,
+		name: "dependency-confidence",
+		up: dependencyConfidence,
+		artifacts: {
+			columns: [
+				{ table: "entity_dependencies", column: "confidence" },
+			],
+		},
+	},
+	{
+		version: 37,
+		name: "entity-communities",
+		up: entityCommunities,
+		artifacts: {
+			tables: ["entity_communities"],
+			columns: [{ table: "entities", column: "community_id" }],
+		},
+	},
+	{
+		version: 38,
+		name: "memory-hints",
+		up: memoryHints,
+		artifacts: { tables: ["memory_hints"] },
+	},
+	{
+		version: 39,
+		name: "dedup-entity-dependencies",
+		up: dedupEntityDependencies,
+	},
+	{
+		version: 40,
+		name: "session-transcripts",
+		up: sessionTranscripts,
+		artifacts: { tables: ["session_transcripts"] },
+	},
 ];
 
 /** Simple checksum for audit trail (hash of migration name + version). */
@@ -535,6 +611,9 @@ function verifyArtifacts(db: MigrationDb, migration: Migration): void {
 		const colCache = new Map<string, Set<string>>();
 		for (const col of migration.artifacts.columns) {
 			if (!tables.has(col.table)) {
+				// Optional columns skip verification when the table doesn't exist
+				// (conditional/repair migrations that are no-ops on fresh schemas).
+				if (col.optional) continue;
 				throw new Error(
 					`Post-DDL verification failed: migration ${migration.version} (${migration.name}) ` +
 						`declares column "${col.table}.${col.column}" but table does not exist`,

@@ -52,6 +52,21 @@ in parallel, interfaces must align before merge).
 
 ---
 
+## Research Provenance
+
+Research documents inform spec design. Every spec traces back to the
+research that shaped it. Research lives in `docs/research/` (technical
+and market subdirectories). Reference repos live in `references/`.
+
+| Spec ID | Informed By | Key Question |
+|---|---|---|
+| `knowledge-architecture-schema` | RESEARCH-GITNEXUS-PATTERNS, RESEARCH-LCM-ACP | How should entities, aspects, and attributes be structured? |
+| `desire-paths-epic` | RESEARCH-LCM-ACP, RESEARCH-REFERENCE-REPOS | How does retrieval evolve from flat search to graph traversal? |
+| `predictive-memory-scorer` | MSAM-COMPARISON | How should scoring balance structural vs behavioral signals? |
+| `desire-paths-epic`, `retroactive-supersession` | RESEARCH-COMPETITIVE-SYSTEMS | What retrieval, lifecycle, and integration patterns from competing systems should be adopted? |
+
+---
+
 ## Cross-Cutting Invariants
 
 These rules apply to ALL approved specs. Any spec that contradicts
@@ -80,7 +95,7 @@ table for the same reason: so multiple agents sharing the same SQLite
 file don't step on each other's data.
 
 Skills are scoped to `agent_id` in the graph. The filesystem pool
-(`~/.agents/skills/`) is shared, but graph nodes (entity + skill_meta +
+(`$SIGNET_WORKSPACE/skills/`) is shared, but graph nodes (entity + skill_meta +
 embeddings) are per-agent. Each agent gets its own skill entity with its
 own usage stats, decay, and relation edges.
 
@@ -231,13 +246,34 @@ cannot suppress them. This is a hard retrieval invariant.
 - DP-2 (edge confidence) adds `confidence` and `reason` columns to
   `entity_dependencies`. Graph traversal uses `confidence * strength`
   for edge filtering.
-- DP-6 (entity-anchored search) replaces the heuristic focal entity
-  resolution in `resolveFocalEntities` with FTS5 + embedding search
-  against entities. Current resolution becomes fallback.
+- DP-6 (traversal-primary retrieval) inverts the search pipeline so
+  graph traversal produces the base candidate pool and flat FTS5 search
+  fills gaps. Includes: FTS5 stop-word filtering, agent_id threading
+  through graph search, mention-based traversal fallback for memories
+  without full pipeline extraction, scope-filtered attribute collection,
+  prospective indexing (hypothetical query hints written at memory
+  creation time for future retrieval), and cosine re-scoring of
+  traversal results against the query embedding. Benchmarked at 62%
+  (Signet) vs 68% (RAG) on identical 50-question LoCoMo set — 8 of 12
+  Signet failures are shared with RAG (extraction/answer ceiling, not
+  retrieval).
 - DP-7 (constructed memories) changes traversal output from
   `memoryIds` to structured path objects with provenance metadata.
 - DP-14 (discovered principles) adds `principle` to the entity type
   taxonomy. Requires updating invariant 3 when implemented.
+- DP-16 (post-fusion dampening) adds gravity, hub, and resolution
+  filters after fusion scoring. Informed by Ori-Mnemos ablation data.
+  Implemented in `packages/daemon/src/pipeline/dampening.ts`.
+- DP-17 (compaction resilience) adds PreCompact/PostCompact checkpoint
+  hooks for mid-session context recovery. Extends session continuity.
+- DP-18 (decision auto-protection) auto-detects decisions and marks
+  them as constraints (invariant 5 ensures they always surface).
+  Implemented in `packages/daemon/src/inline-entity-linker.ts` (14
+  regex patterns, auto-promotes matching attributes to constraints).
+- DP-19 (adaptive write gate) evolves DP-1 significance gate from
+  session-level to per-memory surprisal filtering.
+- DP-20 (sleep replay) background consolidation discovers latent
+  cross-entity connections during idle periods.
 
 ### Desire Paths <-> Predictive Scorer
 
@@ -250,7 +286,7 @@ cannot suppress them. This is a hard retrieval invariant.
 - DP-9 (path feedback) changes training signal from "was this memory
   useful?" to "was this traversal path useful?" — propagating ratings
   along edges, upgrading/downgrading confidence/reason.
-- This is the convergence point described in `docs/DESIRE-PATHS.md`:
+- This is the convergence point described in `docs/specs/planning/DESIRE-PATHS.md`:
   the scorer provides learning signal, the graph provides structure
   to propagate it.
 
@@ -329,25 +365,46 @@ Phase ordering based on hard dependencies and integration contracts.
 ### Wave 6 (depends on Wave 5 — KA complete, PMS complete)
 
 - **Desire Paths Phase 1**: foundation completion
-  - DP-1: Significance gate (zero-cost continuity)
-  - DP-2: Edge confidence + reason on `entity_dependencies`
-  - DP-3: Bounded traversal parameters
-  - DP-4: MCP tool registration + blast radius endpoint
+  - DP-1: Significance gate (zero-cost continuity) — COMPLETE
+  - DP-2: Edge confidence + reason on `entity_dependencies` — COMPLETE
+  - DP-3: Bounded traversal parameters — COMPLETE
+  - DP-4: MCP tool registration + blast radius endpoint — COMPLETE
 - **Desire Paths Phase 2**: bootstrap topology
-  - DP-5: Leiden community detection
+  - DP-5: Louvain community detection — COMPLETE
 - **Desire Paths Phase 3**: graph-native retrieval
-  - DP-6: Entity-anchored search (replaces heuristic focal resolution)
-  - DP-7: Constructed memories (traversal paths, not memory rows)
+  - DP-6: Entity-anchored search + traversal-primary retrieval — COMPLETE
+  - DP-7: Constructed memories with path provenance — COMPLETE
+  - DP-6.1: Prospective indexing (hypothetical query hints at write time) — COMPLETE
+  - DP-6.2: Cosine re-scoring for traversal results — COMPLETE
+  - DP-6.3: Scoped vector search restore with 2x over-fetch — COMPLETE
+- **Benchmark baseline (2026-03-20, updated 2026-03-21)**: 50-question
+  LoCoMo comparison on identical question sets. Signet 62% vs RAG 68%
+  at initial baseline. Post DP-6.1/6.2/6.3: prospective indexing
+  improves hint-based retrieval for previously missed queries, cosine
+  re-scoring reranks traversal candidates by semantic relevance, and
+  scoped vector search with 2x over-fetch restores embedding-based
+  recall within entity scope. 8 of 12 original Signet failures are
+  shared with RAG — extraction/answer ceiling, not retrieval.
+- **Full-stack benchmark (2026-03-22)**: 8-question LoCoMo with DP-16
+  dampening, lossless session transcripts, gpt-4o extraction, and
+  improved temporal rules. 87.5% accuracy (7/8), 100% Hit@10, MRR
+  0.615. By type: multi-hop 100% (4/4), temporal 100% (1/1),
+  single-hop 66.7% (2/3). Precision 26.3%, recall 100%, NDCG 0.639.
 - **Desire Paths Phase 4**: path learning
-  - DP-8: Predictor bug fixes (prerequisite)
-  - DP-9: Path feedback propagation
-  - DP-10: Path scoring (predictor evolution)
-  - DP-11: Temporal reinforcement
+  - DP-8: Predictor bug fixes (cache invalidation) — COMPLETE
+  - DP-9: Path feedback propagation + co-occurrence growth + Q-value rewards — NOT STARTED
+  - DP-10: Path scoring (predictor evolution) — NOT STARTED
+  - DP-11: Temporal reinforcement + intent-aware routing — NOT STARTED
 - **Desire Paths Phase 5**: emergence
-  - DP-12: Explorer bees
-  - DP-13: Cross-entity boundary traversal
-  - DP-14: Discovered principles
-  - DP-15: Entity health dashboard
+  - DP-12: Explorer bees — NOT STARTED
+  - DP-13: Cross-entity bridges + reconsolidation — NOT STARTED
+  - DP-14: Discovered principles — NOT STARTED
+  - DP-15: Entity health dashboard — NOT STARTED
+  - DP-16: Post-fusion dampening (gravity, hub, resolution) — COMPLETE
+  - DP-17: Compaction resilience (hippocampal replay) — NOT STARTED
+  - DP-18: Decision auto-protection — COMPLETE
+  - DP-19: Adaptive write gate (per-memory surprisal) — NOT STARTED
+  - DP-20: Sleep replay (background consolidation) — NOT STARTED
 
 ---
 
@@ -364,18 +421,59 @@ Legend:
 | `memory-pipeline-v2` | complete | `docs/specs/complete/memory-pipeline-plan.md` | - | `session-continuity-protocol`, `procedural-memory-plan`, `knowledge-architecture-schema`, `predictive-memory-scorer`, `signet-runtime` | |
 | `session-continuity-protocol` | complete | `docs/specs/complete/session-continuity-protocol.md` | `memory-pipeline-v2` | `knowledge-architecture-schema`, `predictive-memory-scorer` | |
 | `procedural-memory-plan` | approved | `docs/specs/approved/procedural-memory-plan.md` | `memory-pipeline-v2` | `knowledge-architecture-schema` | P1 complete (skill_meta, enrichment, reconciler, graph nodes); P2–P5 remaining |
-| `knowledge-architecture-schema` | complete | `docs/specs/approved/knowledge-architecture-schema.md` | `memory-pipeline-v2`, `session-continuity-protocol`, `procedural-memory-plan` | `predictive-memory-scorer` | KA-1 through KA-6 fully implemented |
+| `knowledge-architecture-schema` | complete | `docs/specs/complete/knowledge-architecture-schema.md` | `memory-pipeline-v2`, `session-continuity-protocol`, `procedural-memory-plan` | `predictive-memory-scorer` | KA-1 through KA-6 fully implemented |
 | `predictive-memory-scorer` | approved | `docs/specs/approved/predictive-memory-scorer.md` | `memory-pipeline-v2`, `knowledge-architecture-schema`, `session-continuity-protocol` | - | |
 | `multi-agent-support` | approved | `docs/specs/approved/multi-agent-support.md` | `memory-pipeline-v2` | - | |
 | `signet-runtime` | approved | `docs/specs/approved/signet-runtime.md` | `memory-pipeline-v2` | - | |
 | `daemon-refactor` | planning | `docs/specs/planning/daemon-refactor.md` | - | `daemon-refactor-plan` | |
 | `daemon-refactor-plan` | planning | `docs/specs/planning/daemon-refactor-plan.md` | `daemon-refactor` | - | |
-| `daemon-rust-rewrite` | planning | `docs/specs/planning/daemon-rust-rewrite.md` | `memory-pipeline-v2` | - | |
-| `signet-roadmap-spec` | planning | `docs/specs/planning/signet-roadmap-spec.md` | - | - | |
+| `daemon-rust-rewrite` | planning | `docs/specs/planning/daemon-rust-rewrite.md` | `memory-pipeline-v2` | - | deferred — complexity cost exceeds current benefit |
+| `signet-roadmap-spec` | planning | `docs/specs/planning/signet-roadmap-spec.md` | - | - | superseded by INDEX.md as active roadmap |
 | `openclaw-integration-strategy` | complete | `docs/specs/complete/openclaw-integration-strategy.md` | - | `openclaw-importance-scoring-pr` | |
 | `openclaw-importance-scoring-pr` | complete | `docs/specs/complete/openclaw-importance-scoring-pr.md` | `openclaw-integration-strategy` | - | |
-| `desire-paths-epic` | approved | `docs/specs/approved/desire-paths-epic.md` | `knowledge-architecture-schema`, `predictive-memory-scorer` | - | 15 stories across 5 phases; LCM foundation patterns (escalation, cold tier, summary DAG) already implemented |
-| `notebook-dump-2026-02-25` | reference | `docs/specs/planning/notebook-dump-2026-02-25.md` | - | - | |
+| `desire-paths-epic` | approved | `docs/specs/approved/desire-paths-epic.md` | `knowledge-architecture-schema`, `predictive-memory-scorer` | - | 20 stories across 5 phases; Phases 1-3 COMPLETE. DP-16 through DP-20 added from reference repo analysis (Ori-Mnemos, Zikkaron) |
+| `notebook-dump-2026-02-25` | reference | `docs/research/technical/notebook-dump-2026-02-25.md` | - | - | |
+| `marketplace-reviews-cloudflare-staging` | planning | `docs/specs/planning/marketplace-reviews-cloudflare-staging.md` | - | - | |
+| `predictor-agent-feedback` | approved | `docs/specs/approved/predictor-agent-feedback.md` | `predictive-memory-scorer` | - | |
+| `retroactive-supersession` | planning | `docs/specs/planning/retroactive-supersession.md` | `knowledge-architecture-schema` | - | Informed by MSAM-COMPARISON, RESEARCH-COMPETITIVE-SYSTEMS |
+| `competitive-systems-research` | reference | `docs/research/technical/RESEARCH-COMPETITIVE-SYSTEMS.md` | - | - | Informs desire-paths-epic, retroactive-supersession |
+
+---
+
+## Success Criteria
+
+What "done" looks like for each spec — observable outcomes, not just
+code merged.
+
+**memory-pipeline-v2**: Memory extraction captures context that was
+previously lost between sessions. Pipeline processes hook payloads
+without blocking agent response time.
+
+**session-continuity-protocol**: Agent recovers meaningful context
+when resuming after session compaction or restart.
+
+**knowledge-architecture-schema**: Memory retrieval returns
+structurally related context, not just embedding-similar fragments.
+Entity graph traversal produces richer context than flat embedding
+search alone.
+
+**predictive-memory-scorer**: Session-start context relevance
+improves over time without manual curation. NDCG@10 on continuity
+scores is the quantitative metric.
+
+**desire-paths-epic**: Graph traversal discovers relevant memories
+that embedding search alone misses. Path feedback propagates learning
+signal through entity dependency edges.
+
+**procedural-memory-plan**: Installed skills are represented as graph
+entities with usage tracking and decay. Skill suggestions surface
+relevant capabilities during sessions.
+
+**signet-runtime**: Signet operates as a standalone runtime channel
+independent of harness-specific connectors.
+
+**multi-agent-support**: Multiple agents share one SQLite database
+without data collision via agent_id scoping.
 
 ---
 

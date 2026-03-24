@@ -32,6 +32,7 @@ import {
 	BaseConnector,
 	type InstallResult,
 	type UninstallResult,
+	atomicWriteJson,
 } from "@signet/connector-base";
 import { hasValidIdentity } from "@signet/core";
 import { PLUGIN_BUNDLE } from "./plugin-bundle.js";
@@ -228,7 +229,7 @@ export class OpenCodeConnector extends BaseConnector {
 	}
 
 	private getPluginConfigEntry(opencodePath: string): string {
-		return `./${relative(opencodePath, this.getPluginFilePath(opencodePath))}`;
+		return `./${relative(opencodePath, this.getPluginFilePath(opencodePath)).replaceAll("\\", "/")}`;
 	}
 
 	/**
@@ -377,7 +378,7 @@ export class OpenCodeConnector extends BaseConnector {
 
 			const changed = this.removeMemoryMjsEntries(config);
 			if (changed) {
-				writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+				atomicWriteJson(configPath, config);
 			}
 		}
 	}
@@ -434,7 +435,7 @@ export class OpenCodeConnector extends BaseConnector {
 			const existing = toStringArray(config.plugin);
 			if (!existing.includes(pluginEntry)) {
 				config.plugin = [...existing, pluginEntry];
-				writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+				atomicWriteJson(configPath, config);
 			}
 			return;
 		}
@@ -457,7 +458,7 @@ export class OpenCodeConnector extends BaseConnector {
 			const filtered = existing.filter((entry) => entry !== pluginEntry);
 			if (filtered.length !== existing.length) {
 				config.plugin = filtered;
-				writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+				atomicWriteJson(configPath, config);
 			}
 			return;
 		}
@@ -477,15 +478,30 @@ export class OpenCodeConnector extends BaseConnector {
 			const existingMcp = isJsonObject(config.mcp)
 				? (config.mcp as JsonObject)
 				: {};
+			// On Windows, spawn() without shell:true cannot resolve .cmd
+			// wrappers, so use "node" + mcp-stdio.js path instead.
+			let mcpCommand: string[] = ["signet-mcp"];
+			if (process.platform === "win32") {
+				const cliEntry = process.argv[1] || "";
+				const mcpJs = join(cliEntry, "..", "..", "dist", "mcp-stdio.js");
+				if (existsSync(mcpJs)) {
+					mcpCommand = [process.execPath, mcpJs];
+				} else {
+					console.warn(
+						`[signet] Warning: could not resolve mcp-stdio.js from argv[1]="${cliEntry}". ` +
+						`MCP server config will use "signet-mcp" which may fail on Windows without shell:true.`,
+					);
+				}
+			}
 			config.mcp = {
 				...existingMcp,
 				signet: {
 					type: "local",
-					command: ["signet-mcp"],
+					command: mcpCommand,
 					enabled: true,
 				},
 			};
-			writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+			atomicWriteJson(configPath, config);
 			return; // Only update first found config
 		}
 	}
@@ -510,7 +526,7 @@ export class OpenCodeConnector extends BaseConnector {
 				if (Object.keys(mcp).length === 0) {
 					delete config.mcp;
 				}
-				writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+				atomicWriteJson(configPath, config);
 			}
 		}
 	}

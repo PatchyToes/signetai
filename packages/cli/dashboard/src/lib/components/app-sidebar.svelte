@@ -5,6 +5,7 @@ import {
 	type TabId,
 	isEngineGroup,
 	isMemoryGroup,
+	isCortexGroup,
 	nav,
 	navigateToGroup,
 	setTab,
@@ -24,7 +25,6 @@ import Cog from "@lucide/svelte/icons/cog";
 import ExternalLink from "@lucide/svelte/icons/external-link";
 import Github from "@lucide/svelte/icons/github";
 import House from "@lucide/svelte/icons/house";
-import ListChecks from "@lucide/svelte/icons/list-checks";
 import Moon from "@lucide/svelte/icons/moon";
 import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Store from "@lucide/svelte/icons/store";
@@ -56,20 +56,19 @@ const {
 const sidebar = useSidebar();
 
 function maybePrefetchEmbeddings(id: string): void {
-	if (id !== "memory") return;
+	if (id !== "cortex") return;
 	onprefetchembeddings?.();
 }
 
 type NavItem =
 	| { id: TabId; label: string; icon: typeof Brain; group?: undefined }
-	| { id: string; label: string; icon: typeof Brain; group: "memory" | "engine" };
+	| { id: string; label: string; icon: typeof Brain; group: "memory" | "engine" | "cortex" };
 
 const navItems: NavItem[] = [
 	{ id: "home", label: "Home", icon: House },
-	{ id: "memory-group", label: "Memory", icon: Brain, group: "memory" },
+	{ id: "cortex-group", label: "Cortex", icon: Brain, group: "cortex" },
 	{ id: "secrets", label: "Secrets", icon: ShieldCheck },
 	{ id: "skills", label: "Marketplace", icon: Store },
-	{ id: "tasks", label: "Tasks", icon: ListChecks },
 	{ id: "engine-group", label: "Engine", icon: Cog, group: "engine" },
 ];
 
@@ -84,6 +83,7 @@ function openProjectPage(): void {
 function isActive(item: NavItem): boolean {
 	if (item.group === "memory") return isMemoryGroup(nav.activeTab);
 	if (item.group === "engine") return isEngineGroup(nav.activeTab);
+	if (item.group === "cortex") return isCortexGroup(nav.activeTab);
 	return nav.activeTab === item.id;
 }
 
@@ -157,14 +157,12 @@ function activateItem(item: NavItem): void {
 				>
 					{#snippet child({ props })}
 						<div {...props}>
-							<span
-								class="sidebar-signet-icon inline-block h-2.5 w-2.5 shrink-0 relative
-									before:absolute before:w-px before:h-full before:left-1/2
-									before:bg-[var(--sig-highlight)]
-									after:absolute after:w-full after:h-px after:top-1/2
-									after:bg-[var(--sig-highlight)]"
+							<img
+								src="/logo-dark.png"
+								alt=""
+								class="sidebar-signet-icon h-5 w-5 shrink-0"
 								aria-hidden="true"
-							></span>
+							/>
 							<div class="flex flex-col gap-0.5 leading-none overflow-hidden
 								transition-[opacity,width] duration-200 ease-out
 								group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:w-0">
@@ -377,8 +375,17 @@ function activateItem(item: NavItem): void {
 		transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease);
 	}
 
+	:global([data-theme="light"]) .sidebar-signet-icon {
+		filter: invert(1) drop-shadow(0 0 3px var(--sig-highlight-dim));
+	}
+
 	:global([data-sidebar="menu-button"]):hover .sidebar-signet-icon {
 		filter: drop-shadow(0 0 6px var(--sig-highlight)) drop-shadow(0 0 12px var(--sig-highlight));
+		transform: scale(1.15);
+	}
+
+	:global([data-theme="light"]) :global([data-sidebar="menu-button"]):hover .sidebar-signet-icon {
+		filter: invert(1) drop-shadow(0 0 6px var(--sig-highlight)) drop-shadow(0 0 12px var(--sig-highlight));
 		transform: scale(1.15);
 	}
 

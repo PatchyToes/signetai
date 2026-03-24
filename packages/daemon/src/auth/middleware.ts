@@ -24,24 +24,23 @@ function extractBearerToken(header: string | undefined): string | null {
 	return parts[1] ?? null;
 }
 
-// Known limitation: checks Host header, not connection peer address.
-// Spoofable by remote clients in theory, but daemon typically binds to
-// localhost anyway. Hono doesn't expose peer IP portably. Acceptable
-// for v1; revisit if daemon gets exposed to untrusted networks.
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// Check actual TCP peer address (not spoofable). Returns false (fail closed)
+// when socket info is unavailable — never falls back to the Host header,
+// which can be spoofed behind reverse proxies.
 function isLocalhost(c: Context): boolean {
-	const host = c.req.header("host") ?? "";
-	const hostWithoutPort = host.split(":")[0] ?? "";
-	return (
-		hostWithoutPort === "localhost" ||
-		hostWithoutPort === "127.0.0.1" ||
-		hostWithoutPort === "::1"
-	);
+	try {
+		const addr = (c.env as Record<string, unknown>)?.incoming as { socket?: { remoteAddress?: string } } | undefined;
+		const remote = addr?.socket?.remoteAddress;
+		if (remote) return LOOPBACK.has(remote);
+	} catch {
+		// Socket info unavailable — fail closed
+	}
+	return false;
 }
 
-export function createAuthMiddleware(
-	config: AuthConfig,
-	secret: Buffer | null,
-): MiddlewareHandler {
+export function createAuthMiddleware(config: AuthConfig, secret: Buffer | null): MiddlewareHandler {
 	return async (c, next) => {
 		// Local mode: no auth required at all
 		if (config.mode === "local") {
@@ -52,9 +51,7 @@ export function createAuthMiddleware(
 
 		// Hybrid mode: localhost requests skip token requirement
 		if (config.mode === "hybrid" && isLocalhost(c)) {
-			const token = extractBearerToken(
-				c.req.header("authorization"),
-			);
+			const token = extractBearerToken(c.req.header("authorization"));
 			if (token && secret) {
 				// If they send a token anyway, validate it
 				const result = verifyToken(secret, token);
@@ -91,28 +88,17 @@ export function createAuthMiddleware(
 	};
 }
 
-export function requirePermission(
-	permission: Permission,
-	config: AuthConfig,
-): MiddlewareHandler {
+export function requirePermission(permission: Permission, config: AuthConfig): MiddlewareHandler {
 	return async (c, next) => {
 		const auth = c.get("auth");
 
 		// In hybrid mode, localhost without token gets full access
-		if (
-			config.mode === "hybrid" &&
-			isLocalhost(c) &&
-			(!auth || !auth.claims)
-		) {
+		if (config.mode === "hybrid" && isLocalhost(c) && (!auth || !auth.claims)) {
 			await next();
 			return;
 		}
 
-		const decision = checkPermission(
-			auth?.claims ?? null,
-			permission,
-			config.mode,
-		);
+		const decision = checkPermission(auth?.claims ?? null, permission, config.mode);
 		if (!decision.allowed) {
 			c.status(403);
 			return c.json({ error: decision.reason ?? "forbidden" });
@@ -122,28 +108,17 @@ export function requirePermission(
 	};
 }
 
-export function requireScope(
-	getTarget: (c: Context) => TokenScope,
-	config: AuthConfig,
-): MiddlewareHandler {
+export function requireScope(getTarget: (c: Context) => TokenScope, config: AuthConfig): MiddlewareHandler {
 	return async (c, next) => {
 		const auth = c.get("auth");
 
-		if (
-			config.mode === "hybrid" &&
-			isLocalhost(c) &&
-			(!auth || !auth.claims)
-		) {
+		if (config.mode === "hybrid" && isLocalhost(c) && (!auth || !auth.claims)) {
 			await next();
 			return;
 		}
 
 		const target = getTarget(c);
-		const decision = checkScope(
-			auth?.claims ?? null,
-			target,
-			config.mode,
-		);
+		const decision = checkScope(auth?.claims ?? null, target, config.mode);
 		if (!decision.allowed) {
 			c.status(403);
 			return c.json({ error: decision.reason ?? "scope violation" });
@@ -153,11 +128,7 @@ export function requireScope(
 	};
 }
 
-export function requireRateLimit(
-	operation: string,
-	limiter: AuthRateLimiter,
-	config: AuthConfig,
-): MiddlewareHandler {
+export function requireRateLimit(operation: string, limiter: AuthRateLimiter, config: AuthConfig): MiddlewareHandler {
 	return async (c, next) => {
 		// No rate limiting in local mode
 		if (config.mode === "local") {
@@ -166,19 +137,15 @@ export function requireRateLimit(
 		}
 
 		const auth = c.get("auth");
-		const actor =
-			auth?.claims?.sub ??
-			c.req.header("x-signet-actor") ??
-			"anonymous";
+		// Never derive rate limit keys from untrusted headers —
+		// unauthenticated requests share the "anonymous" bucket.
+		const actor = auth?.claims?.sub ?? "anonymous";
 		const key = `${actor}:${operation}`;
 
 		const check = limiter.check(key);
 		if (!check.allowed) {
 			c.status(429);
-			c.header(
-				"Retry-After",
-				String(Math.ceil((check.resetAt - Date.now()) / 1000)),
-			);
+			c.header("Retry-After", String(Math.ceil((check.resetAt - Date.now()) / 1000)));
 			return c.json({
 				error: "rate limit exceeded",
 				retryAfter: check.resetAt,

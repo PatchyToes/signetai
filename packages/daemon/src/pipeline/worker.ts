@@ -16,22 +16,42 @@ import { escalate } from "./extraction-escalation";
 import { detectSemanticContradiction } from "./contradiction";
 import { runShadowDecisions } from "./decision";
 import { logger } from "../logger";
+import { assessSignificance, type SignificanceConfig } from "./significance-gate";
 import { txIngestEnvelope, txModifyMemory, txForgetMemory } from "../transactions";
 import { archiveToCold } from "./retention-worker";
 import { normalizeAndHashContent } from "../content-normalization";
 import { vectorToBlob, countChanges, syncVecInsert, syncVecDeleteBySourceExceptHash } from "../db-helpers";
 import { txPersistEntities } from "./graph-transactions";
+import { invalidateTraversalCache } from "./graph-traversal";
+import { enqueueHintsJob } from "./prospective-index";
 import type { AnalyticsCollector } from "../analytics";
 import type { TelemetryCollector } from "../telemetry";
 import { generateWithTracking } from "./provider";
+import {
+	PROSPECTIVE_ANTONYM_PAIRS,
+	tokenize,
+	hasNegation,
+	overlapCount,
+	hasAntonymConflict,
+} from "./antonyms";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export interface WorkerStats {
+	readonly failures: number;
+	readonly lastProgressAt: number;
+	readonly pending: number;
+	readonly processed: number;
+	readonly backoffMs: number;
+}
+
 export interface WorkerHandle {
 	stop(): Promise<void>;
 	readonly running: boolean;
+	nudge(): void;
+	readonly stats: WorkerStats;
 }
 
 interface JobRow {
@@ -45,6 +65,7 @@ interface JobRow {
 
 interface MemoryContentRow {
 	content: string;
+	extraction_status: string | null;
 }
 
 interface WrittenFact {
@@ -67,75 +88,6 @@ interface AppliedWriteStats {
 	dedupedFacts: WrittenFact[];
 }
 
-const NEGATION_TOKENS = new Set([
-	"not",
-	"no",
-	"never",
-	"cannot",
-	"cant",
-	"doesnt",
-	"dont",
-	"isnt",
-	"wasnt",
-	"wont",
-	"without",
-]);
-
-const CONTRADICTION_ANTONYM_PAIRS: ReadonlyArray<readonly [string, string]> = [
-	["enabled", "disabled"],
-	["allow", "deny"],
-	["accept", "reject"],
-	["always", "never"],
-	["on", "off"],
-	["true", "false"],
-];
-
-function tokenize(text: string): string[] {
-	return text
-		.toLowerCase()
-		.replace(/[^a-z0-9\s]/g, " ")
-		.split(/\s+/)
-		.filter((token) => token.length >= 2);
-}
-
-function hasNegation(tokens: readonly string[]): boolean {
-	return tokens.some((token) => NEGATION_TOKENS.has(token));
-}
-
-function overlapCount(
-	left: readonly string[],
-	right: readonly string[],
-): number {
-	const rightSet = new Set(right);
-	let overlap = 0;
-	for (const token of left) {
-		if (rightSet.has(token)) overlap++;
-	}
-	return overlap;
-}
-
-function hasAntonymConflict(
-	leftTokens: ReadonlySet<string>,
-	rightTokens: ReadonlySet<string>,
-): boolean {
-	for (const [leftWord, rightWord] of CONTRADICTION_ANTONYM_PAIRS) {
-		const leftHasLeft = leftTokens.has(leftWord);
-		const leftHasRight = leftTokens.has(rightWord);
-		const rightHasLeft = rightTokens.has(leftWord);
-		const rightHasRight = rightTokens.has(rightWord);
-
-		const leftExclusive = leftHasLeft !== leftHasRight;
-		const rightExclusive = rightHasLeft !== rightHasRight;
-		const oppositePolarity =
-			(leftHasLeft && rightHasRight) || (leftHasRight && rightHasLeft);
-
-		if (leftExclusive && rightExclusive && oppositePolarity) {
-			return true;
-		}
-	}
-	return false;
-}
-
 function detectContradictionRisk(
 	factContent: string,
 	targetContent: string | undefined,
@@ -155,7 +107,7 @@ function detectContradictionRisk(
 		return true;
 	}
 
-	return hasAntonymConflict(new Set(factTokens), new Set(targetTokens));
+	return hasAntonymConflict(new Set(factTokens), new Set(targetTokens), PROSPECTIVE_ANTONYM_PAIRS);
 }
 
 function zeroWriteStats(): AppliedWriteStats {
@@ -182,6 +134,20 @@ export function enqueueExtractionJob(
 	memoryId: string,
 ): void {
 	accessor.withWriteTx((db) => {
+		// Skip if memory extraction is already complete (structured passthrough
+		// or prior pipeline run). This prevents re-processing memories that
+		// were ingested with pre-extracted data.
+		const mem = db
+			.prepare(
+				`SELECT extraction_status FROM memories WHERE id = ? LIMIT 1`,
+			)
+			.get(memoryId) as { extraction_status: string | null } | undefined;
+		if (
+			mem?.extraction_status === "complete" ||
+			mem?.extraction_status === "completed"
+		)
+			return;
+
 		// Dedup: skip if a pending/leased job already exists
 		const existing = db
 			.prepare(
@@ -863,8 +829,8 @@ function runStructuralPass1(
 			// Resolve source entity ID from the entities table
 			const canonical = matchedTriple.source.trim().toLowerCase().replace(/\s+/g, " ");
 			const entityRow = db
-				.prepare("SELECT id, entity_type FROM entities WHERE canonical_name = ? LIMIT 1")
-				.get(canonical) as { id: string; entity_type: string } | undefined;
+				.prepare("SELECT id, entity_type, agent_id FROM entities WHERE canonical_name = ? LIMIT 1")
+				.get(canonical) as { id: string; entity_type: string; agent_id: string } | undefined;
 			if (!entityRow) continue;
 
 			// Skip if this memory already has a structural attribute row (classified or stub)
@@ -880,9 +846,9 @@ function runStructuralPass1(
 				`INSERT INTO entity_attributes
 				 (id, aspect_id, agent_id, memory_id, kind, content, normalized_content,
 				  confidence, importance, status, created_at, updated_at)
-				 VALUES (?, NULL, 'default', ?, 'attribute', ?, ?, ?, 0.5, 'active', ?, ?)`,
+				 VALUES (?, NULL, ?, ?, 'attribute', ?, ?, ?, 0.5, 'active', ?, ?)`,
 			).run(
-				attrId, fact.memoryId, fact.content, fact.normalizedContent,
+				attrId, entityRow.agent_id, fact.memoryId, fact.content, fact.normalizedContent,
 				fact.confidence, now, now,
 			);
 			stats.attributesCreated++;
@@ -895,6 +861,7 @@ function runStructuralPass1(
 				entity_type: entityRow.entity_type,
 				fact_content: fact.content,
 				attribute_id: attrId,
+				agent_id: entityRow.agent_id,
 			});
 			enqueueStructuralJob(db, fact.memoryId, "structural_classify", classifyPayload);
 			stats.classifyEnqueued++;
@@ -961,15 +928,25 @@ export function startWorker(
 	// Backoff state
 	let consecutiveFailures = 0;
 	const BASE_DELAY = 1000;
-	const MAX_DELAY = 30000;
+	const MAX_DELAY = 15000;
 	const JITTER = 500;
 
+	// Progress tracking for watchdog and stats
+	let lastAttempt = Date.now(); // updated on every tick (success or failure)
+	let lastSuccess = Date.now(); // updated only on successful job completion
+	let processed = 0;
+	let watchdog: ReturnType<typeof setInterval> | null = null;
+	const WATCHDOG_INTERVAL = 30_000;
+	const STALL_THRESHOLD = 60_000;
+
 	async function processExtractJob(job: JobRow): Promise<void> {
-		// Fetch memory content
+		// Fetch memory content + extraction status
 		const row = accessor.withReadDb(
 			(db) =>
 				db
-					.prepare("SELECT content FROM memories WHERE id = ?")
+					.prepare(
+						"SELECT content, extraction_status FROM memories WHERE id = ?",
+					)
 					.get(job.memory_id) as MemoryContentRow | undefined,
 		);
 
@@ -982,6 +959,66 @@ export function startWorker(
 				);
 			});
 			return;
+		}
+
+		// Bail if memory was already extracted (structured passthrough or
+		// prior run). Completes the job without running LLM extraction.
+		if (
+			row.extraction_status === "complete" ||
+			row.extraction_status === "completed"
+		) {
+			accessor.withWriteTx((db) => {
+				completeJob(
+					db,
+					job.id,
+					JSON.stringify({ skipped: "already_extracted" }),
+				);
+			});
+			return;
+		}
+
+		// --- Significance gate: skip extraction for trivial sessions ---
+		const sigCfg: SignificanceConfig =
+			pipelineCfg.significance ?? {
+				enabled: true,
+				minTurns: 5,
+				minEntityOverlap: 1,
+				noveltyThreshold: 0.15,
+			};
+
+		if (sigCfg.enabled) {
+			const assessment = accessor.withReadDb((db) =>
+				assessSignificance(row.content, db, "default", sigCfg),
+			);
+
+			if (!assessment.significant) {
+				logger.info(
+					"pipeline",
+					"Session below significance threshold — skipping extraction",
+					{
+						jobId: job.id,
+						memoryId: job.memory_id,
+						scores: assessment.scores,
+						reason: assessment.reason,
+					},
+				);
+
+				// Mark the job complete with gate result — raw transcript
+				// is already persisted, only LLM extraction is skipped.
+				accessor.withWriteTx((db) => {
+					completeJob(
+						db,
+						job.id,
+						JSON.stringify({
+							skipped: "significance_gate",
+							scores: assessment.scores,
+							reason: assessment.reason,
+						}),
+					);
+					updateExtractionStatus(db, job.memory_id, "completed");
+				});
+				return;
+			}
 		}
 
 		// Wrap provider to capture llm.generate telemetry on every call
@@ -1245,6 +1282,8 @@ export function startWorker(
 							agentId: "default",
 					}),
 				);
+				// New entities/relations invalidate traversal table cache
+				invalidateTraversalCache();
 			} catch (e) {
 				logger.warn("pipeline", "Graph entity persistence failed (non-fatal)", {
 					jobId: job.id,
@@ -1317,6 +1356,25 @@ export function startWorker(
 			}
 		}
 
+		// Enqueue prospective indexing jobs for newly written facts.
+		// Non-fatal: hint generation is async and can fail independently.
+		let hintsEnqueued = 0;
+		if (pipelineCfg.hints?.enabled && writeStats.writtenFacts.length > 0) {
+			try {
+				accessor.withWriteTx((db) => {
+					for (const fact of writeStats.writtenFacts) {
+						enqueueHintsJob(db, fact.memoryId, fact.content);
+						hintsEnqueued++;
+					}
+				});
+			} catch (e) {
+				logger.warn("pipeline", "Hints job enqueueing failed (non-fatal)", {
+					jobId: job.id,
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		}
+
 		logger.info("pipeline", "Extraction job completed", {
 			jobId: job.id,
 			memoryId: job.memory_id,
@@ -1338,6 +1396,7 @@ export function startWorker(
 			structuralAttributesCreated: structuralStats.attributesCreated,
 			structuralClassifyEnqueued: structuralStats.classifyEnqueued,
 			structuralDependencyEnqueued: structuralStats.dependencyEnqueued,
+			hintsEnqueued,
 		});
 	}
 
@@ -1350,12 +1409,18 @@ export function startWorker(
 				leaseJob(db, "extract", pipelineCfg.worker.maxRetries),
 			);
 
-			if (!job) return; // Nothing to do
+			if (!job) {
+				consecutiveFailures = 0;
+				return;
+			}
 
 			const jobStart = Date.now();
 			try {
 				await processExtractJob(job);
-				if (consecutiveFailures > 0) consecutiveFailures--;
+				consecutiveFailures = 0;
+				lastAttempt = Date.now();
+				lastSuccess = Date.now();
+				processed++;
 				analytics?.recordLatency("jobs", Date.now() - jobStart);
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
@@ -1389,6 +1454,7 @@ export function startWorker(
 					}
 				});
 				consecutiveFailures++;
+				lastAttempt = Date.now();
 			}
 		} catch (e) {
 			logger.error(
@@ -1397,6 +1463,7 @@ export function startWorker(
 				e instanceof Error ? e : new Error(String(e)),
 			);
 			consecutiveFailures++;
+			lastAttempt = Date.now();
 		}
 	}
 
@@ -1410,6 +1477,12 @@ export function startWorker(
 	function scheduleTick(): void {
 		if (!running) return;
 		const delay = getBackoffDelay();
+		if (consecutiveFailures > 2) {
+			logger.warn("pipeline", "Worker backing off", {
+				failures: consecutiveFailures,
+				delayMs: Math.round(delay),
+			});
+		}
 		pollTimer = setTimeout(async () => {
 			inflight = tick();
 			await inflight;
@@ -1433,6 +1506,47 @@ export function startWorker(
 		}
 	}, 60000);
 
+	// Stall watchdog — detect when worker stops making progress.
+	// Uses lastSuccess (not lastAttempt) so failure loops still trigger it.
+	watchdog = setInterval(() => {
+		if (!running) return;
+		if (Date.now() - lastSuccess < STALL_THRESHOLD) return;
+
+		let pending = 0;
+		try {
+			const row = accessor.withReadDb((db) =>
+				db
+					.prepare(
+						"SELECT COUNT(*) as cnt FROM memory_jobs WHERE job_type = 'extract' AND status = 'pending'",
+					)
+					.get() as { cnt: number },
+			);
+			pending = row.cnt;
+		} catch {
+			return;
+		}
+		if (pending === 0) return;
+
+		logger.warn("pipeline", "Worker stall detected, resetting backoff", {
+			pending,
+			failures: consecutiveFailures,
+			stalledMs: Date.now() - lastSuccess,
+		});
+
+		consecutiveFailures = 0;
+		lastSuccess = Date.now();
+		// If a tick is already running, just reset backoff — the
+		// in-progress tick will call scheduleTick() on completion.
+		if (inflight) return;
+		if (pollTimer) clearTimeout(pollTimer);
+		pollTimer = setTimeout(async () => {
+			inflight = tick();
+			await inflight;
+			inflight = null;
+			scheduleTick();
+		}, 0);
+	}, WATCHDOG_INTERVAL);
+
 	// Start the tick loop
 	scheduleTick();
 	logger.info("pipeline", "Worker started", {
@@ -1447,14 +1561,53 @@ export function startWorker(
 				: "shadow",
 	});
 
+	function pendingCount(): number {
+		try {
+			const row = accessor.withReadDb((db) =>
+				db
+					.prepare(
+						"SELECT COUNT(*) as cnt FROM memory_jobs WHERE job_type = 'extract' AND status = 'pending'",
+					)
+					.get() as { cnt: number },
+			);
+			return row.cnt;
+		} catch {
+			return 0;
+		}
+	}
+
 	return {
 		get running() {
 			return running;
+		},
+		nudge() {
+			consecutiveFailures = 0;
+			// If a tick is already running, just reset backoff — the
+			// in-progress tick will call scheduleTick() on completion
+			// with the now-zeroed failure count.
+			if (inflight) return;
+			if (pollTimer) clearTimeout(pollTimer);
+			pollTimer = setTimeout(async () => {
+				inflight = tick();
+				await inflight;
+				inflight = null;
+				scheduleTick();
+			}, 0);
+		},
+		get stats(): WorkerStats {
+			return {
+				failures: consecutiveFailures,
+				lastProgressAt: lastSuccess,
+				pending: pendingCount(),
+				processed,
+				backoffMs: getBackoffDelay(),
+			};
 		},
 		async stop() {
 			running = false;
 			if (pollTimer) clearTimeout(pollTimer);
 			if (reapTimer) clearInterval(reapTimer);
+			if (watchdog) clearInterval(watchdog);
 			if (inflight) await inflight;
 			logger.info("pipeline", "Worker stopped");
 		},

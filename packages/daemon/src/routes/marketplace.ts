@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Hono } from "hono";
 import { logger } from "../logger.js";
 import { getSecret } from "../secrets.js";
+import { probeServer, storeProbeResult, removeProbeResult } from "../mcp-probe.js";
 
 const CATALOG_PAGE_SIZE = 30;
 const CATALOG_MAX_PAGES = 10;
@@ -234,7 +235,7 @@ function extractScopeContext(input: {
 }
 
 function normalizeWorkspaceScopeEntry(value: string): string {
-	const trimmed = value.trim();
+	const trimmed = value.trim().replaceAll("\\", "/");
 	return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 }
 
@@ -246,7 +247,7 @@ function dimensionMatches(
 	if (allowed.length === 0) return true;
 	if (!current) return false;
 
-	const currentLower = current.toLowerCase();
+	const currentLower = current.toLowerCase().replaceAll("\\", "/");
 	for (const rawEntry of allowed) {
 		const entry = rawEntry.toLowerCase();
 		if (kind === "workspace") {
@@ -795,6 +796,8 @@ function parseInstalledServer(value: unknown): InstalledMarketplaceMcpServer | n
 	};
 }
 
+/** NOTE: marketplace-helpers.ts has a public copy of this function to avoid circular imports.
+ *  If you change the path or format here, update marketplace-helpers.ts to match. */
 function readInstalledServers(): InstalledMarketplaceMcpServer[] {
 	const path = getInstalledMcpPath();
 	if (!existsSync(path)) return [];
@@ -1329,6 +1332,10 @@ export function mountMarketplaceRoutes(app: Hono): void {
 			const next = installed.map((s) => (s.id === existing.id ? updated : s));
 			writeInstalledServers(next);
 			invalidateMarketplaceToolsCache();
+			// Fire-and-forget probe on install/update
+			void probeServer(updated).then(storeProbeResult).catch((err) => {
+				logger.warn("probe", `Post-install probe failed for ${updated.id}: ${err}`);
+			});
 			return c.json({ success: true, server: updated, updated: true });
 		}
 
@@ -1360,6 +1367,10 @@ export function mountMarketplaceRoutes(app: Hono): void {
 
 		writeInstalledServers([...installed, server]);
 		invalidateMarketplaceToolsCache();
+		// Fire-and-forget probe on new install
+		void probeServer(server).then(storeProbeResult).catch((err) => {
+			logger.warn("probe", `Post-install probe failed for ${server.id}: ${err}`);
+		});
 		return c.json({ success: true, server, updated: false });
 	});
 
@@ -1400,6 +1411,10 @@ export function mountMarketplaceRoutes(app: Hono): void {
 
 		writeInstalledServers([...installed, server]);
 		invalidateMarketplaceToolsCache();
+		// Fire-and-forget probe on manual register
+		void probeServer(server).then(storeProbeResult).catch((err) => {
+			logger.warn("probe", `Post-register probe failed for ${server.id}: ${err}`);
+		});
 		return c.json({ success: true, server });
 	});
 
@@ -1490,6 +1505,45 @@ export function mountMarketplaceRoutes(app: Hono): void {
 		}
 	});
 
+	app.post("/api/marketplace/mcp/read-resource", async (c) => {
+		let body: { serverId?: string; uri?: string } = {};
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ error: "Invalid JSON body" }, 400);
+		}
+
+		if (!body.serverId || !body.uri) {
+			return c.json({ error: "serverId and uri are required" }, 400);
+		}
+
+		const context = extractContextFromRequest(c);
+		const installed = readInstalledServers();
+		const server = installed.find(
+			(s) =>
+				s.id === body.serverId &&
+				s.enabled &&
+				scopeMatches(s.scope, context),
+		);
+		if (!server) {
+			return c.json(
+				{ error: "Server not found, disabled, or out of scope" },
+				404,
+			);
+		}
+
+		try {
+			const result = await withConnectedClient(server, async (client) => {
+				return client.readResource({ uri: body.uri ?? "" });
+			});
+			return c.json({ success: true, contents: result });
+		} catch (error) {
+			const msg =
+				error instanceof Error ? error.message : String(error);
+			return c.json({ success: false, error: msg }, 500);
+		}
+	});
+
 	app.get("/api/marketplace/mcp/:id", (c) => {
 		const id = c.req.param("id");
 		const installed = readInstalledServers();
@@ -1550,6 +1604,8 @@ export function mountMarketplaceRoutes(app: Hono): void {
 		}
 		writeInstalledServers(installed.filter((s) => s.id !== id));
 		invalidateMarketplaceToolsCache();
+		// Clean up probe result and app tray entry on uninstall
+		removeProbeResult(id);
 		return c.json({ success: true, id });
 	});
 }

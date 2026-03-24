@@ -1,6 +1,6 @@
 {
   "name": "@signet/connector-opencode",
-  "version": "0.62.0",
+  "version": "0.75.0",
   "description": "Signet connector for OpenCode - installs hooks and generates config",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "bun run build:bundle",
-    "build:bundle": "bun scripts/embed-plugin.ts && bun build src/index.ts --outdir dist --target node && bun run build:types",
+    "build:bundle": "bun scripts/embed-plugin.ts && bun build src/index.ts --outdir dist --target node --external better-sqlite3 && bun run build:types",
     "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
     "dev": "bun --watch src/index.ts",
     "typecheck": "tsc --noEmit"

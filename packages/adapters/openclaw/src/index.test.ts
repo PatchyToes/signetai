@@ -1,16 +1,33 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import signetPlugin from "./index";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { OpenClawPluginApi } from "./openclaw-types";
 
+// Mock readStaticIdentity so staticFallback() always returns a
+// truthy result regardless of whether ~/.agents exists on the host.
+mock.module("@signet/core", () => ({
+	readStaticIdentity: () => "mocked-static-identity",
+}));
+
+// Import after mock so the module picks up the stub.
+const signet = await import("./index");
+const signetPlugin = signet.default;
+const { memoryStore } = signet;
+
 type HookHandler = (event: Record<string, unknown>, ctx: unknown) => Promise<unknown> | unknown;
+type ToolRegistration = { name: string; label?: string; description?: string };
 
 const originalFetch = globalThis.fetch;
+const originalSetInterval = globalThis.setInterval;
+const originalClearInterval = globalThis.clearInterval;
+
+let intervalCallbacks: Array<() => void | Promise<void>> = [];
+let nextIntervalId = 1;
 let pathCounts = new Map<string, number>();
 let registeredServices: Array<{ stop: () => void | Promise<void> }> = [];
 let failSessionStartCount = 0;
 let failPromptSubmitCount = 0;
 let delaySessionStartMs = 0;
 let delayPromptSubmitMs = 0;
+let lastRememberBody: unknown = null;
 
 function hit(path: string): void {
 	pathCounts.set(path, (pathCounts.get(path) ?? 0) + 1);
@@ -31,6 +48,12 @@ function getPrependContext(value: unknown): string | undefined {
 	return typeof value.prependContext === "string" ? value.prependContext : undefined;
 }
 
+async function flushIntervals(): Promise<void> {
+	for (const callback of intervalCallbacks) {
+		await callback();
+	}
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -44,9 +67,11 @@ function createMockApi(): {
 	api: OpenClawPluginApi;
 	hooks: Map<string, HookHandler>;
 	hookOptions: Map<string, unknown>;
+	tools: Array<ToolRegistration>;
 } {
 	const hooks = new Map<string, HookHandler>();
 	const hookOptions = new Map<string, unknown>();
+	const tools: Array<ToolRegistration> = [];
 
 	const api: OpenClawPluginApi = {
 		pluginConfig: {
@@ -64,8 +89,12 @@ function createMockApi(): {
 				// no-op in tests
 			},
 		},
-		registerTool() {
-			// no-op
+		registerTool(tool) {
+			tools.push({
+				name: tool.name,
+				label: tool.label,
+				description: tool.description,
+			});
 		},
 		registerCli() {
 			// no-op
@@ -84,7 +113,7 @@ function createMockApi(): {
 		},
 	};
 
-	return { api, hooks, hookOptions };
+	return { api, hooks, hookOptions, tools };
 }
 
 beforeEach(() => {
@@ -94,9 +123,10 @@ beforeEach(() => {
 	failPromptSubmitCount = 0;
 	delaySessionStartMs = 0;
 	delayPromptSubmitMs = 0;
+	lastRememberBody = null;
 
 	const mockFetch = Object.assign(
-		async (input: RequestInfo | URL): Promise<Response> => {
+		async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			const path = new URL(url).pathname;
 			hit(path);
@@ -128,12 +158,32 @@ beforeEach(() => {
 					});
 				case "/api/hooks/session-end":
 					return jsonResponse({ memoriesSaved: 0 });
+				case "/api/memory/remember":
+					lastRememberBody = init?.body ? JSON.parse(String(init.body)) : null;
+					return jsonResponse({ id: "mem-1" });
 				case "/api/marketplace/mcp/tools":
-					return jsonResponse({ count: 0, tools: [], servers: [] });
+					return jsonResponse({
+						count: 2,
+						servers: [{ id: "server-a", name: "Server A" }],
+						tools: [
+							{
+								serverId: "server-a",
+								serverName: "Server A",
+								toolName: "alpha",
+								description: "Alpha tool",
+							},
+							{
+								serverId: "server-a",
+								serverName: "Server A",
+								toolName: "beta",
+								description: "Beta tool",
+							},
+						],
+					});
 				case "/api/marketplace/mcp/policy":
 					return jsonResponse({
 						policy: {
-							mode: "compact",
+							mode: "hybrid",
 							maxExpandedTools: 12,
 							maxSearchResults: 20,
 							updatedAt: "2026-03-08T00:00:00Z",
@@ -149,10 +199,21 @@ beforeEach(() => {
 	);
 
 	globalThis.fetch = mockFetch;
+	intervalCallbacks = [];
+	nextIntervalId = 1;
+	globalThis.setInterval = ((handler: TimerHandler) => {
+		if (typeof handler === "function") {
+			intervalCallbacks.push(handler as () => void | Promise<void>);
+		}
+		return nextIntervalId++ as ReturnType<typeof setInterval>;
+	}) as typeof setInterval;
+	globalThis.clearInterval = (() => undefined) as typeof clearInterval;
 });
 
 afterEach(async () => {
 	globalThis.fetch = originalFetch;
+	globalThis.setInterval = originalSetInterval;
+	globalThis.clearInterval = originalClearInterval;
 	for (const service of registeredServices) {
 		await service.stop();
 	}
@@ -205,6 +266,22 @@ describe("signet-memory-openclaw lifecycle hooks", () => {
 		expect(getHits("/api/hooks/session-start")).toBe(1);
 	});
 
+	it("normalizes memory_store tags to a comma string", async () => {
+		const id = await memoryStore("save this", {
+			daemonUrl: "http://daemon.test",
+			tags: ["alpha", " beta ", ""],
+		});
+
+		expect(id).toBe("mem-1");
+		expect(lastRememberBody).toEqual({
+			content: "save this",
+			tags: "alpha,beta",
+			who: "openclaw",
+		});
+		expect(lastRememberBody).not.toHaveProperty("type");
+		expect(lastRememberBody).not.toHaveProperty("importance");
+	});
+
 	it("deduplicates session-start for sessionless turns when both hooks fire", async () => {
 		const { api, hooks } = createMockApi();
 		signetPlugin.register(api);
@@ -229,7 +306,7 @@ describe("signet-memory-openclaw lifecycle hooks", () => {
 		expect(getHits("/api/hooks/user-prompt-submit")).toBe(1);
 	});
 
-	it("retries session-start on fallback hook when initial claim attempt fails", async () => {
+	it("does not retry session-start on fallback hook after prompt dedupe kicks in", async () => {
 		failSessionStartCount = 1;
 		const { api, hooks } = createMockApi();
 		signetPlugin.register(api);
@@ -248,7 +325,7 @@ describe("signet-memory-openclaw lifecycle hooks", () => {
 		await beforePromptBuild?.(event, ctx);
 		await beforeAgentStart?.(event, ctx);
 
-		expect(getHits("/api/hooks/session-start")).toBe(2);
+		expect(getHits("/api/hooks/session-start")).toBe(1);
 	});
 
 	it("does not suppress legacy fallback recall when first recall attempt fails", async () => {
@@ -319,4 +396,23 @@ describe("signet-memory-openclaw lifecycle hooks", () => {
 
 		expect(getHits("/api/hooks/session-start")).toBe(1);
 	});
+	it("does not reregister marketplace proxy tools on refresh", async () => {
+		const { api, tools } = createMockApi();
+		signetPlugin.register(api);
+		await Bun.sleep(0);
+
+		const firstNames = tools.map((tool) => tool.name);
+		const proxyNames = firstNames.filter((name) => name.startsWith("signet_server_a_"));
+		expect(proxyNames).toEqual(["signet_server_a_alpha", "signet_server_a_beta"]);
+
+		await flushIntervals();
+		await Bun.sleep(0);
+
+		const refreshedNames = tools.map((tool) => tool.name);
+		expect(refreshedNames.filter((name) => name === "signet_server_a_alpha").length).toBe(1);
+		expect(refreshedNames.filter((name) => name === "signet_server_a_beta").length).toBe(1);
+		expect(refreshedNames.some((name) => name === "signet_server_a_alpha_2")).toBeFalse();
+		expect(refreshedNames.some((name) => name === "signet_server_a_beta_2")).toBeFalse();
+	});
+
 });

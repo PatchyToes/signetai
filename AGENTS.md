@@ -123,12 +123,14 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 | `@signet/connector-claude-code` | Claude Code connector: hooks, CLAUDE.md generation | node |
 | `@signet/connector-opencode` | OpenCode connector: plugin, AGENTS.md sync | node |
 | `@signet/connector-openclaw` | OpenClaw connector: config patching, hook handlers | node |
+| `@signet/connector-codex` | Codex CLI connector: hooks and plugin | node |
 | `@signet/opencode-plugin` | OpenCode runtime plugin: memory tools and session hooks | node |
 | `@signetai/signet-memory-openclaw` | OpenClaw runtime plugin for calling Signet daemon | node |
 | `@signet/tray` | System tray application | node |
 | `signetai` | Meta-package bundling CLI + daemon | - |
 | `@signet/web` | Marketing website (Astro static, Cloudflare Pages) | cloudflare |
-| `predictor` | Predictive memory scorer sidecar (WIP) | rust |
+| `@signet/native` | Native accelerators (SIMD vector ops, napi-rs) | node |
+| `predictor` | Predictive memory scorer sidecar (Rust) | rust |
 
 
 ### Package Responsibilities
@@ -140,9 +142,9 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 - YAML manifest parsing
 - Constants and utilities
 
-**@signet/cli** - User interface (~4600 LOC in cli.ts)
+**@signet/cli** - User interface (modular command surface + setup flows)
 - Setup wizard with harness selection
-- Config editor (interactive TUI)
+- Config editor (`signet configure`)
 - Daemon start/stop/status
 - Dashboard launcher
 - Secrets management
@@ -157,7 +159,7 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 > **Rust parity rule**: `packages/daemon-rs/` is a shadow rewrite of this package.
 > Any behavioral change made to `@signet/daemon` must also be reflected in `packages/daemon-rs/`.
 > The shadow proxy (`shadowEnabled: true` in agent.yaml) runs both in parallel and logs divergences
-> to `~/.agents/.daemon/logs/shadow-divergences.jsonl`.
+> to `$SIGNET_WORKSPACE/.daemon/logs/shadow-divergences.jsonl` (default workspace: `~/.agents`).
 
 - Hono HTTP server on port 3850
 - File watching with debounced sync
@@ -210,7 +212,7 @@ bun run deploy   # Deploy to Cloudflare (wrangler)
 ### Data Flow
 
 ```
-User edits ~/.agents/AGENTS.md
+User edits $SIGNET_WORKSPACE/AGENTS.md
     → File watcher detects change
     → Debounced git commit (5s)
     → Harness sync to ~/.claude/CLAUDE.md, etc. (2s)
@@ -237,7 +239,7 @@ Notable pipeline files beyond the main worker:
 
 ### Git Sync
 
-The daemon auto-commits changes in `~/.agents/` and syncs with a
+The daemon auto-commits changes in `$SIGNET_WORKSPACE/` and syncs with a
 configured git remote. Credential resolution order matters:
 
 1. **SSH** (`git@...`) — used as-is, no URL modification
@@ -255,9 +257,9 @@ not the daemon's process working directory.
 ### Database Migrations
 
 `packages/core/src/migrations/` contains numbered migrations
-(001-baseline through 010-umap-cache). These run automatically on
-daemon startup. Add new migrations as sequential `.ts` files and
-register them in the migrations index.
+(001-baseline through 039-dedup-entity-dependencies). These run
+automatically on daemon startup. Add new migrations as sequential
+`.ts` files and register them in the migrations index.
 
 ### Auth Middleware
 
@@ -268,10 +270,10 @@ Routes under `/api/*` can be protected via token-based middleware
 
 ### User Data Location
 
-All user data lives at `~/.agents/`:
+All user data lives at `$SIGNET_WORKSPACE/` (default: `~/.agents/`):
 
 ```
-~/.agents/
+$SIGNET_WORKSPACE/
 ├── agent.yaml       # Configuration manifest
 ├── AGENTS.md        # Agent identity/instructions
 ├── SOUL.md          # Personality & tone
@@ -367,9 +369,10 @@ bun run uninstall:service # Uninstall system service
 ### Environment Variables
 
 ```
-SIGNET_PATH    # Override ~/.agents/ data directory
+SIGNET_PATH    # Override workspace data directory (default: ~/.agents)
 SIGNET_PORT    # Override daemon port (default: 3850)
-SIGNET_HOST    # Override daemon host (default: localhost)
+SIGNET_HOST    # Override daemon client connection address (default: 127.0.0.1)
+SIGNET_BIND    # Override daemon listen/bind address (default: 127.0.0.1, use 0.0.0.0 for containers)
 SIGNET_BYPASS  # Set to 1 to bypass all hooks (CLI exits immediately, daemon never contacted)
 OPENAI_API_KEY # Used when embedding provider is openai
 ```
@@ -391,10 +394,78 @@ bun src/cli.ts status    # Check status
 - Daemon is the primary memory pipeline; Python scripts are optional batch tools
 - Connectors are idempotent - safe to run install multiple times
 
+## Specs Pipeline
+
+All feature design and research flows through a structured pipeline.
+The [Spec Index](docs/specs/INDEX.md) is the EPIC — it defines how
+approved specs compose into a coherent system. When deciding what
+ships next, start there.
+
+### Pipeline Tiers
+
+```
+research → planning → approved → complete
+```
+
+**`docs/research/`** — Raw material: papers, repo analyses, ideas,
+competitive intel. Repos cloned to `references/`. Every research doc
+MUST state what question it answers in frontmatter (`question` field).
+Research has two subdirectories: `technical/` and `market/`.
+
+**`docs/specs/planning/`** — Structured plans: how a capability
+integrates, which patterns apply, how it fits the taxonomy. Plans
+iterate freely. Each planning doc MUST link back to its research
+sources via `informed_by` frontmatter. A planning doc is NOT an
+implementation contract — it is a design exploration.
+
+**`docs/specs/approved/`** — Frozen contracts. A planning doc moves
+here when: (1) the INDEX accepts it with integration contracts defined,
+(2) cross-cutting invariants are respected, (3) success criteria are
+written in plain text. Once approved, the spec does NOT change —
+amendments go through the INDEX or a new planning doc.
+
+**`docs/specs/complete/`** — Delivered. The spec MOVES here (not
+copied) when the implementation ships. The `dependencies.yaml` path
+updates. The INDEX registry status updates.
+
+### Rules
+
+1. **No spec without research.** Every spec in planning/ or beyond
+   must trace back to at least one research source. If there is no
+   research doc, write one first — even a brief one stating the
+   question and known prior art.
+2. **No implementation without approval.** Do not begin feature
+   implementation from a planning doc. It must be in approved/ with
+   success criteria defined in the INDEX.
+3. **Move, don't copy.** When a spec graduates (planning → approved,
+   approved → complete), move the file. Update `dependencies.yaml`
+   path. Update INDEX registry. Never have the same spec in two tiers.
+4. **Success criteria are outcomes, not compilation.** The INDEX
+   defines what "done" looks like in terms of observable behavior
+   change, not "the code compiles" or "tests pass."
+5. **The INDEX is the EPIC.** It links approved specs, defines
+   integration contracts between them, tracks dependencies, and
+   sequences build waves. If a new spec introduces a dependency,
+   update both `dependencies.yaml` and the INDEX.
+6. **Sprint briefs live in `docs/specs/sprints/`.** These are
+   implementation breakdowns of approved specs, not standalone specs.
+
+### Dependency Tracking
+
+Source of truth: `docs/specs/dependencies.yaml`
+Validation: `bun scripts/spec-deps-check.ts`
+
+Every new spec gets a stable ID and entry in `dependencies.yaml`.
+Hard dependencies block merging. Soft dependencies can run in
+parallel but interfaces must lock before merge.
+
 ## Reference
 
+- [AI Policy](AI_POLICY.md) — expectations for AI-assisted contributions
 - [HTTP API](docs/API.md) — full endpoint catalog
 - [Contributing](docs/CONTRIBUTING.md) — style examples, CI/CD, identity files, reference repos
 - [Dashboard](docs/DASHBOARD.md) — design tokens, component org, Svelte 5 conventions
 - [Architecture](docs/ARCHITECTURE.md) — deep system design
 - [Pipeline](docs/PIPELINE.md) — memory extraction internals
+- [Spec Index](docs/specs/INDEX.md) — EPIC: integration contract, dependency graph, build sequence
+- [Research](docs/research/) — reference material informing spec design

@@ -203,6 +203,30 @@ const {
 	{:catch error}
 		{@render skeletonError(error)}
 	{/await}
+{:else if activeTab === "os"}
+	{#await import("$lib/components/tabs/OsTab.svelte")}
+		{@render skeletonCards()}
+	{:then module}
+		<module.default />
+	{:catch error}
+		{@render skeletonError(error)}
+	{/await}
+{:else if activeTab === "cortex-memory" || activeTab === "cortex-apps" || activeTab === "cortex-tasks" || activeTab === "cortex-troubleshooter"}
+	{#await import("$lib/components/tabs/CortexTab.svelte")}
+		{@render skeletonCards()}
+	{:then module}
+		<module.default
+			{activeTab}
+			memories={displayMemories}
+			{memoryStats}
+			{harnesses}
+			{daemonStatus}
+			{onopenglobalsimilar}
+			{ontimelinegeneratedforchange}
+		/>
+	{:catch error}
+		{@render skeletonError(error)}
+	{/await}
 {/if}
 </div>
 {/key}

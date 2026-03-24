@@ -1,6 +1,6 @@
 {
   "name": "@signet/connector-codex",
-  "version": "0.62.0",
+  "version": "0.75.0",
   "description": "Signet connector for Codex CLI",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node && bun run build:types",
+    "build": "bun build src/index.ts --outdir dist --target node --external better-sqlite3 && bun run build:types",
     "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
     "dev": "bun --watch src/index.ts",
     "typecheck": "tsc --noEmit"

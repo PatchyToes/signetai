@@ -16,6 +16,7 @@ import {
 	BaseConnector,
 	type InstallResult,
 	type UninstallResult,
+	atomicWriteJson,
 } from "@signet/connector-base";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -40,6 +41,7 @@ export interface SessionContext {
 	projectPath?: string;
 	sessionId?: string;
 	harness?: string;
+	transcriptPath?: string;
 }
 
 export interface SessionStartResult {
@@ -158,7 +160,7 @@ export class ClaudeCodeConnector extends BaseConnector {
 				}
 			}
 
-			writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+			atomicWriteJson(settingsPath, settings);
 			filesRemoved.push(settingsPath);
 		} catch {
 			// If parsing fails, leave settings as-is
@@ -244,6 +246,7 @@ export class ClaudeCodeConnector extends BaseConnector {
 				body: JSON.stringify({
 					harness: "claude-code",
 					sessionId: ctx.sessionId,
+					transcriptPath: ctx.transcriptPath,
 				}),
 				signal: AbortSignal.timeout(10000),
 			});
@@ -378,7 +381,7 @@ export class ClaudeCodeConnector extends BaseConnector {
 		// Migration: remove stale PreCompaction key from existing installs
 		delete (settings.hooks as Record<string, unknown>).PreCompaction;
 
-		writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+		atomicWriteJson(settingsPath, settings);
 
 		// Register Signet MCP server in ~/.claude.json (user scope)
 		this.registerMcpServer();
@@ -402,19 +405,40 @@ export class ClaudeCodeConnector extends BaseConnector {
 			}
 		}
 
+		// On Windows, Node.js spawn() without shell:true cannot resolve .cmd
+		// wrappers, so "signet-mcp" fails with ENOENT. Use "node" as the
+		// command and pass the mcp-stdio.js entry point as an argument instead.
+		let mcpCommand = "signet-mcp";
+		let mcpArgs: string[] = [];
+		if (process.platform === "win32") {
+			const cliEntry = process.argv[1] || "";
+			// cliEntry is e.g. .../signetai/bin/signet.js
+			// mcp-stdio.js lives at .../signetai/dist/mcp-stdio.js
+			const mcpJs = join(cliEntry, "..", "..", "dist", "mcp-stdio.js");
+			if (existsSync(mcpJs)) {
+				mcpCommand = process.execPath;
+				mcpArgs = [mcpJs];
+			} else {
+				console.warn(
+					`[signet] Warning: could not resolve mcp-stdio.js from argv[1]="${cliEntry}". ` +
+					`MCP server config will use "signet-mcp" which may fail on Windows without shell:true.`,
+				);
+			}
+		}
+
 		const existingMcp =
 			(config.mcpServers as Record<string, unknown> | undefined) ?? {};
 		config.mcpServers = {
 			...existingMcp,
 			signet: {
 				type: "stdio",
-				command: "signet-mcp",
-				args: [] as string[],
+				command: mcpCommand,
+				args: mcpArgs,
 				env: {},
 			},
 		};
 
-		writeFileSync(claudeJsonPath, JSON.stringify(config, null, 2));
+		atomicWriteJson(claudeJsonPath, config);
 	}
 
 	/**
@@ -442,7 +466,7 @@ export class ClaudeCodeConnector extends BaseConnector {
 			if (Object.keys(mcp).length === 0) {
 				delete config.mcpServers;
 			}
-			writeFileSync(claudeJsonPath, JSON.stringify(config, null, 2));
+			atomicWriteJson(claudeJsonPath, config);
 		}
 	}
 

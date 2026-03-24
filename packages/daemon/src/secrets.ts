@@ -55,27 +55,44 @@ export interface ExecResult {
  * Falls back to hostname + username if no machine-id is available.
  */
 function getMachineId(): string {
-	const candidates = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
-	for (const p of candidates) {
-		try {
-			const id = readFileSync(p, "utf-8").trim();
-			if (id) return id;
-		} catch {
-			// try next
-		}
-	}
+	const isWindows = process.platform === "win32";
 
-	// macOS fallback
-	try {
-		const out = execSync("ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | awk '{print $3}'", {
-			timeout: 2000,
-		})
-			.toString()
-			.trim()
-			.replace(/"/g, "");
-		if (out) return out;
-	} catch {
-		// ignore
+	if (!isWindows) {
+		// Linux: /etc/machine-id
+		const candidates = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
+		for (const p of candidates) {
+			try {
+				const id = readFileSync(p, "utf-8").trim();
+				if (id) return id;
+			} catch {
+				// try next
+			}
+		}
+
+		// macOS fallback
+		try {
+			const out = execSync("ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | awk '{print $3}'", {
+				timeout: 2000,
+			})
+				.toString()
+				.trim()
+				.replace(/"/g, "");
+			if (out) return out;
+		} catch {
+			// ignore
+		}
+	} else {
+		// Windows: use MachineGuid from registry
+		try {
+			const out = execSync(
+				'reg query "HKLM\\SOFTWARE\\Microsoft\\Cryptography" /v MachineGuid',
+				{ encoding: "utf-8", timeout: 2000, windowsHide: true },
+			);
+			const match = out.match(/MachineGuid\s+REG_SZ\s+(\S+)/);
+			if (match?.[1]) return match[1];
+		} catch {
+			// ignore
+		}
 	}
 
 	// Last resort: hostname + username
@@ -205,15 +222,34 @@ export function deleteSecret(name: string): boolean {
 	return true;
 }
 
+// Belt-and-suspenders: reject obvious shell metacharacters even though
+// we no longer use sh -c. Catches injection attempts early with a
+// clear error message before argv parsing.
+const SHELL_META = /[;&|`$(){}[\]<>!\\]/;
+
 /**
  * Spawn a subprocess with one or more secrets injected as environment
  * variables. The agent only supplies references (env var names), never
  * the actual values.
  *
- * @param command  Shell command string to execute
+ * Uses direct argv execution (no shell) to eliminate glob/tilde/pipe
+ * expansion. The command string is parsed into argv tokens.
+ *
+ * @param command  Command string to execute (parsed as argv, no shell)
  * @param secretRefs  Map of env var name → secret name, e.g. { OPENAI_API_KEY: "OPENAI_API_KEY" }
  */
 export async function execWithSecrets(command: string, secretRefs: Record<string, string>): Promise<ExecResult> {
+	if (SHELL_META.test(command)) {
+		return { stdout: "", stderr: "command contains disallowed shell metacharacters", code: 1 };
+	}
+
+	// Parse command into argv — no shell, so no glob/tilde/pipe expansion
+	const argv = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+	if (!argv || argv.length === 0) {
+		return { stdout: "", stderr: "empty command", code: 1 };
+	}
+	const cmd = argv.map((a) => a.replace(/^["']|["']$/g, ""));
+
 	// Resolve all secret values up front so we can redact them from output
 	const resolved: Record<string, string> = {};
 	for (const [envVar, secretName] of Object.entries(secretRefs)) {
@@ -233,7 +269,7 @@ export async function execWithSecrets(command: string, secretRefs: Record<string
 	}
 
 	return new Promise((resolve, reject) => {
-		const proc = spawn("sh", ["-c", command], {
+		const proc = spawn(cmd[0], cmd.slice(1), {
 			env: { ...process.env, ...resolved },
 			stdio: "pipe",
 			windowsHide: true,

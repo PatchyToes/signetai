@@ -34,6 +34,8 @@ const CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const sessions = new Map<string, SessionClaim>();
 const bypassedSessions = new Set<string>();
 let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+// Synchronous guard — prevents double-start during concurrent async init.
+let cleanupStarted = false;
 
 /**
  * Claim a session for a given runtime path. Returns ok:true if the
@@ -88,6 +90,21 @@ export function releaseSession(sessionKey: string): void {
 	if (removed) {
 		logger.info("session-tracker", "Session released", { sessionKey });
 	}
+}
+
+/**
+ * Return true if the session is currently claimed and not stale.
+ * Used by hooks to detect daemon-restart mid-session.
+ */
+export function hasSession(sessionKey: string): boolean {
+	const claim = sessions.get(sessionKey);
+	if (!claim) return false;
+	if (Date.now() > claim.expiresAt) {
+		sessions.delete(sessionKey);
+		bypassedSessions.delete(sessionKey);
+		return false;
+	}
+	return true;
 }
 
 /**
@@ -186,12 +203,15 @@ function cleanupStaleSessions(): void {
 
 /** Start periodic stale-session cleanup. */
 export function startSessionCleanup(): void {
-	if (cleanupTimer) return;
+	// Set flag before setInterval so concurrent callers see it immediately.
+	if (cleanupStarted) return;
+	cleanupStarted = true;
 	cleanupTimer = setInterval(cleanupStaleSessions, CLEANUP_INTERVAL_MS);
 }
 
 /** Stop periodic cleanup (for graceful shutdown). */
 export function stopSessionCleanup(): void {
+	cleanupStarted = false;
 	if (cleanupTimer) {
 		clearInterval(cleanupTimer);
 		cleanupTimer = null;

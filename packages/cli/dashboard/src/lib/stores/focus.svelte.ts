@@ -11,10 +11,9 @@ export type FocusZone = "sidebar-menu" | "sidebar-footer" | "page-content";
 
 export type SidebarFocusItem =
 	| "home"
-	| "memory-group"
+	| "cortex"
 	| "secrets"
 	| "skills"
-	| "tasks"
 	| "engine-group"
 	| "theme-toggle"
 	| "github-link";
@@ -24,10 +23,9 @@ export type SidebarFocusItem =
  */
 export const SIDEBAR_ORDER: readonly SidebarFocusItem[] = [
 	"home",
-	"memory-group",
+	"cortex",
 	"secrets",
 	"skills",
-	"tasks",
 	"engine-group",
 	"theme-toggle",
 	"github-link",
@@ -48,11 +46,16 @@ function tabToSidebarItem(tab: string): SidebarFocusItem {
 		case "timeline":
 		case "embeddings":
 		case "knowledge":
-			return "memory-group";
+		case "cortex-memory":
+		case "cortex-apps":
+		case "cortex-tasks":
+		case "cortex-troubleshooter":
+		case "os":
+		case "tasks":
+			return "cortex";
 		case "home":
 		case "secrets":
 		case "skills":
-		case "tasks":
 			return tab;
 		default:
 			return "home";
@@ -79,8 +82,8 @@ export function setFocusZone(zone: FocusZone): void {
  */
 function sidebarItemToTab(item: SidebarFocusItem): TabId | null {
 	switch (item) {
-		case "memory-group":
-			return "memory";
+		case "cortex":
+			return "cortex-memory";
 		case "engine-group":
 			return "settings";
 		case "theme-toggle":
@@ -89,7 +92,6 @@ function sidebarItemToTab(item: SidebarFocusItem): TabId | null {
 		case "home":
 		case "secrets":
 		case "skills":
-		case "tasks":
 			return item;
 	}
 }

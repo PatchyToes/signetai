@@ -38,7 +38,7 @@ import {
 	runPredictorScoring,
 } from "./predictor-scoring";
 import { propagateMemoryStatus } from "./knowledge-graph";
-import { resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
+import { invalidateTraversalCache, resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
 import {
 	applyFtsOverlapFeedback,
 	decayAspectWeights,
@@ -211,6 +211,7 @@ export interface UserPromptSubmitResponse {
 export interface SessionEndRequest {
 	harness: string;
 	transcriptPath?: string;
+	transcript?: string;
 	sessionId?: string;
 	sessionKey?: string;
 	cwd?: string;
@@ -969,8 +970,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const traversalRuntimeCfg = {
 		maxAspectsPerEntity: traversalCfg?.maxAspectsPerEntity ?? 10,
 		maxAttributesPerAspect: traversalCfg?.maxAttributesPerAspect ?? 20,
-		maxDependencyHops: traversalCfg?.maxDependencyHops ?? 30,
+		maxDependencyHops: traversalCfg?.maxDependencyHops ?? 10,
 		minDependencyStrength: traversalCfg?.minDependencyStrength ?? 0.3,
+		maxBranching: traversalCfg?.maxBranching ?? 4,
+		maxTraversalPaths: traversalCfg?.maxTraversalPaths ?? 50,
+		minConfidence: traversalCfg?.minConfidence ?? 0.5,
 		timeoutMs: traversalCfg?.timeoutMs ?? 500,
 		boostWeight: traversalCfg?.boostWeight ?? 0.2,
 		constraintBudgetChars: traversalCfg?.constraintBudgetChars ?? 1000,
@@ -1787,24 +1791,15 @@ function extractSubstantiveWords(text: string): string[] {
 }
 
 function buildRecallQueryShape(userPrompt: string, lastAssistantMessage?: string): RecallQueryShape {
-	const userTerms = extractSubstantiveWords(userPrompt);
-
-	// Pre-clean assistant message: strip metadata, mentions, signet blocks
-	const cleanedAssistant = lastAssistantMessage
-		? stripUntrustedMetadata(lastAssistantMessage)
-				.replace(/<@!?\d+>/g, "")
-				.replace(/\[signet:recall[^\]]*\]/g, "")
-				.replace(/<memory-feedback>[\s\S]*?<\/memory-feedback>/g, "")
-		: undefined;
-	const assistantTerms = cleanedAssistant ? extractSubstantiveWords(cleanedAssistant) : [];
-
-	// User terms get priority — assistant capped proportionally
-	const seen = new Set(userTerms);
-	const supplemental = assistantTerms.filter((t) => !seen.has(t));
-	const maxSupplemental = Math.max(2, userTerms.length);
-	const keywordTerms = [...userTerms, ...supplemental.slice(0, maxSupplemental)].slice(0, 12);
-
+	// Pass cleaned raw text for both keyword and vector queries.
+	// FTS5 with implicit AND + BM25 IDF handles term weighting naturally —
+	// manual stopword stripping destroyed phrase semantics and let
+	// individual OR'd terms match unrelated content.
 	const vectorQuery = stripUntrustedMetadata(userPrompt).trim().slice(0, 200);
+
+	// extractSubstantiveWords still used for display/telemetry only
+	const keywordTerms = extractSubstantiveWords(userPrompt);
+
 	return { keywordTerms, vectorQuery };
 }
 
@@ -1899,7 +1894,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		const recall = await hybridRecall(
 			{
 				query: vectorQuery,
-				keywordQuery: keywordTerms.join(" OR "),
+				keywordQuery: vectorQuery,
 				limit: 10,
 				importance_min: 0.5,
 			},
@@ -1911,13 +1906,16 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 			return { inject: metadataHeader, memoryCount: 0 };
 		}
 
-		const budgetSelected = selectWithBudget(
-			recall.results.map((result) => ({
-				...result,
-				pinned: result.pinned ? 1 : 0,
-			})),
-			500,
-		).slice(0, 5);
+		const budget = cfg.pipelineV2.guardrails.contextBudgetChars;
+		const mapped = recall.results.map((result) => ({
+			...result,
+			pinned: result.pinned ? 1 : 0,
+		}));
+		const budgetFiltered = selectWithBudget(mapped, budget);
+		const budgetSelected = budgetFiltered.slice(0, 5);
+		// omitted reflects only budget truncation, not the 5-item display cap,
+		// so the hint correctly directs users to raise contextBudgetChars.
+		const omitted = recall.results.length - budgetFiltered.length;
 
 		// Track FTS hits for predictive scorer data collection (full results, pre-dedup)
 		const allMatchedIds = recall.results.map((result) => result.id);
@@ -1940,11 +1938,14 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 			return { inject: metadataHeader, memoryCount: 0 };
 		}
 
-		const queryTerms = keywordTerms.join(" ");
+		const queryTerms = vectorQuery.slice(0, 80);
 		const lines = selected.map((s) => {
 			const dateStr = formatMemoryDate(s.created_at);
 			return `- ${s.content} (${dateStr})`;
 		});
+		if (omitted > 0) {
+			lines.push(`(+${omitted} more not shown — raise memory.guardrails.contextBudgetChars to include)`);
+		}
 		let inject = `${metadataHeader}\n[signet:recall | query="${queryTerms}" | results=${selected.length} | engine=hybrid]\n${lines.join("\n")}`;
 
 		// Append agent feedback request if enabled and there are injected memories
@@ -2061,7 +2062,7 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 		return { memoriesSaved: 0 };
 	}
 
-	// Read transcript if available
+	// Read transcript: prefer file path, fall back to inline body
 	let transcript = "";
 	if (req.transcriptPath && existsSync(req.transcriptPath)) {
 		try {
@@ -2070,6 +2071,27 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 		} catch {
 			logger.warn("hooks", "Could not read transcript", {
 				path: req.transcriptPath,
+			});
+		}
+	} else if (req.transcript) {
+		transcript = normalizeSessionTranscript(req.harness, req.transcript);
+	}
+
+	// Lossless retention: write transcript immediately regardless of length
+	// or whether the summary worker succeeds later.
+	if (transcript && sessionKey) {
+		try {
+			const now = new Date().toISOString();
+			getDbAccessor().withWriteTx((db) => {
+				db.prepare(
+					`INSERT OR IGNORE INTO session_transcripts
+					 (session_key, content, harness, project, agent_id, created_at)
+					VALUES (?, ?, ?, ?, ?, ?)`,
+				).run(sessionKey, transcript, req.harness, req.cwd ?? null, agentId, now);
+			});
+		} catch (e) {
+			logger.warn("hooks", "Transcript write failed (non-fatal)", {
+				error: e instanceof Error ? e.message : String(e),
 			});
 		}
 	}
@@ -2100,6 +2122,9 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 			}
 
 			feedbackPropagatedAttributes = propagateMemoryStatus(getDbAccessor(), agentId);
+			if (feedbackDecayedAspects > 0 || feedbackPropagatedAttributes > 0) {
+				invalidateTraversalCache();
+			}
 			recordFeedbackTelemetry({
 				feedbackDecayedAspects,
 				feedbackPropagatedAttributes,
@@ -2237,17 +2262,23 @@ function normalizeJsonConversationRecord(record: Record<string, unknown>): strin
 		}
 	}
 
+	if (isRecord(record.message)) {
+		const msg = record.message;
+		const role = extractString(msg, ["role", "speaker"]);
+		const text = extractMessageText(msg);
+		if (role && text) {
+			const lower = role.toLowerCase();
+			if (lower === "user") return `User: ${text}`;
+			if (lower === "assistant") return `Assistant: ${text}`;
+		}
+	}
+
 	const role = extractString(record, ["role", "speaker"]);
 	if (role) {
 		const lowerRole = role.toLowerCase();
-		if (lowerRole === "user") {
-			const text = extractString(record, ["content", "text", "message"]);
-			if (text) return `User: ${text}`;
-		}
-		if (lowerRole === "assistant") {
-			const text = extractString(record, ["content", "text", "message"]);
-			if (text) return `Assistant: ${text}`;
-		}
+		const text = extractMessageText(record);
+		if (lowerRole === "user" && text) return `User: ${text}`;
+		if (lowerRole === "assistant" && text) return `Assistant: ${text}`;
 	}
 
 	return "";
@@ -2266,6 +2297,22 @@ function extractString(record: Record<string, unknown>, keys: readonly string[])
 		}
 	}
 	return "";
+}
+
+function extractMessageText(record: Record<string, unknown>): string {
+	const direct = extractString(record, ["content", "text", "message"]);
+	if (direct) return direct;
+
+	const content = record.content;
+	if (!Array.isArray(content)) return "";
+
+	const parts = content.flatMap((item) => {
+		if (!isRecord(item) || item.type !== "text") return [];
+		const text = extractString(item, ["text", "content"]);
+		return text ? [text] : [];
+	});
+
+	return parts.join(" ");
 }
 
 export function normalizeCodexTranscript(raw: string): string {

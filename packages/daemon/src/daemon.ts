@@ -5,9 +5,9 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { type ChildProcess, execFileSync, spawn } from "child_process";
-import { copyFileSync } from "fs";
-import { createHash } from "crypto";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFileSync } from "node:fs";
 import {
 	appendFileSync,
 	existsSync,
@@ -18,24 +18,27 @@ import {
 	statSync,
 	unlinkSync,
 	writeFileSync,
-} from "fs";
-import { homedir } from "os";
-import { basename, dirname, join } from "path";
-import { fileURLToPath } from "url";
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import {
+	CONNECTOR_PROVIDERS,
+	type ConnectorConfig,
+	SIGNET_GIT_PROTECTED_PATHS,
+	type SyncCursor,
 	buildArchitectureDoc,
 	buildSignetBlock,
 	keywordSearch,
-	parseSimpleYaml,
-	SIGNET_GIT_PROTECTED_PATHS,
-	stripSignetBlock,
 	mergeSignetGitignoreEntries,
+	networkModeFromBindHost,
+	parseSimpleYaml,
+	readNetworkMode,
+	resolveNetworkBinding,
+	stripSignetBlock,
 	vectorSearch,
-	CONNECTOR_PROVIDERS,
-	type ConnectorConfig,
-	type SyncCursor,
 } from "@signet/core";
 import { watch } from "chokidar";
 import { type Context, Hono } from "hono";
@@ -56,6 +59,7 @@ import {
 	requireRateLimit,
 	requireScope,
 } from "./auth";
+import { migrateConfig } from "./config-migration";
 import { createFilesystemConnector } from "./connectors/filesystem";
 import {
 	getConnector,
@@ -91,33 +95,31 @@ import {
 } from "./diagnostics";
 import {
 	fetchEmbedding,
-	resolveEmbeddingBaseUrl,
 	resolveEmbeddingApiKey,
+	resolveEmbeddingBaseUrl,
+	resolveOllamaUrl,
 	setNativeFallbackToOllama,
 } from "./embedding-fetch";
-import { detectDrift } from "./predictor-comparison";
-import { getPredictorState } from "./predictor-state";
 import { buildEmbeddingHealth } from "./embedding-health";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
-import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
-import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
-import { type LogEntry, logger } from "./logger";
-import { migrateConfig } from "./config-migration";
-import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
 import {
 	getAttributesForAspectFiltered,
-	getKnowledgeGraphForConstellation,
 	getEntityAspectsWithCounts,
 	getEntityDependenciesDetailed,
 	getEntityHealth,
-	getPinnedEntities,
 	getKnowledgeEntityDetail,
+	getKnowledgeGraphForConstellation,
 	getKnowledgeStats,
-	pinEntity,
+	getPinnedEntities,
 	listKnowledgeEntities,
+	pinEntity,
 	unpinEntity,
 } from "./knowledge-graph";
+import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
+import { type LogEntry, logger } from "./logger";
+import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
+import { walkImpact } from "./graph-impact";
 import { buildMemoryTimeline } from "./memory-timeline";
 import { type RecallParams, hybridRecall } from "./memory-search";
 import { ONEPASSWORD_SERVICE_ACCOUNT_SECRET, importOnePasswordSecrets, listOnePasswordVaults } from "./onepassword.js";
@@ -127,20 +129,30 @@ import {
 	enqueueExtractionJob,
 	getPipelineWorkerStatus,
 	getSynthesisWorker,
+	nudgeExtractionWorker,
 	readLastSynthesisTime,
 	startPipeline,
 	startRetentionWorker,
 	stopPipeline,
 } from "./pipeline";
+import { clusterEntities } from "./pipeline/community-detection";
+import { getFeedbackTelemetry } from "./pipeline/aspect-feedback";
 import { getGraphBoostIds } from "./pipeline/graph-search";
+import { linkMemoryToEntities } from "./inline-entity-linker";
 import {
 	getTraversalStatus,
 	invalidateTraversalCache,
 	resolveFocalEntities,
 	traverseKnowledgeGraph,
 } from "./pipeline/graph-traversal";
-import { getFeedbackTelemetry } from "./pipeline/aspect-feedback";
-import { type PredictorClient, createPredictorClient, resolvePredictorCheckpointPath } from "./predictor-client";
+import {
+	getAvailableModels,
+	getModelsByProvider,
+	getRegistryStatus,
+	initModelRegistry,
+	refreshRegistry,
+	stopModelRegistry,
+} from "./pipeline/model-registry";
 import {
 	createAnthropicProvider,
 	createClaudeCodeProvider,
@@ -152,25 +164,26 @@ import {
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	stopOpenCodeServer,
 } from "./pipeline/provider";
-import {
-	initModelRegistry,
-	getAvailableModels,
-	getModelsByProvider,
-	getRegistryStatus,
-	refreshRegistry,
-	stopModelRegistry,
-} from "./pipeline/model-registry";
 import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
+import { type PredictorClient, createPredictorClient, resolvePredictorCheckpointPath } from "./predictor-client";
+import { detectDrift } from "./predictor-comparison";
+import {
+	getComparisonsByEntity,
+	getComparisonsByProject,
+	listComparisons,
+	listTrainingRuns,
+} from "./predictor-comparisons";
+import { getPredictorState } from "./predictor-state";
 import {
 	type RepairContext,
 	type RepairResult,
+	backfillSkippedSessions,
 	checkFtsConsistency,
 	cleanOrphanedEmbeddings,
 	createRateLimiter,
 	deduplicateMemories,
 	getDedupStats,
-	backfillSkippedSessions,
 	getEmbeddingGapStats,
 	pruneChunkGroupEntities,
 	pruneSingletonExtractedEntities,
@@ -182,12 +195,6 @@ import {
 	structuralBackfill,
 	triggerRetentionSweep,
 } from "./repair-actions";
-import {
-	getComparisonsByEntity,
-	getComparisonsByProject,
-	listComparisons,
-	listTrainingRuns,
-} from "./predictor-comparisons";
 import {
 	CRON_PRESETS,
 	computeNextRun,
@@ -207,6 +214,7 @@ import {
 	redactCheckpointRow,
 } from "./session-checkpoints";
 import { parseFeedback, recordAgentFeedback } from "./session-memories";
+import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
 import { type TelemetryCollector, type TelemetryEventType, createTelemetryCollector } from "./telemetry";
 import { type TimelineSources, buildTimeline } from "./timeline";
 import {
@@ -233,6 +241,7 @@ import {
 	stopUpdateTimer,
 } from "./update-system";
 import { createAgentsWatcherIgnoreMatcher } from "./watcher-ignore";
+import { closeWidgetProvider, initWidgetProvider } from "./widget-llm";
 
 // Paths
 const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
@@ -257,6 +266,68 @@ function normalizeBaseUrl(url: string | undefined): string | undefined {
 
 function normalizeLoopbackHost(host: string): string {
 	return host === "localhost" || host === "::1" ? "127.0.0.1" : host;
+}
+
+function parseOriginPort(url: URL): number | null {
+	if (url.port.length > 0) {
+		const port = Number.parseInt(url.port, 10);
+		return Number.isInteger(port) ? port : null;
+	}
+	if (url.protocol === "http:") return 80;
+	if (url.protocol === "https:") return 443;
+	return null;
+}
+
+function normalizeOriginHost(host: string): string {
+	return host.toLowerCase().replace(/^\[|\]$/g, "");
+}
+
+function isLoopbackOriginHost(host: string): boolean {
+	return host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1" || host.startsWith("127.");
+}
+
+function isTailscaleOriginHost(host: string): boolean {
+	if (host.endsWith(".ts.net")) return true;
+	if (host.startsWith("fd7a:115c:a1e0:")) return true;
+	if (!host.startsWith("100.")) return false;
+	const parts = host.split(".");
+	if (parts.length !== 4) return false;
+	const second = Number.parseInt(parts[1], 10);
+	return Number.isInteger(second) && second >= 64 && second <= 127;
+}
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+	if (!origin) return false;
+	if (ALLOWED_ORIGINS.has(origin)) return true;
+	if (NETWORK_MODE !== "tailscale") return false;
+
+	try {
+		const url = new URL(origin);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+		if (parseOriginPort(url) !== PORT) return false;
+		const host = normalizeOriginHost(url.hostname);
+		if (isLoopbackOriginHost(host)) return false;
+		return isTailscaleOriginHost(host);
+	} catch {
+		return false;
+	}
+}
+
+function readConfiguredNetworkBinding(agentsDir: string): {
+	readonly host: string;
+	readonly bind: string;
+} {
+	for (const name of ["agent.yaml", "AGENT.yaml"]) {
+		const path = join(agentsDir, name);
+		if (!existsSync(path)) continue;
+		try {
+			return resolveNetworkBinding(readNetworkMode(parseSimpleYaml(readFileSync(path, "utf-8"))));
+		} catch {
+			// Ignore malformed config and keep scanning fallbacks.
+		}
+	}
+
+	return resolveNetworkBinding("localhost");
 }
 
 function parsePort(raw: string | undefined, fallback: number): number {
@@ -295,9 +366,7 @@ function isManagedOpenCodeLocalEndpoint(baseUrl: string): boolean {
 	try {
 		const parsed = new URL(baseUrl);
 		const isLoopbackHost =
-			parsed.hostname === "127.0.0.1" ||
-			parsed.hostname === "localhost" ||
-			parsed.hostname === "::1";
+			parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1";
 		if (!isLoopbackHost) return false;
 		if (parsed.protocol !== "http:") return false;
 		const port = parsed.port.length > 0 ? Number.parseInt(parsed.port, 10) : 80;
@@ -322,10 +391,11 @@ function redactUrlForLogs(url: string | undefined): string | undefined {
 }
 
 const PORT = parsePort(readEnvTrimmed("SIGNET_PORT"), 3850);
-const HOST = normalizeLoopbackHost(readEnvTrimmed("SIGNET_HOST") ?? "127.0.0.1");
-const BIND_HOST = normalizeLoopbackHost(readEnvTrimmed("SIGNET_BIND") ?? HOST);
-const INTERNAL_SELF_HOST =
-	BIND_HOST === "0.0.0.0" || BIND_HOST === "::" ? "127.0.0.1" : BIND_HOST;
+const NET = readConfiguredNetworkBinding(AGENTS_DIR);
+const HOST = normalizeLoopbackHost(readEnvTrimmed("SIGNET_HOST") ?? NET.host);
+const BIND_HOST = normalizeLoopbackHost(readEnvTrimmed("SIGNET_BIND") ?? NET.bind);
+const NETWORK_MODE = networkModeFromBindHost(BIND_HOST);
+const INTERNAL_SELF_HOST = BIND_HOST === "0.0.0.0" || BIND_HOST === "::" ? "127.0.0.1" : BIND_HOST;
 
 type RuntimeProviderName = "ollama" | "claude-code" | "opencode" | "codex" | "anthropic";
 
@@ -368,12 +438,10 @@ let shadowProcess: ChildProcess | null = null;
 let skillReconcilerHandle: ReconcilerHandle | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
-let diagnosticsCache:
-	| {
-			readonly report: DiagnosticsReport;
-			readonly expiresAt: number;
-	  }
-	| null = null;
+let diagnosticsCache: {
+	readonly report: DiagnosticsReport;
+	readonly expiresAt: number;
+} | null = null;
 const DIAGNOSTICS_CACHE_TTL_MS = 2000;
 
 // Prevents concurrent UMAP computations for the same dimension count
@@ -389,7 +457,7 @@ let authForgetLimiter = new AuthRateLimiter(60_000, 30);
 let authModifyLimiter = new AuthRateLimiter(60_000, 60);
 let authBatchForgetLimiter = new AuthRateLimiter(60_000, 5);
 let authAdminLimiter = new AuthRateLimiter(60_000, 10);
-let authCrossAgentMessageLimiter = new AuthRateLimiter(60_000, 120);
+const authCrossAgentMessageLimiter = new AuthRateLimiter(60_000, 120);
 
 function hasMemoriesSessionIdColumn(db: Database): boolean {
 	if (hasMemoriesSessionIdColumnCache !== null) {
@@ -466,9 +534,7 @@ function setupShadowDb(agentsDir: string): string {
 
 	const mainDb = join(agentsDir, "memory", "memories.db");
 	const shadowDb = join(shadowMemDir, "memories.db");
-	const stale =
-		!existsSync(shadowDb) ||
-		Date.now() - statSync(shadowDb).mtimeMs > 24 * 60 * 60 * 1000;
+	const stale = !existsSync(shadowDb) || Date.now() - statSync(shadowDb).mtimeMs > 24 * 60 * 60 * 1000;
 	if (stale && existsSync(mainDb)) {
 		// Copy WAL and SHM alongside the main DB so the shadow starts from a
 		// consistent snapshot — without them it may see uncheckpointed pages as missing.
@@ -491,7 +557,7 @@ function setupShadowDb(agentsDir: string): string {
 
 function appendDivergence(agentsDir: string, entry: Record<string, unknown>) {
 	const logPath = join(agentsDir, ".daemon", "logs", "shadow-divergences.jsonl");
-	appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+	appendFileSync(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
 }
 
 /**
@@ -557,7 +623,7 @@ function buildPredictorHealthParams(): PredictorHealthParams {
 
 	return {
 		enabled: true,
-		sidecarAlive: client !== null && client.isAlive(),
+		sidecarAlive: client?.isAlive() ?? false,
 		crashCount: client?.crashCount ?? 0,
 		crashDisabled: client?.crashDisabled ?? false,
 		modelVersion,
@@ -616,6 +682,7 @@ interface EmbeddingStatus {
 	provider: "native" | "ollama" | "openai" | "none";
 	model: string;
 	available: boolean;
+	modelCached?: boolean;
 	dimensions?: number;
 	base_url: string;
 	error?: string;
@@ -635,27 +702,28 @@ function blobToVector(blob: Buffer, dimensions: number | null): number[] {
  * Single sentences exceeding 2x target get hard-split at targetChars.
  */
 function chunkBySentence(text: string, targetChars: number): readonly string[] {
-	// Split on sentence-ending punctuation followed by whitespace/newline
-	const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
-	const chunks: string[] = [];
+	// Split on sentence-ending punctuation followed by whitespace/newline,
+	// or on markdown bullet/heading boundaries (preserves list items as units)
+	const sentences = text.split(/(?<=[.!?])\s+|(?=^[-*] |\n## )/m).filter(Boolean);
+	const raw: string[] = [];
 	let current = "";
 
 	for (const sentence of sentences) {
 		// If a single sentence exceeds 2x target, hard-split it
 		if (sentence.length > targetChars * 2) {
 			if (current.length > 0) {
-				chunks.push(current.trim());
+				raw.push(current.trim());
 				current = "";
 			}
 			for (let i = 0; i < sentence.length; i += targetChars) {
-				chunks.push(sentence.slice(i, i + targetChars).trim());
+				raw.push(sentence.slice(i, i + targetChars).trim());
 			}
 			continue;
 		}
 
 		const combined = current.length > 0 ? `${current} ${sentence}` : sentence;
 		if (combined.length > targetChars && current.length > 0) {
-			chunks.push(current.trim());
+			raw.push(current.trim());
 			current = sentence;
 		} else {
 			current = combined;
@@ -663,10 +731,26 @@ function chunkBySentence(text: string, targetChars: number): readonly string[] {
 	}
 
 	if (current.trim().length > 0) {
-		chunks.push(current.trim());
+		raw.push(current.trim());
 	}
 
-	return chunks.filter((c) => c.length > 0);
+	const filtered = raw.filter((c) => c.length > 0);
+	if (filtered.length <= 1) return filtered;
+
+	// Add overlap: append the first ~25% of the next chunk to each chunk.
+	// This ensures information near boundaries appears in both chunks,
+	// improving recall when search queries match boundary content.
+	const chunks: string[] = [];
+	for (let i = 0; i < filtered.length; i++) {
+		if (i < filtered.length - 1) {
+			const overlap = filtered[i + 1].slice(0, Math.floor(targetChars * 0.25));
+			chunks.push(`${filtered[i]} ${overlap}`.trim());
+		} else {
+			chunks.push(filtered[i]);
+		}
+	}
+
+	return chunks;
 }
 
 function parseTagsField(raw: string | null): string[] {
@@ -733,11 +817,7 @@ function getConfiguredProviderHints(agentsDir: string): {
 	readonly extraction: string | null;
 	readonly synthesis: string | null;
 } {
-	const paths = [
-		join(agentsDir, "agent.yaml"),
-		join(agentsDir, "AGENT.yaml"),
-		join(agentsDir, "config.yaml"),
-	];
+	const paths = [join(agentsDir, "agent.yaml"), join(agentsDir, "AGENT.yaml"), join(agentsDir, "config.yaml")];
 	let extraction: string | null = null;
 	let synthesis: string | null = null;
 
@@ -755,10 +835,7 @@ function getConfiguredProviderHints(agentsDir: string): {
 					: typeof extractionObj?.provider === "string"
 						? extractionObj.provider
 						: null;
-			const synthesisInFile =
-				typeof synthesisObj?.provider === "string"
-					? synthesisObj.provider
-					: null;
+			const synthesisInFile = typeof synthesisObj?.provider === "string" ? synthesisObj.provider : null;
 			if (extraction === null && extractionInFile !== null) {
 				extraction = extractionInFile;
 			}
@@ -768,9 +845,7 @@ function getConfiguredProviderHints(agentsDir: string): {
 			if (extraction !== null && synthesis !== null) {
 				break;
 			}
-		} catch {
-			continue;
-		}
+		} catch {}
 	}
 
 	return { extraction, synthesis };
@@ -896,7 +971,8 @@ function normalizeLegacyEmbeddingsPayload(
 		return defaultLegacyEmbeddingsResponse(limit, offset, "Legacy export returned invalid payload");
 	}
 
-	const data = payload as Record<string, unknown>;
+	const data: Record<string, unknown> = Object.create(null);
+	Object.assign(data, payload);
 	const rawEmbeddings = Array.isArray(data.embeddings) ? data.embeddings : [];
 	const embeddings = rawEmbeddings
 		.map((entry) => normalizeLegacyEmbeddingRow(entry, withVectors))
@@ -949,12 +1025,18 @@ async function runLegacyEmbeddingsExport(
 	}
 
 	return await new Promise<LegacyEmbeddingsResponse>((resolve) => {
+		const timeout = withVectors ? 120000 : 30000;
 		const proc = spawn("python3", args, {
 			cwd: AGENTS_DIR,
 			stdio: "pipe",
-			timeout: withVectors ? 120000 : 30000,
 			windowsHide: true,
 		});
+
+		// Bun's spawn() silently ignores `timeout` — enforce manually
+		const timer = setTimeout(() => {
+			proc.kill();
+			resolve(defaultLegacyEmbeddingsResponse(limit, offset, `Legacy embeddings export timed out after ${timeout}ms`));
+		}, timeout);
 
 		let stdout = "";
 		let stderr = "";
@@ -968,6 +1050,7 @@ async function runLegacyEmbeddingsExport(
 		});
 
 		proc.on("close", (code) => {
+			clearTimeout(timer);
 			if (code !== 0) {
 				resolve(
 					defaultLegacyEmbeddingsResponse(
@@ -999,6 +1082,7 @@ async function runLegacyEmbeddingsExport(
 		});
 
 		proc.on("error", (error) => {
+			clearTimeout(timer);
 			resolve(defaultLegacyEmbeddingsResponse(limit, offset, error.message));
 		});
 	});
@@ -1038,6 +1122,7 @@ async function checkEmbeddingProvider(cfg: EmbeddingConfig): Promise<EmbeddingSt
 			// Reuse the cached module from fetchEmbedding path
 			const mod = await import("./native-embedding");
 			const nativeStatus = await mod.checkNativeProvider();
+			status.modelCached = nativeStatus.modelCached;
 			if (nativeStatus.available) {
 				status.available = true;
 				status.dimensions = nativeStatus.dimensions;
@@ -1045,7 +1130,7 @@ async function checkEmbeddingProvider(cfg: EmbeddingConfig): Promise<EmbeddingSt
 				// Native unavailable — check if ollama is available as fallback
 				logger.warn("embedding", `Native provider unavailable: ${nativeStatus.error ?? "unknown"}`);
 				try {
-					const ollamaRes = await fetch("http://127.0.0.1:11434/api/tags", {
+					const ollamaRes = await fetch(`${resolveOllamaUrl().replace(/\/$/, "")}/api/tags`, {
 						method: "GET",
 						signal: AbortSignal.timeout(3000),
 					});
@@ -1203,12 +1288,32 @@ function getDashboardPath(): string | null {
 // Create the Hono app
 export const app = new Hono();
 
-// Middleware
-app.use("*", cors());
+// Middleware — restrict CORS to localhost origins only
+const ALLOWED_ORIGINS = new Set([
+	"http://localhost:3850",
+	"http://127.0.0.1:3850",
+	"http://localhost:5173",
+	"http://127.0.0.1:5173",
+	"tauri://localhost",
+	"http://tauri.localhost",
+]);
+app.use(
+	"*",
+	cors({
+		origin: (origin) => (isAllowedOrigin(origin) ? origin : null),
+		credentials: true,
+	}),
+);
 
 // Auth middleware — reads from module-level authConfig/authSecret
 // which are initialized properly in main(). In local mode this is a no-op.
+// Guard: reject requests if auth is required but secret isn't initialized yet
+// (startup race between middleware registration and main() completing).
 app.use("*", async (c, next) => {
+	if (authConfig.mode !== "local" && !authSecret) {
+		c.status(503);
+		return c.json({ error: "server initializing" });
+	}
 	const mw = createAuthMiddleware(authConfig, authSecret);
 	return mw(c, next);
 });
@@ -1281,6 +1386,14 @@ app.get("/health", (c) => {
 	} catch {
 		// DB unreachable
 	}
+	const workers = getPipelineWorkerStatus();
+	const extraction = workers.extraction;
+	const stalled =
+		extraction.running &&
+		extraction.stats !== undefined &&
+		extraction.stats.pending > 0 &&
+		Date.now() - extraction.stats.lastProgressAt > 60_000;
+
 	return c.json({
 		status: "healthy",
 		uptime: process.uptime(),
@@ -1291,6 +1404,12 @@ app.get("/health", (c) => {
 		db: dbOk,
 		updateAvailable: us.lastCheck?.updateAvailable ?? false,
 		pendingRestart: us.pendingRestartVersion !== null,
+		pipeline: {
+			extractionRunning: extraction.running,
+			extractionStalled: stalled,
+			extractionPending: extraction.stats?.pending ?? 0,
+			extractionBackoffMs: extraction.stats?.backoffMs ?? 0,
+		},
 	});
 });
 
@@ -1371,12 +1490,7 @@ app.use("/api/hook/remember", async (c, next) => {
 	return requirePermission("remember", authConfig)(c, next);
 });
 
-// Recall / search
-// TODO(Phase J follow-up): Scoped tokens should have their project/agent
-// scope injected as a mandatory filter into the search query itself, so
-// recall results are restricted to the token's scope. Currently, scope
-// enforcement only applies to mutations, not reads. This is acceptable
-// for v1 single-tenant local, but must be addressed before team mode GA.
+// Recall / search — scope.project is enforced at the handler level.
 app.use("/api/memory/recall", async (c, next) => {
 	return requirePermission("recall", authConfig)(c, next);
 });
@@ -1396,6 +1510,12 @@ app.use("/api/sessions/summaries", async (c, next) => {
 	return requirePermission("recall", authConfig)(c, next);
 });
 app.use("/api/knowledge/expand", async (c, next) => {
+	return requirePermission("recall", authConfig)(c, next);
+});
+app.use("/api/knowledge/expand/session", async (c, next) => {
+	return requirePermission("recall", authConfig)(c, next);
+});
+app.use("/api/graph/impact", async (c, next) => {
 	return requirePermission("recall", authConfig)(c, next);
 });
 
@@ -1492,6 +1612,40 @@ app.use("/api/repair/*", async (c, next) => {
 	return requirePermission("admin", authConfig)(c, next);
 });
 
+// Secrets — admin only (can exec commands, exfiltrate secrets)
+app.use("/api/secrets", async (c, next) => {
+	return requirePermission("admin", authConfig)(c, next);
+});
+app.use("/api/secrets/*", async (c, next) => {
+	return requirePermission("admin", authConfig)(c, next);
+});
+
+// Git operations — admin only (can push, change remotes)
+app.use("/api/git/*", async (c, next) => {
+	return requirePermission("admin", authConfig)(c, next);
+});
+
+// Troubleshooter — admin only (can stop/restart daemon, run CLI commands)
+app.use("/api/troubleshoot/*", async (c, next) => {
+	return requirePermission("admin", authConfig)(c, next);
+});
+
+// Config writes — admin only (can overwrite agent.yaml, AGENTS.md)
+// Reject oversized bodies: content-length fast path + post-buffer check
+// for chunked encoding. The server-level REQUEST_BODY_LIMIT caps all
+// routes, but this gives a clear per-route error message.
+const MAX_CONFIG_BYTES = 1_048_576;
+app.use("/api/config", async (c, next) => {
+	if (c.req.method === "POST") {
+		const cl = c.req.header("content-length");
+		if (cl && Number(cl) > MAX_CONFIG_BYTES) {
+			return c.json({ error: `payload exceeds ${MAX_CONFIG_BYTES} byte limit` }, 413);
+		}
+		return requirePermission("admin", authConfig)(c, next);
+	}
+	return next();
+});
+
 // Per-memory PATCH and DELETE need method-specific guards + scope check
 app.use("/api/memory/:id", async (c, next) => {
 	// Scope enforcement on mutations: if token has project scope, verify
@@ -1557,20 +1711,35 @@ app.get("/api/logs/stream", (c) => {
 
 	const stream = new ReadableStream({
 		start(controller) {
+			let dead = false;
+			const cleanup = () => {
+				if (dead) return;
+				dead = true;
+				logger.off("log", onLog);
+				try {
+					controller.close();
+				} catch {}
+			};
+
 			const onLog = (entry: LogEntry) => {
-				const data = `data: ${JSON.stringify(entry)}\n\n`;
-				controller.enqueue(encoder.encode(data));
+				if (dead) return;
+				try {
+					const data = `data: ${JSON.stringify(entry)}\n\n`;
+					controller.enqueue(encoder.encode(data));
+				} catch {
+					cleanup();
+				}
 			};
 
 			logger.on("log", onLog);
 
-			// Send initial connection message
-			controller.enqueue(encoder.encode(`data: {"type":"connected"}\n\n`));
+			try {
+				controller.enqueue(encoder.encode(`data: {"type":"connected"}\n\n`));
+			} catch {
+				cleanup();
+			}
 
-			// Cleanup on close
-			c.req.raw.signal.addEventListener("abort", () => {
-				logger.off("log", onLog);
-			});
+			c.req.raw.signal.addEventListener("abort", cleanup);
 		},
 	});
 
@@ -1626,6 +1795,11 @@ app.post("/api/config", async (c) => {
 
 		if (!file || typeof content !== "string") {
 			return c.json({ error: "Invalid request" }, 400);
+		}
+
+		// Defense-in-depth: also check after parse (content-length can be absent)
+		if (content.length > MAX_CONFIG_BYTES) {
+			return c.json({ error: `content exceeds ${MAX_CONFIG_BYTES} byte limit` }, 413);
 		}
 
 		if (file.includes("/") || file.includes("..")) {
@@ -1723,9 +1897,33 @@ app.get("/api/memories", (c) => {
 	}
 });
 
+app.get("/api/memories/most-used", (c) => {
+	try {
+		const raw = Number.parseInt(c.req.query("limit") || "6", 10);
+		const limit = Number.isNaN(raw) || raw < 1 ? 6 : Math.min(raw, 200);
+		const memories = getDbAccessor().withReadDb((db) =>
+			db
+				.prepare(`
+					SELECT id, content, access_count, importance, type, tags
+					FROM memories
+					WHERE access_count > 0
+					ORDER BY access_count DESC, importance DESC
+					LIMIT ?
+				`)
+				.all(limit),
+		);
+		return c.json({ memories });
+	} catch (e) {
+		logger.error("memory", "Error loading most-used memories", e as Error);
+		return c.json({ memories: [] });
+	}
+});
+
 app.get("/api/memory/timeline", (c) => {
 	try {
-		const timeline = getDbAccessor().withReadDb((db) => buildMemoryTimeline(db));
+		const raw = Number.parseInt(c.req.query("tzOffset") || "0", 10);
+		const tzOffsetMin = Number.isNaN(raw) ? 0 : Math.max(-840, Math.min(840, raw));
+		const timeline = getDbAccessor().withReadDb((db) => buildMemoryTimeline(db, { tzOffsetMin }));
 		return c.json(timeline);
 	} catch (e) {
 		logger.error("memory", "Error building memory timeline", e as Error);
@@ -1743,6 +1941,35 @@ app.get("/api/memory/timeline", (c) => {
 			},
 			500,
 		);
+	}
+});
+
+// ============================================================================
+// Memory Review Queue API
+// ============================================================================
+
+app.get("/api/memory/review-queue", (c) => {
+	try {
+		const rows = getDbAccessor().withReadDb((db) => {
+			return db
+				.prepare(
+					`SELECT h.id, h.memory_id, h.event, h.old_content, h.new_content,
+					        h.reason, h.metadata, h.created_at, h.session_id,
+					        m.content AS current_content, m.type AS memory_type,
+					        m.importance
+					 FROM memory_history h
+					 LEFT JOIN memories m ON m.id = h.memory_id
+					 WHERE h.event IN ('DEDUP', 'REVIEW_NEEDED', 'BLOCKED_DESTRUCTIVE')
+					   AND h.created_at > datetime('now', '-30 days')
+					 ORDER BY h.created_at DESC
+					 LIMIT 200`,
+				)
+				.all();
+		});
+		return c.json({ items: rows });
+	} catch (e) {
+		logger.error("memory", "Error fetching review queue", e as Error);
+		return c.json({ error: "Failed to fetch review queue", items: [] }, 500);
 	}
 });
 
@@ -1793,7 +2020,7 @@ function buildWhereRaw(p: FilterParams): { clause: string; args: unknown[] } {
 		args.push(p.since);
 	}
 
-	const clause = parts.length ? " AND " + parts.join(" AND ") : "";
+	const clause = parts.length ? ` AND ${parts.join(" AND ")}` : "";
 	return { clause, args };
 }
 
@@ -1831,7 +2058,7 @@ function buildWhere(p: FilterParams): { clause: string; args: unknown[] } {
 		args.push(p.since);
 	}
 
-	const clause = parts.length ? " AND " + parts.join(" AND ") : "";
+	const clause = parts.length ? ` AND ${parts.join(" AND ")}` : "";
 	return { clause, args };
 }
 
@@ -1944,6 +2171,7 @@ interface ForgetCandidatesRequest {
 	sourceType: string;
 	since: string;
 	until: string;
+	scope: string | null;
 	limit: number;
 }
 
@@ -2071,8 +2299,10 @@ function parseTagsMutation(value: unknown): string | null | undefined {
 		return trimmed.length > 0 ? trimmed : null;
 	}
 	if (Array.isArray(value)) {
+		if (value.some((entry) => typeof entry !== "string")) {
+			return undefined;
+		}
 		const tags = value
-			.filter((entry): entry is string => typeof entry === "string")
 			.map((tag) => tag.trim())
 			.filter((tag) => tag.length > 0)
 			.join(",");
@@ -2142,6 +2372,12 @@ function buildForgetCandidatesWhere(req: ForgetCandidatesRequest, alias: string)
 	if (req.sourceType) {
 		parts.push(`${prefix}source_type = ?`);
 		args.push(req.sourceType);
+	}
+	if (req.scope !== null) {
+		parts.push(`${prefix}scope = ?`);
+		args.push(req.scope);
+	} else {
+		parts.push(`${prefix}scope IS NULL`);
 	}
 	if (req.since) {
 		parts.push(`${prefix}created_at >= ?`);
@@ -2367,10 +2603,33 @@ app.post("/api/memory/remember", async (c) => {
 		who?: string;
 		project?: string;
 		importance?: number;
-		tags?: string;
+		tags?: unknown;
 		pinned?: boolean;
 		sourceType?: string;
 		sourceId?: string;
+		scope?: string | null;
+		hints?: string[];
+		transcript?: string;
+		structured?: {
+			entities?: Array<{
+				source: string;
+				sourceType?: string;
+				relationship: string;
+				target: string;
+				targetType?: string;
+				confidence: number;
+			}>;
+			aspects?: Array<{
+				entityName: string;
+				aspect: string;
+				attributes: Array<{
+					content: string;
+					confidence?: number;
+					importance?: number;
+				}>;
+			}>;
+			hints?: string[];
+		};
 	};
 
 	try {
@@ -2381,6 +2640,12 @@ app.post("/api/memory/remember", async (c) => {
 
 	const raw = body.content?.trim();
 	if (!raw) return c.json({ error: "content is required" }, 400);
+	const scope = body.scope ?? null;
+	const hasBodyTags = Object.prototype.hasOwnProperty.call(body, "tags");
+	const bodyTags = hasBodyTags ? parseTagsMutation(body.tags) : undefined;
+	if (hasBodyTags && bodyTags === undefined) {
+		return c.json({ error: "tags must be a string, string array, or null" }, 400);
+	}
 
 	// Pipeline v2 kill switch: refuse writes when mutations are frozen
 	const fullCfg = loadMemoryConfig(AGENTS_DIR);
@@ -2390,8 +2655,10 @@ app.post("/api/memory/remember", async (c) => {
 	}
 
 	// --- Auto-chunking for oversized memories ---
+	// Skip chunking when structured data is provided — the caller has
+	// already processed the content and provides entities/aspects/hints.
 	const guardrails = pipelineCfg.guardrails;
-	if (raw.length > guardrails.maxContentChars) {
+	if (!body.structured && raw.length > guardrails.maxContentChars) {
 		const chunks = chunkBySentence(raw, guardrails.chunkTargetChars);
 		if (chunks.length === 0) {
 			return c.json({ error: "content produced no valid chunks" }, 400);
@@ -2404,7 +2671,7 @@ app.post("/api/memory/remember", async (c) => {
 		const parsedPrefixes = parsePrefixes(raw);
 		const importance = body.importance ?? parsedPrefixes.importance;
 		const pinned = (body.pinned ?? parsedPrefixes.pinned) ? 1 : 0;
-		const tags = body.tags ?? parsedPrefixes.tags;
+		const tags = hasBodyTags ? bodyTags : parsedPrefixes.tags;
 		const pipelineEnqueueEnabled = pipelineCfg.enabled;
 
 		const groupId = crypto.randomUUID();
@@ -2435,11 +2702,13 @@ app.post("/api/memory/remember", async (c) => {
 			const memType = inferType(chunk);
 
 			try {
-				// Dedup check + insert
+				// Dedup check + insert (scope-aware: same content in different scopes is not a duplicate)
 				const inserted = getDbAccessor().withWriteTx((db) => {
-					const byHash = db
-						.prepare(`SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0 LIMIT 1`)
-						.get(chunkNormalized.contentHash) as { id: string } | undefined;
+					const byHash = scope !== null
+						? db.prepare(`SELECT id FROM memories WHERE content_hash = ? AND scope = ? AND is_deleted = 0 LIMIT 1`)
+							.get(chunkNormalized.contentHash, scope) as { id: string } | undefined
+						: db.prepare(`SELECT id FROM memories WHERE content_hash = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`)
+							.get(chunkNormalized.contentHash) as { id: string } | undefined;
 					if (byHash) return false;
 
 					txIngestEnvelope(db, {
@@ -2461,6 +2730,7 @@ app.post("/api/memory/remember", async (c) => {
 						updatedBy: who,
 						sourceType: "chunk",
 						sourceId: groupId,
+						scope,
 						createdAt: now,
 					});
 
@@ -2490,6 +2760,12 @@ app.post("/api/memory/remember", async (c) => {
 						} else {
 							const embId = crypto.randomUUID();
 							const blob = vectorToBlob(vec);
+							// Use memory-scoped content hash for embeddings so the same
+							// content in different scopes each gets its own vector row
+							// (vector search joins on source_id, not content_hash)
+							const embHash = scope
+								? `${chunkNormalized.contentHash}:${scope}`
+								: chunkNormalized.contentHash;
 							getDbAccessor().withWriteTx((db) => {
 								syncVecDeleteBySourceId(db, "memory", chunkId);
 								db.prepare(`DELETE FROM embeddings WHERE source_type = 'memory' AND source_id = ?`).run(chunkId);
@@ -2499,7 +2775,7 @@ app.post("/api/memory/remember", async (c) => {
 									VALUES (?, ?, ?, ?, 'memory', ?, ?, ?)
 								`).run(
 									embId,
-									chunkNormalized.contentHash,
+									embHash,
 									blob,
 									vec.length,
 									chunkId,
@@ -2507,7 +2783,7 @@ app.post("/api/memory/remember", async (c) => {
 									now,
 								);
 								syncVecInsert(db, embId, vec);
-								db.prepare(`UPDATE memories SET embedding_model = ? WHERE id = ?`).run(
+								db.prepare("UPDATE memories SET embedding_model = ? WHERE id = ?").run(
 									fullCfg.embedding.model,
 									chunkId,
 								);
@@ -2519,6 +2795,15 @@ app.post("/api/memory/remember", async (c) => {
 						chunkId,
 						error: String(e),
 					});
+				}
+
+				// Inline entity linking for chunk
+				try {
+					getDbAccessor().withWriteTx((db) => {
+						linkMemoryToEntities(db, chunkId, chunk, "default");
+					});
+				} catch {
+					// Non-fatal — pipeline extraction handles deeper linking
 				}
 
 				// Enqueue pipeline extraction if enabled
@@ -2564,7 +2849,7 @@ app.post("/api/memory/remember", async (c) => {
 	// Body-level overrides for importance/tags/pinned
 	const importance = body.importance ?? parsed.importance;
 	const pinned = (body.pinned ?? parsed.pinned) ? 1 : 0;
-	const tags = body.tags ?? parsed.tags;
+	const tags = hasBodyTags ? bodyTags : parsed.tags;
 	const memType = inferType(parsed.content);
 
 	const id = crypto.randomUUID();
@@ -2592,28 +2877,34 @@ app.post("/api/memory/remember", async (c) => {
 		// On UNIQUE constraint race (two concurrent inserts with same
 		// content_hash), catch the error and re-read the winner.
 		const result = getDbAccessor().withWriteTx((db) => {
-			// Check sourceId-based dedupe first
+			// Check sourceId-based dedupe first (scope-aware)
 			if (sourceId) {
-				const bySource = db
-					.prepare(
+				const bySource = (scope !== null
+					? db.prepare(
 						`SELECT id, type, tags, pinned, importance, content
-						 FROM memories WHERE source_type = ? AND source_id = ? AND is_deleted = 0 LIMIT 1`,
-					)
-					.get(sourceType, sourceId) as DedupeRow | undefined;
+						 FROM memories WHERE source_type = ? AND source_id = ? AND scope = ? AND is_deleted = 0 LIMIT 1`,
+					).get(sourceType, sourceId, scope)
+					: db.prepare(
+						`SELECT id, type, tags, pinned, importance, content
+						 FROM memories WHERE source_type = ? AND source_id = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`,
+					).get(sourceType, sourceId)) as DedupeRow | undefined;
 				if (bySource) return { deduped: true as const, row: bySource };
 			}
 
-			// Check content_hash dedupe
-			const byHash = db
-				.prepare(
+			// Check content_hash dedupe (scope-aware: same content in different scopes is not a duplicate)
+			const byHash = (scope !== null
+				? db.prepare(
 					`SELECT id, type, tags, pinned, importance, content
-					 FROM memories
-					 WHERE content_hash = ? AND is_deleted = 0 LIMIT 1`,
-				)
-				.get(contentHash) as DedupeRow | undefined;
+					 FROM memories WHERE content_hash = ? AND scope = ? AND is_deleted = 0 LIMIT 1`,
+				).get(contentHash, scope)
+				: db.prepare(
+					`SELECT id, type, tags, pinned, importance, content
+					 FROM memories WHERE content_hash = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`,
+				).get(contentHash)) as DedupeRow | undefined;
 			if (byHash) return { deduped: true as const, row: byHash };
 
 			// No duplicate — insert
+			const hasStructured = !!body.structured;
 			txIngestEnvelope(db, {
 				id,
 				content: normalizedContent.storageContent,
@@ -2627,12 +2918,13 @@ app.post("/api/memory/remember", async (c) => {
 				tags,
 				pinned,
 				isDeleted: 0,
-				extractionStatus: pipelineEnqueueEnabled ? "pending" : "none",
+				extractionStatus: hasStructured ? "complete" : (pipelineEnqueueEnabled ? "pending" : "none"),
 				embeddingModel: null,
-				extractionModel: pipelineEnqueueEnabled ? pipelineCfg.extractionModel : null,
+				extractionModel: hasStructured ? "structured-passthrough" : (pipelineEnqueueEnabled ? pipelineCfg.extractionModel : null),
 				updatedBy: who,
 				sourceType,
 				sourceId,
+				scope,
 				createdAt: now,
 			});
 			return { deduped: false as const };
@@ -2682,6 +2974,22 @@ app.post("/api/memory/remember", async (c) => {
 		return c.json({ error: "Failed to save memory" }, 500);
 	}
 
+	// Lossless transcript storage: write raw conversation text to
+	// session_transcripts so expand=true can join it at recall time.
+	if (body.transcript && sourceId) {
+		try {
+			getDbAccessor().withWriteTx((db) => {
+				db.prepare(
+					`INSERT OR IGNORE INTO session_transcripts
+					 (session_key, content, harness, project, agent_id, created_at)
+					VALUES (?, ?, ?, ?, 'default', ?)`,
+				).run(sourceId, body.transcript, sourceType, project, now);
+			});
+		} catch {
+			// Non-fatal — table may not exist pre-migration
+		}
+	}
+
 	// Generate embedding asynchronously — save memory first so failures are
 	// non-fatal (memory is still usable via keyword search)
 	let embedded = false;
@@ -2696,7 +3004,9 @@ app.post("/api/memory/remember", async (c) => {
 					memoryId: id,
 				});
 			} else {
-				const hash = contentHash;
+				// Scope-qualify content hash so same content in different scopes
+				// each gets its own embedding row for vector search
+				const embHash = scope ? `${contentHash}:${scope}` : contentHash;
 				const blob = vectorToBlob(vec);
 				const embId = crypto.randomUUID();
 
@@ -2707,9 +3017,9 @@ app.post("/api/memory/remember", async (c) => {
 						INSERT INTO embeddings
 						  (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at)
 						VALUES (?, ?, ?, ?, 'memory', ?, ?, ?)
-					`).run(embId, hash, blob, vec.length, id, normalizedContent.storageContent, now);
+					`).run(embId, embHash, blob, vec.length, id, normalizedContent.storageContent, now);
 					syncVecInsert(db, embId, vec);
-					db.prepare(`UPDATE memories SET embedding_model = ? WHERE id = ?`).run(cfg.embedding.model, id);
+					db.prepare("UPDATE memories SET embedding_model = ? WHERE id = ?").run(cfg.embedding.model, id);
 				});
 				embedded = true;
 			}
@@ -2721,22 +3031,151 @@ app.post("/api/memory/remember", async (c) => {
 		});
 	}
 
-	// Enqueue pipeline extraction if enabled
-	if (pipelineEnqueueEnabled) {
+	// --- Structured vs pipeline path ---
+	// When a structured payload is provided, write entities/aspects/attributes/hints
+	// synchronously and skip the async pipeline entirely. This is the path used by
+	// benchmarks and clients that pre-compute their own extraction.
+	let entitiesLinked = 0;
+	let hintsWritten = 0;
+
+	if (body.structured) {
+		const { txPersistStructured } = await import("./pipeline/graph-transactions.js");
 		try {
-			enqueueExtractionJob(getDbAccessor(), id);
+			const result = getDbAccessor().withWriteTx((db) =>
+				txPersistStructured(db, {
+					entities: (body.structured?.entities ?? []).map((e) => ({
+						source: e.source,
+						sourceType: e.sourceType,
+						relationship: e.relationship,
+						target: e.target,
+						targetType: e.targetType,
+						confidence: e.confidence ?? 0.7,
+					})),
+					aspects: body.structured?.aspects ?? [],
+					sourceMemoryId: id,
+					content: body.content,
+					agentId: "default",
+					now,
+				}),
+			);
+			entitiesLinked = result.mentionsLinked;
+			logger.debug("memory", "Structured payload persisted", {
+				id,
+				entities: result.entitiesInserted + result.entitiesUpdated,
+				relations: result.relationsInserted,
+				aspects: result.aspectsCreated,
+				attributes: result.attributesCreated,
+				mentions: result.mentionsLinked,
+			});
 		} catch (e) {
-			getDbAccessor().withWriteTx((db) => {
-				db.prepare(
-					`UPDATE memories
-						 SET extraction_status = 'failed', extraction_model = ?
-						 WHERE id = ?`,
-				).run(pipelineCfg.extractionModel, id);
+			logger.warn("memory", "Structured payload persistence failed (non-fatal)", {
+				id,
+				error: e instanceof Error ? e.message : String(e),
 			});
-			logger.warn("pipeline", "Failed to enqueue extraction job", {
-				memoryId: id,
-				error: String(e),
+		}
+
+		// Write structured hints
+		const allHints = [...(body.structured?.hints ?? []), ...(body.hints ?? [])];
+		if (allHints.length > 0) {
+			try {
+				getDbAccessor().withWriteTx((db) => {
+					const stmt = db.prepare(
+						`INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
+						 VALUES (?, ?, ?, ?, ?)`,
+					);
+					for (const hint of allHints) {
+						const h = typeof hint === "string" ? hint.trim() : "";
+						if (h.length < 5 || h.length > 300) continue;
+						stmt.run(crypto.randomUUID(), id, "default", h, now);
+						hintsWritten++;
+					}
+				});
+			} catch (e) {
+				logger.warn("memory", "Structured hints write failed (non-fatal)", {
+					id,
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		}
+	} else {
+		// --- Default path: inline entity linking + async pipeline ---
+
+		// Inline entity linking — immediate KG integration so KA traversal
+		// can find this memory without waiting for async pipeline extraction.
+		try {
+			const linkResult = getDbAccessor().withWriteTx((db) =>
+				linkMemoryToEntities(db, id, normalizedContent.storageContent, "default"),
+			);
+			entitiesLinked = linkResult.linked;
+			if (linkResult.linked > 0) {
+				logger.debug("memory", "Inline entity linking", {
+					id,
+					linked: linkResult.linked,
+					aspects: linkResult.aspects,
+					attributes: linkResult.attributes,
+				});
+			}
+		} catch (e) {
+			logger.warn("memory", "Inline entity linking failed (non-fatal)", {
+				id,
+				error: e instanceof Error ? e.message : String(e),
 			});
+		}
+
+		// Enqueue pipeline extraction if enabled
+		if (pipelineEnqueueEnabled) {
+			try {
+				enqueueExtractionJob(getDbAccessor(), id);
+			} catch (e) {
+				getDbAccessor().withWriteTx((db) => {
+					db.prepare(
+						`UPDATE memories
+							 SET extraction_status = 'failed', extraction_model = ?
+							 WHERE id = ?`,
+					).run(pipelineCfg.extractionModel, id);
+				});
+				logger.warn("pipeline", "Failed to enqueue extraction job", {
+					memoryId: id,
+					error: String(e),
+				});
+			}
+		}
+
+		// Prospective hints: if client provides hints, write them directly.
+		// Otherwise the pipeline worker will generate them asynchronously.
+		if (Array.isArray(body.hints) && body.hints.length > 0 && pipelineCfg.hints?.enabled) {
+			try {
+				getDbAccessor().withWriteTx((db) => {
+					const stmt = db.prepare(
+						`INSERT OR IGNORE INTO memory_hints (id, memory_id, agent_id, hint, created_at)
+						 VALUES (?, ?, ?, ?, ?)`,
+					);
+					for (const hint of body.hints ?? []) {
+						const h = typeof hint === "string" ? hint.trim() : "";
+						if (h.length < 5 || h.length > 300) continue;
+						stmt.run(crypto.randomUUID(), id, "default", h, now);
+						hintsWritten++;
+					}
+				});
+			} catch (e) {
+				logger.warn("memory", "Client-side hints write failed (non-fatal)", {
+					id,
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		} else if (pipelineCfg.hints?.enabled && pipelineEnqueueEnabled) {
+			// No client hints — enqueue async generation
+			try {
+				const { enqueueHintsJob } = await import("./pipeline/prospective-index.js");
+				getDbAccessor().withWriteTx((db) => {
+					enqueueHintsJob(db, id, normalizedContent.storageContent);
+				});
+			} catch (e) {
+				logger.warn("memory", "Hints job enqueue failed (non-fatal)", {
+					id,
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
 		}
 	}
 
@@ -2745,6 +3184,9 @@ app.post("/api/memory/remember", async (c) => {
 		type: memType,
 		pinned: !!pinned,
 		embedded,
+		entities: entitiesLinked,
+		hints: hintsWritten,
+		structured: !!body.structured,
 	});
 
 	return c.json({
@@ -2755,6 +3197,9 @@ app.post("/api/memory/remember", async (c) => {
 		importance,
 		content: normalizedContent.storageContent,
 		embedded,
+		entities_linked: entitiesLinked,
+		hints_written: hintsWritten,
+		structured: !!body.structured,
 	});
 });
 
@@ -2832,7 +3277,7 @@ app.get("/api/memory/:id/history", (c) => {
 	const limit = Math.min(parseOptionalInt(c.req.query("limit")) ?? 200, 1000);
 
 	const exists = getDbAccessor().withReadDb((db) => {
-		return db.prepare(`SELECT id FROM memories WHERE id = ?`).get(memoryId) as { id: string } | undefined;
+		return db.prepare("SELECT id FROM memories WHERE id = ?").get(memoryId) as { id: string } | undefined;
 	});
 	if (!exists) {
 		return c.json({ error: "Not found", memoryId }, 404);
@@ -3351,6 +3796,7 @@ app.post("/api/memory/forget", async (c) => {
 		sourceType: parseOptionalString(payload.source_type) ?? "",
 		since: parseOptionalString(payload.since) ?? "",
 		until: parseOptionalString(payload.until) ?? "",
+		scope: parseOptionalString(payload.scope) ?? null,
 		limit,
 	};
 
@@ -3361,7 +3807,8 @@ app.post("/api/memory/forget", async (c) => {
 		request.who.length > 0 ||
 		request.sourceType.length > 0 ||
 		request.since.length > 0 ||
-		request.until.length > 0;
+		request.until.length > 0 ||
+		request.scope !== null;
 	if (ids.length === 0 && !hasQueryScope) {
 		return c.json(
 			{
@@ -3610,7 +4057,13 @@ app.post("/api/memory/recall", async (c) => {
 	const cfg = loadMemoryConfig(AGENTS_DIR);
 	try {
 		const agentId = body.agentId ?? c.req.header("x-signet-agent-id") ?? "default";
-		const result = await hybridRecall({ ...body, query, agentId }, cfg, fetchEmbedding);
+		// Enforce auth scope: scoped tokens may only read their own project.
+		const scopeProject = c.get("auth")?.claims?.scope?.project;
+		const result = await hybridRecall(
+			{ ...body, query, agentId, ...(scopeProject ? { project: scopeProject } : {}) },
+			cfg,
+			fetchEmbedding,
+		);
 		return c.json(result);
 	} catch (e) {
 		logger.error("memory", "Recall failed", e as Error);
@@ -3632,8 +4085,11 @@ app.get("/api/memory/search", async (c) => {
 	const pinned = c.req.query("pinned");
 	const importanceMin = c.req.query("importance_min");
 	const since = c.req.query("since");
+	const expand = c.req.query("expand");
 
 	const cfg = loadMemoryConfig(AGENTS_DIR);
+	// Enforce auth scope: scoped tokens may only read their own project.
+	const scopeProject = c.get("auth")?.claims?.scope?.project;
 	try {
 		const result = await hybridRecall(
 			{
@@ -3645,6 +4101,8 @@ app.get("/api/memory/search", async (c) => {
 				pinned: pinned === "1" || pinned === "true",
 				importance_min: importanceMin ? Number.parseFloat(importanceMin) : undefined,
 				since,
+				expand: expand === "1" || expand === "true",
+				...(scopeProject ? { project: scopeProject } : {}),
 			},
 			cfg,
 			fetchEmbedding,
@@ -4598,15 +5056,26 @@ app.get("/api/connectors/:id/health", (c) => {
 	}
 });
 
+import { type ReconcilerHandle, startReconciler } from "./pipeline/skill-reconciler.js";
 // Skills routes (extracted to routes/skills.ts)
 import { mountSkillsRoutes, setFetchEmbedding } from "./routes/skills.js";
-import { startReconciler, type ReconcilerHandle } from "./pipeline/skill-reconciler.js";
 mountSkillsRoutes(app);
 setFetchEmbedding(fetchEmbedding);
 
 // Marketplace routes (MCP servers catalog + routing)
 import { mountMarketplaceRoutes } from "./routes/marketplace.js";
 mountMarketplaceRoutes(app);
+
+import { mountAppTrayRoutes } from "./routes/app-tray.js";
+mountAppTrayRoutes(app);
+
+// Widget generation routes (Signet OS widget rendering)
+import { mountWidgetRoutes } from "./routes/widget.js";
+mountWidgetRoutes(app);
+
+// Event bus routes (Signet OS ambient awareness layer — Phase 3/5)
+import { mountEventBusRoutes } from "./routes/event-bus.js";
+mountEventBusRoutes(app);
 
 // Marketplace review routes (Signet Reviews scaffold)
 import { mountMarketplaceReviewsRoutes } from "./routes/marketplace-reviews.js";
@@ -4615,6 +5084,14 @@ mountMarketplaceReviewsRoutes(app);
 // Changelog + roadmap routes (proxies GitHub raw content with local fallback)
 import { mountChangelogRoutes } from "./routes/changelog.js";
 mountChangelogRoutes(app);
+
+// OS agent chat routes (natural language → MCP tool routing)
+import { mountOsChatRoutes } from "./routes/os-chat.js";
+mountOsChatRoutes(app);
+
+// OS page-agent routes (visual GUI automation via PageController)
+import { mountOsAgentRoutes } from "./routes/os-agent.js";
+mountOsAgentRoutes(app);
 
 // ============================================================================
 // Harnesses API
@@ -4961,8 +5438,6 @@ import {
 	type SynthesisRequest,
 	type UserPromptSubmitRequest,
 	handlePreCompaction,
-	handleRecall,
-	handleRemember,
 	handleSessionEnd,
 	handleSessionStart,
 	handleSynthesisRequest,
@@ -4979,9 +5454,11 @@ import {
 	getActiveSessions,
 	getBypassedSessionKeys,
 	getSessionPath,
+	hasSession,
 	isSessionBypassed,
 	releaseSession,
 	startSessionCleanup,
+	stopSessionCleanup,
 	unbypassSession,
 } from "./session-tracker.js";
 
@@ -5104,10 +5581,15 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 		const runtimePath = resolveRuntimePath(c, body);
 		if (runtimePath) body.runtimePath = runtimePath;
 
+		// Capture before any claim refresh — false means the daemon restarted
+		// mid-session (claimedSessions lost in memory) so the adapter can re-init.
+		// Note: hasSession evicts expired entries as a side effect; calling it
+		// before checkSessionClaim is intentional — an expired claim == no claim.
+		const sessionKey = parseOptionalString(body.sessionKey);
+		const known = sessionKey ? hasSession(sessionKey) : false;
+
 		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
 		if (conflict) return conflict;
-
-		const sessionKey = parseOptionalString(body.sessionKey);
 		const agentId = parseOptionalString(body.agentId) ?? "default";
 		if (sessionKey) {
 			const touched = touchAgentPresence(sessionKey);
@@ -5138,7 +5620,7 @@ app.post("/api/hooks/user-prompt-submit", async (c) => {
 		}
 
 		const result = await handleUserPromptSubmit(body);
-		return c.json(result);
+		return c.json({ ...result, sessionKnown: known });
 	} catch (e) {
 		logger.error("hooks", "User prompt submit hook failed", e as Error);
 		return c.json({ error: "Hook execution failed" }, 500);
@@ -5171,16 +5653,16 @@ app.post("/api/hooks/session-end", async (c) => {
 			return c.json({ memoriesSaved: 0, bypassed: true });
 		}
 
-	try {
-		const result = await handleSessionEnd(body);
-		return c.json(result);
-	} finally {
-		// Always release session claim and agent presence, even if extraction throws
-		if (sessionKey) {
-			releaseSession(sessionKey);
-			removeAgentPresence(sessionKey);
+		try {
+			const result = await handleSessionEnd(body);
+			return c.json(result);
+		} finally {
+			// Always release session claim and agent presence, even if extraction throws
+			if (sessionKey) {
+				releaseSession(sessionKey);
+				removeAgentPresence(sessionKey);
+			}
 		}
-	}
 	} catch (e) {
 		logger.error("hooks", "Session end hook failed", e as Error);
 		return c.json({ error: "Hook execution failed" }, 500);
@@ -5209,8 +5691,17 @@ app.post("/api/hooks/remember", async (c) => {
 			return c.json({ success: true, memories: [], bypassed: true });
 		}
 
-		const result = handleRemember(body);
-		return c.json(result);
+		// Forward to the full remember endpoint for transcript, structured,
+		// and pipeline support instead of the bare handleRemember path.
+		const auth = c.req.header("authorization");
+		const headers = auth
+			? { "Content-Type": "application/json", Authorization: auth }
+			: { "Content-Type": "application/json" };
+		return fetch(`http://${INTERNAL_SELF_HOST}:${PORT}/api/memory/remember`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+		});
 	} catch (e) {
 		logger.error("hooks", "Remember hook failed", e as Error);
 		return c.json({ error: "Hook execution failed" }, 500);
@@ -5239,7 +5730,12 @@ app.post("/api/hooks/recall", async (c) => {
 			return c.json({ memories: [], count: 0, bypassed: true });
 		}
 
-		const result = handleRecall(body);
+		const agentId = c.req.header("x-signet-agent-id") ?? "default";
+		const result = await hybridRecall(
+			{ query: body.query, limit: body.limit, scope: body.project, agentId },
+			cfg,
+			fetchEmbedding,
+		);
 		return c.json(result);
 	} catch (e) {
 		logger.error("hooks", "Recall hook failed", e as Error);
@@ -5612,9 +6108,25 @@ app.get("/api/cross-agent/stream", (c) => {
 
 	const stream = new ReadableStream({
 		start(controller) {
+			let dead = false;
+			const cleanup = () => {
+				if (dead) return;
+				dead = true;
+				clearInterval(keepAlive);
+				unsubscribe();
+				try {
+					controller.close();
+				} catch {}
+			};
+
 			const writeEvent = (event: unknown) => {
-				const data = `data: ${JSON.stringify(event)}\n\n`;
-				controller.enqueue(encoder.encode(data));
+				if (dead) return;
+				try {
+					const data = `data: ${JSON.stringify(event)}\n\n`;
+					controller.enqueue(encoder.encode(data));
+				} catch {
+					cleanup();
+				}
 			};
 
 			writeEvent({
@@ -5645,8 +6157,6 @@ app.get("/api/cross-agent/stream", (c) => {
 			});
 
 			const unsubscribe = subscribeCrossAgentEvents((event) => {
-				// Message visibility uses isMessageVisibleToAgent(includeBroadcast=true);
-				// includeSent allows showing self-authored messages even when not addressed here.
 				if (event.type === "message") {
 					if (
 						!isMessageVisibleToAgent(event.message, {
@@ -5661,8 +6171,6 @@ app.get("/api/cross-agent/stream", (c) => {
 					}
 				}
 
-				// Presence visibility suppresses self-updates unless includeSelf=true.
-				// Without a sessionKey context we ignore same-agent presence events entirely.
 				if (event.type === "presence" && !includeSelf && event.presence.agentId === agentId) {
 					if (!sessionKey) {
 						return;
@@ -5679,18 +6187,15 @@ app.get("/api/cross-agent/stream", (c) => {
 			});
 
 			const keepAlive = setInterval(() => {
-				controller.enqueue(encoder.encode(": keepalive\n\n"));
+				if (dead) return;
+				try {
+					controller.enqueue(encoder.encode(": keepalive\n\n"));
+				} catch {
+					cleanup();
+				}
 			}, 15_000);
 
-			c.req.raw.signal.addEventListener("abort", () => {
-				clearInterval(keepAlive);
-				unsubscribe();
-				try {
-					controller.close();
-				} catch {
-					// Stream may already be closed by the runtime.
-				}
-			});
+			c.req.raw.signal.addEventListener("abort", cleanup);
 		},
 	});
 
@@ -5846,7 +6351,10 @@ app.get("/api/sessions/summaries", (c) => {
 	const project = c.req.query("project");
 	const depthRaw = c.req.query("depth");
 	const depthNum = depthRaw !== undefined ? Number(depthRaw) : undefined;
-	if (depthNum !== undefined && (Number.isNaN(depthNum) || !Number.isInteger(depthNum) || depthNum < 0 || depthRaw?.trim() === "")) {
+	if (
+		depthNum !== undefined &&
+		(Number.isNaN(depthNum) || !Number.isInteger(depthNum) || depthNum < 0 || depthRaw?.trim() === "")
+	) {
 		return c.json({ error: "depth must be a non-negative integer" }, 400);
 	}
 	const limitParsed = Number.parseInt(c.req.query("limit") ?? "50", 10);
@@ -5856,11 +6364,7 @@ app.get("/api/sessions/summaries", (c) => {
 
 	// Check table exists
 	const tableExists = accessor.withReadDb((db) =>
-		db
-			.prepare(
-				`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'`,
-			)
-			.get(),
+		db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'`).get(),
 	);
 	if (!tableExists) {
 		return c.json({ summaries: [], total: 0 });
@@ -5879,11 +6383,9 @@ app.get("/api/sessions/summaries", (c) => {
 			params.push(depthNum);
 		}
 
-		const countRow = db
-			.prepare(
-				`SELECT COUNT(*) as cnt FROM session_summaries ${where}`,
-			)
-			.get(...params) as { cnt: number } | undefined;
+		const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM session_summaries ${where}`).get(...params) as
+			| { cnt: number }
+			| undefined;
 
 		const summaries = db
 			.prepare(
@@ -5896,14 +6398,10 @@ app.get("/api/sessions/summaries", (c) => {
 			)
 			.all(...params, limit, offset) as Array<Record<string, unknown>>;
 
-		const childCountStmt = db.prepare(
-			`SELECT COUNT(*) as cnt FROM session_summary_children WHERE parent_id = ?`,
-		);
+		const childCountStmt = db.prepare("SELECT COUNT(*) as cnt FROM session_summary_children WHERE parent_id = ?");
 
 		const enriched = summaries.map((s) => {
-			const childRow = childCountStmt.get(s.id) as
-				| { cnt: number }
-				| undefined;
+			const childRow = childCountStmt.get(s.id) as { cnt: number } | undefined;
 			return { ...s, childCount: childRow?.cnt ?? 0 };
 		});
 
@@ -6128,9 +6626,22 @@ app.get("/api/tasks/:id/stream", (c) => {
 
 	const stream = new ReadableStream({
 		start(controller) {
+			let dead = false;
+			const cleanup = () => {
+				if (dead) return;
+				dead = true;
+				clearInterval(keepAlive);
+				unsubscribe();
+			};
+
 			const writeEvent = (event: unknown) => {
-				const data = `data: ${JSON.stringify(event)}\n\n`;
-				controller.enqueue(encoder.encode(data));
+				if (dead) return;
+				try {
+					const data = `data: ${JSON.stringify(event)}\n\n`;
+					controller.enqueue(encoder.encode(data));
+				} catch {
+					cleanup();
+				}
 			};
 
 			writeEvent({
@@ -6177,13 +6688,15 @@ app.get("/api/tasks/:id/stream", (c) => {
 			});
 
 			const keepAlive = setInterval(() => {
-				controller.enqueue(encoder.encode(": keepalive\n\n"));
+				if (dead) return;
+				try {
+					controller.enqueue(encoder.encode(": keepalive\n\n"));
+				} catch {
+					cleanup();
+				}
 			}, 15_000);
 
-			c.req.raw.signal.addEventListener("abort", () => {
-				clearInterval(keepAlive);
-				unsubscribe();
-			});
+			c.req.raw.signal.addEventListener("abort", cleanup);
 		},
 	});
 
@@ -6526,10 +7039,7 @@ app.get("/api/status", (c) => {
 	const config = loadMemoryConfig(AGENTS_DIR);
 	const configuredLogFile = readEnvTrimmed("SIGNET_LOG_FILE");
 	const configuredLogDir = readEnvTrimmed("SIGNET_LOG_DIR") ?? LOG_DIR;
-	const datedLogFile = join(
-		configuredLogDir,
-		`signet-${new Date().toISOString().slice(0, 10)}.log`,
-	);
+	const datedLogFile = join(configuredLogDir, `signet-${new Date().toISOString().slice(0, 10)}.log`);
 
 	let health: { score: number; status: string } | undefined;
 	try {
@@ -6567,6 +7077,7 @@ app.get("/api/status", (c) => {
 		port: PORT,
 		host: HOST,
 		bindHost: BIND_HOST,
+		networkMode: NETWORK_MODE,
 		agentsDir: AGENTS_DIR,
 		memoryDb: existsSync(MEMORY_DB),
 		pipelineV2: config.pipelineV2,
@@ -6738,6 +7249,17 @@ app.get("/api/pipeline/status", (c) => {
 	});
 });
 
+app.use("/api/pipeline/nudge", async (c, next) => {
+	return requirePermission("admin", authConfig)(c, next);
+});
+
+app.post("/api/pipeline/nudge", (c) => {
+	if (!nudgeExtractionWorker()) {
+		return c.json({ error: "Extraction worker not running" }, 503);
+	}
+	return c.json({ nudged: true });
+});
+
 // ---------------------------------------------------------------------------
 // Model Registry endpoints
 // ---------------------------------------------------------------------------
@@ -6761,34 +7283,38 @@ const REFRESH_COOLDOWN_MS = 60_000;
 app.post("/api/pipeline/models/refresh", async (c) => {
 	const now = Date.now();
 	if (now - lastRefreshRequestAt < REFRESH_COOLDOWN_MS) {
-		return c.json({
-			models: getModelsByProvider(),
-			registry: getRegistryStatus(),
-			throttled: true,
-		}, 429);
+		return c.json(
+			{
+				models: getModelsByProvider(),
+				registry: getRegistryStatus(),
+				throttled: true,
+			},
+			429,
+		);
 	}
 	lastRefreshRequestAt = now;
 	const cfg = loadMemoryConfig(AGENTS_DIR);
 	let anthropicKey: string | undefined = process.env.ANTHROPIC_API_KEY;
 	if (!anthropicKey) {
 		try {
-			anthropicKey = await getSecret("ANTHROPIC_API_KEY") ?? undefined;
-		} catch { /* ignore */ }
+			anthropicKey = (await getSecret("ANTHROPIC_API_KEY")) ?? undefined;
+		} catch {
+			/* ignore */
+		}
 	}
 	let openRouterKey: string | undefined = process.env.OPENROUTER_API_KEY;
 	if (!openRouterKey) {
 		try {
-			openRouterKey = await getSecret("OPENROUTER_API_KEY") ?? undefined;
-		} catch { /* ignore */ }
+			openRouterKey = (await getSecret("OPENROUTER_API_KEY")) ?? undefined;
+		} catch {
+			/* ignore */
+		}
 	}
 	await refreshRegistry(
 		resolveRegistryOllamaBaseUrl(cfg.pipelineV2.extraction.provider, cfg.pipelineV2.extraction.endpoint),
 		anthropicKey,
 		openRouterKey,
-		resolveRegistryOpenRouterBaseUrl(
-			cfg.pipelineV2.extraction.provider,
-			cfg.pipelineV2.extraction.endpoint,
-		),
+		resolveRegistryOpenRouterBaseUrl(cfg.pipelineV2.extraction.provider, cfg.pipelineV2.extraction.endpoint),
 	);
 	return c.json({
 		models: getModelsByProvider(),
@@ -7075,43 +7601,348 @@ app.post("/api/repair/structural-backfill", async (c) => {
 
 app.get("/api/repair/cold-stats", (c) => {
 	const accessor = getDbAccessor();
-	return c.json(accessor.withReadDb((db) => {
-		// Check if table exists
-		const tableExists = db
-			.prepare(
-				`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_cold'`,
-			)
-			.get();
+	return c.json(
+		accessor.withReadDb((db) => {
+			// Check if table exists
+			const tableExists = db
+				.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_cold'`)
+				.get();
 
-		if (!tableExists) {
-			return { count: 0, message: "Cold tier not yet initialized (migration pending)" };
-		}
+			if (!tableExists) {
+				return { count: 0, message: "Cold tier not yet initialized (migration pending)" };
+			}
 
-		const stats = db.prepare(`
+			const stats = db
+				.prepare(`
 			SELECT
 				COUNT(*) as total,
 				MIN(archived_at) as oldest,
 				MAX(archived_at) as newest,
 				SUM(LENGTH(CAST(content AS BLOB)) + LENGTH(CAST(COALESCE(original_row_json, '') AS BLOB))) as total_bytes
 			FROM memories_cold
-		`).get() as { total: number; oldest: string | null; newest: string | null; total_bytes: number | null } | undefined;
+		`)
+				.get() as
+				| { total: number; oldest: string | null; newest: string | null; total_bytes: number | null }
+				| undefined;
 
-		const byReason = db.prepare(`
+			const byReason = db
+				.prepare(`
 			SELECT archived_reason, COUNT(*) as count
 			FROM memories_cold
 			GROUP BY archived_reason
-		`).all() as Array<{ archived_reason: string | null; count: number }>;
+		`)
+				.all() as Array<{ archived_reason: string | null; count: number }>;
 
-		return {
-			count: stats?.total ?? 0,
-			oldest: stats?.oldest ?? null,
-			newest: stats?.newest ?? null,
-			totalBytes: stats?.total_bytes ?? 0,
-			byReason: Object.fromEntries(
-				byReason.map((r) => [r.archived_reason ?? "unknown", r.count]),
-			),
-		};
-	}));
+			return {
+				count: stats?.total ?? 0,
+				oldest: stats?.oldest ?? null,
+				newest: stats?.newest ?? null,
+				totalBytes: stats?.total_bytes ?? 0,
+				byReason: Object.fromEntries(byReason.map((r) => [r.archived_reason ?? "unknown", r.count])),
+			};
+		}),
+	);
+});
+
+app.post("/api/repair/cluster-entities", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const result = getDbAccessor().withWriteTx((db) =>
+		clusterEntities(db, agentId),
+	);
+	return c.json(result);
+});
+
+app.post("/api/repair/relink-entities", async (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	let batchSize = 500;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = body.batchSize;
+	} catch {
+		// defaults
+	}
+	const accessor = getDbAccessor();
+
+	// Find memories with no entity mentions
+	const unlinked = accessor.withReadDb((db) =>
+		db.prepare(
+			`SELECT id, content FROM memories
+			 WHERE is_deleted = 0
+			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_entity_mentions)
+			 LIMIT ?`,
+		).all(batchSize) as Array<{ id: string; content: string }>,
+	);
+
+	if (unlinked.length === 0) {
+		return c.json({ action: "relink-entities", linked: 0, remaining: 0, message: "all memories linked" });
+	}
+
+	let linked = 0;
+	let entities = 0;
+	let aspects = 0;
+	let attributes = 0;
+
+	for (const mem of unlinked) {
+		const result = accessor.withWriteTx((db) =>
+			linkMemoryToEntities(db, mem.id, mem.content, agentId),
+		);
+		linked += result.linked;
+		entities += result.entityIds.length;
+		aspects += result.aspects;
+		attributes += result.attributes;
+	}
+
+	// Check how many remain
+	const remaining = accessor.withReadDb((db) =>
+		(db.prepare(
+			`SELECT COUNT(*) as cnt FROM memories
+			 WHERE is_deleted = 0
+			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_entity_mentions)`,
+		).get() as { cnt: number }).cnt,
+	);
+
+	return c.json({
+		action: "relink-entities",
+		processed: unlinked.length,
+		linked,
+		entities,
+		aspects,
+		attributes,
+		remaining,
+		message: remaining > 0 ? `${remaining} memories still need linking — call again` : "all memories linked",
+	});
+});
+
+app.post("/api/repair/backfill-hints", async (c) => {
+	const cfg = loadMemoryConfig(AGENTS_DIR);
+	if (!cfg.pipelineV2.hints?.enabled) {
+		return c.json({ error: "Hints disabled in pipeline config" }, 400);
+	}
+
+	let batchSize = 50;
+	try {
+		const body = await c.req.json();
+		if (typeof body?.batchSize === "number") batchSize = Math.min(body.batchSize, 200);
+	} catch {
+		// defaults
+	}
+
+	const accessor = getDbAccessor();
+	// Find unscoped memories that have no hints yet
+	const unhinted = accessor.withReadDb((db) =>
+		db.prepare(
+			`SELECT m.id, m.content FROM memories m
+			 WHERE m.is_deleted = 0 AND m.scope IS NULL
+			   AND m.id NOT IN (SELECT DISTINCT memory_id FROM memory_hints)
+			 ORDER BY m.created_at DESC
+			 LIMIT ?`,
+		).all(batchSize) as Array<{ id: string; content: string }>,
+	);
+
+	if (unhinted.length === 0) {
+		return c.json({ action: "backfill-hints", enqueued: 0, remaining: 0, message: "all unscoped memories have hints" });
+	}
+
+	const { enqueueHintsJob: enqueue } = await import("./pipeline/prospective-index.js");
+	let enqueued = 0;
+	accessor.withWriteTx((db) => {
+		for (const mem of unhinted) {
+			enqueue(db, mem.id, mem.content);
+			enqueued++;
+		}
+	});
+
+	const remaining = accessor.withReadDb((db) =>
+		(db.prepare(
+			`SELECT COUNT(*) as cnt FROM memories
+			 WHERE is_deleted = 0 AND scope IS NULL
+			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_hints)`,
+		).get() as { cnt: number }).cnt,
+	);
+
+	return c.json({
+		action: "backfill-hints",
+		enqueued,
+		remaining,
+		message: remaining > 0 ? `${remaining} unscoped memories still need hints — call again` : "all unscoped memories have hints",
+	});
+});
+
+// ============================================================================
+// Troubleshooter — live terminal command execution
+// ============================================================================
+
+const TROUBLESHOOT_COMMANDS: Record<string, readonly [string, ReadonlyArray<string>]> = {
+	status: ["signet", ["status"]],
+	"daemon-status": ["signet", ["daemon", "status"]],
+	"daemon-logs": ["signet", ["daemon", "logs", "--lines", "50"]],
+	"embed-audit": ["signet", ["embed", "audit"]],
+	"embed-backfill": ["signet", ["embed", "backfill"]],
+	sync: ["signet", ["sync"]],
+	"recall-test": ["signet", ["recall", "test query"]],
+	"skill-list": ["signet", ["skill", "list"]],
+	"secret-list": ["signet", ["secret", "list"]],
+	"daemon-stop": ["signet", ["daemon", "stop"]],
+	"daemon-restart": ["signet", ["daemon", "restart"]],
+	update: ["signet", ["update", "install"]],
+};
+
+app.get("/api/troubleshoot/commands", (c) => {
+	return c.json({
+		commands: Object.entries(TROUBLESHOOT_COMMANDS).map(([key, [bin, args]]) => ({
+			key,
+			display: `${bin} ${args.join(" ")}`,
+		})),
+	});
+});
+
+app.post("/api/troubleshoot/exec", async (c) => {
+	const body = await c.req.json().catch(() => null);
+	const key = typeof body === "object" && body !== null && "key" in body ? String(body.key) : "";
+
+	const cmd = TROUBLESHOOT_COMMANDS[key];
+	if (!cmd) {
+		return c.json({ error: `Unknown command: ${key}` }, 400);
+	}
+
+	const [bin, args] = cmd;
+	const resolved = Bun.which(bin);
+	if (!resolved) {
+		return c.json({ error: `Binary not found: ${bin}` }, 500);
+	}
+
+	const { CLAUDECODE: _cc, SIGNET_NO_HOOKS: _, ...baseEnv } = process.env;
+	const encoder = new TextEncoder();
+
+	// Lifecycle commands (stop/restart) can't stream through the general
+	// exec pipeline — the child process would kill its parent mid-stream.
+	// Handle directly: flush SSE output, then schedule graceful shutdown.
+	if (key === "daemon-stop" || key === "daemon-restart") {
+		const action = key === "daemon-stop" ? "stop" : "restart";
+		const lifecycle = new ReadableStream({
+			start(controller) {
+				const write = (event: unknown): void => {
+					try {
+						controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+					} catch {}
+				};
+
+				write({ type: "started", key, command: `signet daemon ${action}` });
+				write({ type: "stdout", data: `Daemon ${action} initiated (PID ${process.pid})\n` });
+				if (key === "daemon-stop") {
+					write({ type: "stdout", data: "Dashboard will lose connection.\n" });
+				}
+				write({ type: "exit", code: 0 });
+				try {
+					controller.close();
+				} catch {}
+
+				// Give the response time to flush, then trigger graceful shutdown.
+				// SIGTERM triggers cleanup() which handles PID file, DB, watchers.
+				setTimeout(async () => {
+					if (key === "daemon-restart") {
+						const { spawn: nodeSpawn } = await import("node:child_process");
+						// Use array form — no shell, so paths with spaces are safe.
+						// Inner delay lets cleanup() finish before the new daemon starts.
+						setTimeout(() => {
+							const child = nodeSpawn(resolved, ["daemon", "start"], {
+								detached: true,
+								stdio: "ignore",
+								env: { ...baseEnv, SIGNET_NO_HOOKS: "1" } as NodeJS.ProcessEnv,
+							});
+							child.unref();
+						}, 1000);
+					}
+					process.kill(process.pid, "SIGTERM");
+				}, 1000);
+			},
+		});
+
+		return new Response(lifecycle, {
+			headers: {
+				"content-type": "text/event-stream",
+				"cache-control": "no-cache",
+				connection: "keep-alive",
+			},
+		});
+	}
+
+	const stream = new ReadableStream({
+		async start(controller) {
+			const write = (event: unknown) => {
+				try {
+					controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+				} catch {}
+			};
+
+			write({ type: "started", key, command: `${bin} ${args.join(" ")}` });
+
+			const { spawn: nodeSpawn } = await import("node:child_process");
+			const child = nodeSpawn(resolved, args as string[], {
+				stdio: "pipe",
+				windowsHide: true,
+				env: { ...baseEnv, SIGNET_NO_HOOKS: "1", FORCE_COLOR: "0" } as NodeJS.ProcessEnv,
+			});
+
+			child.stdout?.on("data", (chunk: Buffer) => {
+				try {
+					write({ type: "stdout", data: chunk.toString("utf-8") });
+				} catch {
+					clearTimeout(killTimer);
+					try {
+						child.kill("SIGTERM");
+					} catch {}
+				}
+			});
+
+			child.stderr?.on("data", (chunk: Buffer) => {
+				try {
+					write({ type: "stderr", data: chunk.toString("utf-8") });
+				} catch {
+					clearTimeout(killTimer);
+					try {
+						child.kill("SIGTERM");
+					} catch {}
+				}
+			});
+
+			// 60s timeout — SIGTERM first, force kill after 5s
+			const killTimer = setTimeout(() => {
+				try {
+					child.kill("SIGTERM");
+				} catch {}
+				setTimeout(() => {
+					try {
+						child.kill();
+					} catch {}
+				}, 5_000);
+			}, 60_000);
+
+			child.on("close", (code) => {
+				clearTimeout(killTimer);
+				write({ type: "exit", code: code ?? 1 });
+				try {
+					controller.close();
+				} catch {}
+			});
+
+			child.on("error", (err) => {
+				clearTimeout(killTimer);
+				write({ type: "error", message: err.message });
+				try {
+					controller.close();
+				} catch {}
+			});
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			"content-type": "text/event-stream",
+			"cache-control": "no-cache",
+			connection: "keep-alive",
+		},
+	});
 });
 
 // ============================================================================
@@ -7269,6 +8100,28 @@ app.get("/api/knowledge/stats", (c) => {
 	return c.json(getKnowledgeStats(getDbAccessor(), agentId));
 });
 
+app.get("/api/knowledge/communities", (c) => {
+	const agentId = c.req.query("agent_id") ?? "default";
+	const rows = getDbAccessor().withReadDb((db) => {
+		return db
+			.prepare(
+				`SELECT id, name, cohesion, member_count, created_at, updated_at
+				 FROM entity_communities
+				 WHERE agent_id = ?
+				 ORDER BY member_count DESC`,
+			)
+			.all(agentId) as ReadonlyArray<{
+			id: string;
+			name: string | null;
+			cohesion: number;
+			member_count: number;
+			created_at: string;
+			updated_at: string;
+		}>;
+	});
+	return c.json({ items: rows, count: rows.length });
+});
+
 app.get("/api/knowledge/traversal/status", (c) => {
 	return c.json({
 		status: getTraversalStatus(),
@@ -7317,8 +8170,11 @@ app.post("/api/knowledge/expand", async (c) => {
 	const traversalCfg = cfg.pipelineV2.traversal ?? {
 		maxAspectsPerEntity: 10,
 		maxAttributesPerAspect: 20,
-		maxDependencyHops: 30,
+		maxDependencyHops: 10,
 		minDependencyStrength: 0.3,
+		maxBranching: 4,
+		maxTraversalPaths: 50,
+		minConfidence: 0.5,
 		timeoutMs: 500,
 	};
 
@@ -7330,6 +8186,9 @@ app.post("/api/knowledge/expand", async (c) => {
 			maxAttributesPerAspect: traversalCfg.maxAttributesPerAspect,
 			maxDependencyHops: traversalCfg.maxDependencyHops,
 			minDependencyStrength: traversalCfg.minDependencyStrength,
+			maxBranching: traversalCfg.maxBranching,
+			maxTraversalPaths: traversalCfg.maxTraversalPaths,
+			minConfidence: traversalCfg.minConfidence,
 			timeoutMs: traversalCfg.timeoutMs,
 			aspectFilter: aspectFilter || undefined,
 		});
@@ -7451,6 +8310,143 @@ app.post("/api/knowledge/expand", async (c) => {
 			memories: hydratedMemories,
 		});
 	});
+});
+
+// ============================================================================
+// Session Expansion (DP-4)
+// ============================================================================
+
+app.post("/api/knowledge/expand/session", async (c) => {
+	const body = await c.req.json().catch(() => ({}));
+	const entityName =
+		typeof body.entityName === "string" ? body.entityName.trim() : "";
+	const sessionId =
+		typeof body.sessionId === "string" ? body.sessionId.trim() : undefined;
+	const timeRange =
+		typeof body.timeRange === "string" ? body.timeRange.trim() : undefined;
+	const maxResults =
+		typeof body.maxResults === "number"
+			? Math.max(1, Math.min(body.maxResults, 50))
+			: 10;
+
+	if (!entityName) {
+		return c.json({ error: "entityName is required" }, 400);
+	}
+
+	return getDbAccessor().withReadDb((db) => {
+		// Check if session_summaries table exists
+		const tbl = db
+			.prepare(
+				"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'",
+			)
+			.get() as { name: string } | undefined;
+		if (!tbl) {
+			return c.json({ entityName, summaries: [], total: 0 });
+		}
+
+		// Resolve entity by canonical_name match
+		const entity = db
+			.prepare(
+				`SELECT id, name FROM entities
+				 WHERE canonical_name LIKE ?
+				   AND agent_id = 'default'
+				 ORDER BY mentions DESC, updated_at DESC
+				 LIMIT 1`,
+			)
+			.get(`%${entityName.toLowerCase()}%`) as
+			| { id: string; name: string }
+			| undefined;
+
+		if (!entity) {
+			return c.json({ entityName, summaries: [], total: 0 });
+		}
+
+		// Build query: session_summaries ← session_summary_memories
+		//   ← memory_entity_mentions → entities
+		const conditions = [
+			"mem.entity_id = ?",
+			"ss.kind = 'session'",
+		];
+		const args: Array<string | number> = [entity.id];
+
+		if (sessionId) {
+			conditions.push("ss.session_key = ?");
+			args.push(sessionId);
+		}
+
+		if (timeRange === "last_week") {
+			conditions.push(
+				"ss.latest_at >= datetime('now', '-7 days')",
+			);
+		} else if (timeRange === "last_month") {
+			conditions.push(
+				"ss.latest_at >= datetime('now', '-30 days')",
+			);
+		} else if (timeRange && timeRange.length > 0) {
+			conditions.push("ss.latest_at >= ?");
+			args.push(timeRange);
+		}
+
+		const rows = db
+			.prepare(
+				`SELECT DISTINCT ss.id, ss.content, ss.session_key,
+				        ss.harness, ss.earliest_at, ss.latest_at
+				 FROM session_summaries ss
+				 JOIN session_summary_memories ssm
+				   ON ssm.summary_id = ss.id
+				 JOIN memory_entity_mentions mem
+				   ON mem.memory_id = ssm.memory_id
+				 WHERE ${conditions.join(" AND ")}
+				 ORDER BY ss.latest_at DESC
+				 LIMIT ?`,
+			)
+			.all(...args, maxResults) as Array<{
+			id: string;
+			content: string;
+			session_key: string | null;
+			harness: string | null;
+			earliest_at: string;
+			latest_at: string;
+		}>;
+
+		return c.json({
+			entityName: entity.name,
+			summaries: rows.map((row) => ({
+				id: row.id,
+				sessionKey: row.session_key,
+				harness: row.harness,
+				earliestAt: row.earliest_at,
+				latestAt: row.latest_at,
+				content: row.content,
+			})),
+			total: rows.length,
+		});
+	});
+});
+
+// ============================================================================
+// Graph Impact Analysis (DP-4)
+// ============================================================================
+
+app.post("/api/graph/impact", async (c) => {
+	const body = await c.req.json().catch(() => ({}));
+	const entityId =
+		typeof body.entityId === "string" ? body.entityId.trim() : "";
+	const direction =
+		body.direction === "upstream" ? "upstream" : "downstream";
+	const maxDepth =
+		typeof body.maxDepth === "number"
+			? Math.max(1, Math.min(body.maxDepth, 10))
+			: 3;
+
+	if (!entityId) {
+		return c.json({ error: "entityId is required" }, 400);
+	}
+
+	const result = getDbAccessor().withReadDb((db) =>
+		walkImpact(db, { entityId, direction, maxDepth, timeoutMs: 200 }),
+	);
+	return c.json(result);
 });
 
 // ============================================================================
@@ -7959,6 +8955,7 @@ function detectGitBranch(remote: string): string {
 			encoding: "utf-8",
 			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 3000,
+			windowsHide: true,
 		}).trim();
 		// ref looks like "refs/remotes/origin/main" — extract the branch name
 		const prefix = `refs/remotes/${remote}/`;
@@ -7975,6 +8972,7 @@ function detectGitBranch(remote: string): string {
 			encoding: "utf-8",
 			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 3000,
+			windowsHide: true,
 		}).trim();
 		if (branch && branch !== "HEAD") {
 			return branch;
@@ -8571,9 +9569,7 @@ const COMMIT_DEBOUNCE_MS = 5000; // Wait 5 seconds after last change before comm
 
 function ensureProtectedGitignore(dir: string): void {
 	const gitignorePath = join(dir, ".gitignore");
-	const existingContent = existsSync(gitignorePath)
-		? readFileSync(gitignorePath, "utf-8")
-		: "";
+	const existingContent = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf-8") : "";
 	const nextContent = mergeSignetGitignoreEntries(existingContent);
 	if (nextContent !== existingContent) {
 		writeFileSync(gitignorePath, nextContent, "utf-8");
@@ -8582,75 +9578,97 @@ function ensureProtectedGitignore(dir: string): void {
 
 async function gitUntrackProtectedFiles(dir: string): Promise<void> {
 	return new Promise((resolve) => {
-		const proc = spawn(
-			"git",
-			[
-				"rm",
-				"--cached",
-				"--ignore-unmatch",
-				"--quiet",
-				"--",
-				...SIGNET_GIT_PROTECTED_PATHS,
-			],
-			{ cwd: dir, stdio: "pipe", windowsHide: true },
-		);
+		const proc = spawn("git", ["rm", "--cached", "--ignore-unmatch", "--quiet", "--", ...SIGNET_GIT_PROTECTED_PATHS], {
+			cwd: dir,
+			stdio: "pipe",
+			windowsHide: true,
+		});
 		proc.on("close", () => resolve());
 		proc.on("error", () => resolve());
 	});
 }
 
+const GIT_AUTOCOMMIT_TIMEOUT_MS = 30_000;
+let autocommitInFlight = false;
+
 async function gitAutoCommit(dir: string, changedFiles: string[]): Promise<void> {
 	if (!isGitRepo(dir)) return;
-	ensureProtectedGitignore(dir);
-	await gitUntrackProtectedFiles(dir);
+	// Prevent concurrent auto-commits from piling up
+	if (autocommitInFlight) return;
+	autocommitInFlight = true;
 
-	const fileList = changedFiles.map((f) => f.replace(dir + "/", "")).join(", ");
-	const now = new Date();
-	const timestamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
-	const message = `${timestamp}_auto_${fileList.slice(0, 50)}`;
+	try {
+		ensureProtectedGitignore(dir);
+		await gitUntrackProtectedFiles(dir);
 
-	return new Promise((resolve) => {
-		// git add -A
-		const add = spawn("git", ["add", "-A"], { cwd: dir, stdio: "pipe", windowsHide: true });
-		add.on("close", (addCode) => {
-			if (addCode !== 0) {
-				logger.warn("git", "Git add failed");
-				resolve();
-				return;
-			}
-			// Check for changes
-			const status = spawn("git", ["status", "--porcelain"], {
-				cwd: dir,
-				stdio: "pipe",
-				windowsHide: true,
-			});
-			let statusOutput = "";
-			status.stdout?.on("data", (d) => {
-				statusOutput += d.toString();
-			});
-			status.on("close", (statusCode) => {
-				if (statusCode !== 0 || !statusOutput.trim()) {
+		const fileList = changedFiles.map((f) => f.replace(`${dir}/`, "")).join(", ");
+		const now = new Date();
+		const timestamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
+		const message = `${timestamp}_auto_${fileList.slice(0, 50)}`;
+
+		// Track the active child so the timeout can kill stalled processes
+		// that hold .git/index.lock
+		let active: ReturnType<typeof spawn> | null = null;
+
+		const work = new Promise<void>((resolve) => {
+			const add = spawn("git", ["add", "-A"], { cwd: dir, stdio: "pipe", windowsHide: true });
+			active = add;
+			add.on("close", (addCode) => {
+				if (addCode !== 0) {
+					logger.warn("git", "Git add failed");
 					resolve();
 					return;
 				}
-				// Commit
-				const commit = spawn("git", ["commit", "-m", message], {
+				const status = spawn("git", ["status", "--porcelain"], {
 					cwd: dir,
 					stdio: "pipe",
 					windowsHide: true,
 				});
-				commit.on("close", (commitCode) => {
-					if (commitCode === 0) {
-						logger.git.commit(message, changedFiles.length);
-					}
-					resolve();
+				active = status;
+				let statusOutput = "";
+				status.stdout?.on("data", (d) => {
+					statusOutput += d.toString();
 				});
-				commit.on("error", () => resolve());
+				status.on("close", (statusCode) => {
+					if (statusCode !== 0 || !statusOutput.trim()) {
+						resolve();
+						return;
+					}
+					const commit = spawn("git", ["commit", "-m", message], {
+						cwd: dir,
+						stdio: "pipe",
+						windowsHide: true,
+					});
+					active = commit;
+					commit.on("close", (commitCode) => {
+						if (commitCode === 0) {
+							logger.git.commit(message, changedFiles.length);
+						}
+						resolve();
+					});
+					commit.on("error", () => resolve());
+				});
+				status.on("error", () => resolve());
 			});
-			status.on("error", () => resolve());
+			add.on("error", () => resolve());
 		});
-		add.on("error", () => resolve());
-	});
+
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<void>((resolve) => {
+			timer = setTimeout(() => {
+				logger.warn("git", "Auto-commit timed out after 30s");
+				try {
+					active?.kill("SIGTERM");
+				} catch {}
+				resolve();
+			}, GIT_AUTOCOMMIT_TIMEOUT_MS);
+		});
+
+		await Promise.race([work, timeout]);
+		clearTimeout(timer);
+	} finally {
+		autocommitInFlight = false;
+	}
 }
 
 let pendingChanges: string[] = [];
@@ -8805,6 +9823,33 @@ function startFileWatcher() {
 		logger.info("watcher", "File changed", { path });
 		scheduleAutoCommit(path);
 
+		// Reload auth config when agent.yaml changes on disk
+		const base = basename(path);
+		if (base === "agent.yaml" || base === "AGENT.yaml") {
+			try {
+				const cfg = loadMemoryConfig(AGENTS_DIR);
+				if (!cfg.auth) throw new Error("Missing auth section in agent.yaml");
+				if (!cfg.auth.rateLimits) throw new Error("Missing rateLimits in auth config");
+				authConfig = cfg.auth;
+				const rl = authConfig.rateLimits;
+				authForgetLimiter = rl.forget
+					? new AuthRateLimiter(rl.forget.windowMs, rl.forget.max)
+					: new AuthRateLimiter(60_000, 30);
+				authModifyLimiter = rl.modify
+					? new AuthRateLimiter(rl.modify.windowMs, rl.modify.max)
+					: new AuthRateLimiter(60_000, 60);
+				authBatchForgetLimiter = rl.batchForget
+					? new AuthRateLimiter(rl.batchForget.windowMs, rl.batchForget.max)
+					: new AuthRateLimiter(60_000, 5);
+				authAdminLimiter = rl.admin
+					? new AuthRateLimiter(rl.admin.windowMs, rl.admin.max)
+					: new AuthRateLimiter(60_000, 10);
+				logger.info("config", "Auth config reloaded from disk");
+			} catch (e) {
+				logger.error("config", "Failed to reload auth config", e as Error);
+			}
+		}
+
 		// If any identity file changed, sync to harness configs
 		const SYNC_TRIGGER_FILES = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"];
 		if (SYNC_TRIGGER_FILES.some((f) => path.endsWith(f))) {
@@ -8814,7 +9859,11 @@ function startFileWatcher() {
 		// Ingest memory markdown files (excluding MEMORY.md index)
 		// Normalize path separators for Windows compatibility (watcher returns backslashes on Windows)
 		const normalizedPath = path.replace(/\\/g, "/");
-		if (normalizedPath.includes("/memory/") && normalizedPath.endsWith(".md") && !normalizedPath.endsWith("MEMORY.md")) {
+		if (
+			normalizedPath.includes("/memory/") &&
+			normalizedPath.endsWith(".md") &&
+			!normalizedPath.endsWith("MEMORY.md")
+		) {
 			ingestMemoryMarkdown(path).catch((e) =>
 				logger.error("watcher", "Ingestion failed", undefined, {
 					path,
@@ -8840,7 +9889,11 @@ function startFileWatcher() {
 		// Ingest new memory markdown files
 		// Normalize path separators for Windows compatibility
 		const normalizedAddPath = path.replace(/\\/g, "/");
-		if (normalizedAddPath.includes("/memory/") && normalizedAddPath.endsWith(".md") && !normalizedAddPath.endsWith("MEMORY.md")) {
+		if (
+			normalizedAddPath.includes("/memory/") &&
+			normalizedAddPath.endsWith(".md") &&
+			!normalizedAddPath.endsWith("MEMORY.md")
+		) {
 			ingestMemoryMarkdown(path).catch((e) =>
 				logger.error("watcher", "Ingestion failed", undefined, {
 					path,
@@ -9372,8 +10425,12 @@ async function cleanup() {
 
 	closeLlmProvider();
 	closeSynthesisProvider();
+	closeWidgetProvider();
 	stopOpenCodeServer();
 	stopModelRegistry();
+
+	// Stop session cleanup timer before closing DB (in-flight cleanup may query DB)
+	stopSessionCleanup();
 
 	// Stop git sync timer
 	stopGitSyncTimer();
@@ -9430,7 +10487,6 @@ async function main() {
 	// Migrations may have created traversal tables — clear the cache
 	invalidateTraversalCache();
 
-
 	// Write PID file
 	writeFileSync(PID_FILE, process.pid.toString());
 	logger.info("daemon", "Process ID", { pid: process.pid });
@@ -9477,21 +10533,8 @@ async function main() {
 	if (rl.admin) authAdminLimiter = new AuthRateLimiter(rl.admin.windowMs, rl.admin.max);
 
 	const providerHints = getConfiguredProviderHints(AGENTS_DIR);
-	const validExtractionProviders = new Set([
-		"ollama",
-		"claude-code",
-		"opencode",
-		"codex",
-		"anthropic",
-		"openrouter",
-	]);
-	const validSynthesisProviders = new Set([
-		"ollama",
-		"claude-code",
-		"opencode",
-		"anthropic",
-		"openrouter",
-	]);
+	const validExtractionProviders = new Set(["none", "ollama", "claude-code", "opencode", "codex", "anthropic", "openrouter"]);
+	const validSynthesisProviders = new Set(["none", "ollama", "claude-code", "opencode", "anthropic", "openrouter"]);
 
 	providerRuntimeResolution.extraction = {
 		configured: providerHints.extraction,
@@ -9528,9 +10571,7 @@ async function main() {
 		"http://127.0.0.1:11434",
 	);
 	const extractionOllamaFallbackBaseUrl =
-		memoryCfg.pipelineV2.extraction.provider === "opencode"
-			? "http://127.0.0.1:11434"
-			: extractionOllamaBaseUrl;
+		memoryCfg.pipelineV2.extraction.provider === "opencode" ? "http://127.0.0.1:11434" : extractionOllamaBaseUrl;
 	const extractionOpenCodeBaseUrl = normalizeRuntimeBaseUrl(
 		memoryCfg.pipelineV2.extraction.endpoint,
 		"http://127.0.0.1:4096",
@@ -9539,13 +10580,10 @@ async function main() {
 		memoryCfg.pipelineV2.extraction.endpoint,
 		"https://openrouter.ai/api/v1",
 	);
-	const ollamaFallbackMaxContextTokens =
-		resolveDefaultOllamaFallbackMaxContextTokens();
-	const extractionOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(
-		extractionOpenCodeBaseUrl,
-	);
+	const ollamaFallbackMaxContextTokens = resolveDefaultOllamaFallbackMaxContextTokens();
+	const extractionOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(extractionOpenCodeBaseUrl);
 	if (effectiveExtractionProvider === "none") {
-		logger.info("config", "Extraction provider set to none — pipeline extraction disabled");
+		logger.info("config", "Extraction provider set to 'none', pipeline LLM disabled");
 	} else if (effectiveExtractionProvider === "opencode") {
 		if (extractionOpenCodeShouldManage) {
 			const serverReady = await ensureOpenCodeServer(4096);
@@ -9559,40 +10597,53 @@ async function main() {
 			});
 		}
 	} else if (effectiveExtractionProvider === "claude-code") {
-		try {
-			const exitCode = await new Promise<number>((resolve) => {
-				const proc = spawn("claude", ["--version"], {
-					stdio: "pipe",
-					windowsHide: true,
-					env: { ...process.env, SIGNET_NO_HOOKS: "1" },
-				});
-				proc.on("close", (code) => resolve(code ?? 1));
-				proc.on("error", () => resolve(1));
-			});
-			if (exitCode !== 0) throw new Error("non-zero exit");
-		} catch {
+		// Resolve full path so .cmd wrappers on Windows are found correctly.
+		const resolvedClaude = Bun.which("claude");
+		if (resolvedClaude === null) {
 			logger.warn("config", "Claude Code CLI not found, falling back to ollama for extraction");
 			effectiveExtractionProvider = "ollama";
+		} else {
+			try {
+				const exitCode = await new Promise<number>((resolve) => {
+					const proc = spawn(resolvedClaude, ["--version"], {
+						stdio: "pipe",
+						windowsHide: true,
+						env: { ...process.env, SIGNET_NO_HOOKS: "1" },
+					});
+					proc.on("close", (code) => resolve(code ?? 1));
+					proc.on("error", () => resolve(1));
+				});
+				if (exitCode !== 0) throw new Error("non-zero exit");
+			} catch {
+				logger.warn("config", "Claude Code CLI not found, falling back to ollama for extraction");
+				effectiveExtractionProvider = "ollama";
+			}
 		}
 	} else if (effectiveExtractionProvider === "codex") {
-		try {
-			const exitCode = await new Promise<number>((resolve) => {
-				const proc = spawn("codex", ["--version"], {
-					stdio: "pipe",
-					windowsHide: true,
-					env: {
-						...process.env,
-						SIGNET_NO_HOOKS: "1",
-						SIGNET_CODEX_BYPASS_WRAPPER: "1",
-					},
-				});
-				proc.on("close", (code) => resolve(code ?? 1));
-				proc.on("error", () => resolve(1));
-			});
-			if (exitCode !== 0) throw new Error("non-zero exit");
-		} catch {
+		const resolvedCodex = Bun.which("codex");
+		if (resolvedCodex === null) {
 			logger.warn("config", "Codex CLI not found, falling back to ollama for extraction");
 			effectiveExtractionProvider = "ollama";
+		} else {
+			try {
+				const exitCode = await new Promise<number>((resolve) => {
+					const proc = spawn(resolvedCodex, ["--version"], {
+						stdio: "pipe",
+						windowsHide: true,
+						env: {
+							...process.env,
+							SIGNET_NO_HOOKS: "1",
+							SIGNET_CODEX_BYPASS_WRAPPER: "1",
+						},
+					});
+					proc.on("close", (code) => resolve(code ?? 1));
+					proc.on("error", () => resolve(1));
+				});
+				if (exitCode !== 0) throw new Error("non-zero exit");
+			} catch {
+				logger.warn("config", "Codex CLI not found, falling back to ollama for extraction");
+				effectiveExtractionProvider = "ollama";
+			}
 		}
 	}
 	const keyCache = new Map<"ANTHROPIC_API_KEY" | "OPENROUTER_API_KEY", string | undefined>();
@@ -9601,7 +10652,7 @@ async function main() {
 		let key = process.env[name];
 		if (!key) {
 			try {
-				key = await getSecret(name) ?? undefined;
+				key = (await getSecret(name)) ?? undefined;
 			} catch {
 				logger.warn("config", `Failed to resolve ${name} from secrets store`);
 			}
@@ -9613,12 +10664,14 @@ async function main() {
 	// Resolve Anthropic API key once — shared by extraction and synthesis
 	let anthropicApiKey: string | undefined;
 	const needsAnthropicForSynthesis =
-		memoryCfg.pipelineV2.synthesis.enabled &&
-		memoryCfg.pipelineV2.synthesis.provider === "anthropic";
+		memoryCfg.pipelineV2.synthesis.enabled && memoryCfg.pipelineV2.synthesis.provider === "anthropic";
 	if (effectiveExtractionProvider === "anthropic" || needsAnthropicForSynthesis) {
 		anthropicApiKey = await getKey("ANTHROPIC_API_KEY");
 		if (!anthropicApiKey) {
-			logger.error("config", "ANTHROPIC_API_KEY not found — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`");
+			logger.error(
+				"config",
+				"ANTHROPIC_API_KEY not found — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`",
+			);
 			if (effectiveExtractionProvider === "anthropic") {
 				effectiveExtractionProvider = "ollama";
 			}
@@ -9628,12 +10681,8 @@ async function main() {
 	// Resolve OpenRouter API key once — shared by extraction and synthesis
 	let openRouterApiKey: string | undefined;
 	const needsOpenRouterForSynthesis =
-		memoryCfg.pipelineV2.synthesis.enabled &&
-		memoryCfg.pipelineV2.synthesis.provider === "openrouter";
-	if (
-		effectiveExtractionProvider === "openrouter" ||
-		needsOpenRouterForSynthesis
-	) {
+		memoryCfg.pipelineV2.synthesis.enabled && memoryCfg.pipelineV2.synthesis.provider === "openrouter";
+	if (effectiveExtractionProvider === "openrouter" || needsOpenRouterForSynthesis) {
 		openRouterApiKey = await getKey("OPENROUTER_API_KEY");
 		if (!openRouterApiKey) {
 			logger.error(
@@ -9653,8 +10702,7 @@ async function main() {
 		effectiveExtractionModel = undefined;
 	}
 	const usingExtractionOllamaFallback =
-		effectiveExtractionProvider === "ollama" &&
-		memoryCfg.pipelineV2.extraction.provider !== "ollama";
+		effectiveExtractionProvider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama";
 	providerRuntimeResolution.extraction = {
 		configured: providerHints.extraction,
 		resolved: memoryCfg.pipelineV2.extraction.provider,
@@ -9678,7 +10726,7 @@ async function main() {
 					? extractionOpenCodeBaseUrl
 					: effectiveExtractionProvider === "openrouter"
 						? extractionOpenRouterBaseUrl
-					: undefined,
+						: undefined,
 		),
 	});
 
@@ -9700,68 +10748,63 @@ async function main() {
 						title: readEnvTrimmed("OPENROUTER_TITLE"),
 						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 					})
-			: effectiveExtractionProvider === "opencode"
-				? createOpenCodeProvider({
-						model: effectiveExtractionModel || "anthropic/claude-haiku-4-5-20251001",
-						baseUrl: extractionOpenCodeBaseUrl,
-						ollamaFallbackBaseUrl: extractionOllamaFallbackBaseUrl,
-						ollamaFallbackMaxContextTokens:
-							ollamaFallbackMaxContextTokens,
-						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-					})
-				: effectiveExtractionProvider === "claude-code"
-					? createClaudeCodeProvider({
-							model: effectiveExtractionModel || "haiku",
+				: effectiveExtractionProvider === "opencode"
+					? createOpenCodeProvider({
+							model: effectiveExtractionModel || "anthropic/claude-haiku-4-5-20251001",
+							baseUrl: extractionOpenCodeBaseUrl,
+							ollamaFallbackBaseUrl: extractionOllamaFallbackBaseUrl,
+							ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
 							defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 						})
-					: effectiveExtractionProvider === "codex"
-						? createCodexProvider({
-								model: effectiveExtractionModel || "gpt-5.3-codex",
+					: effectiveExtractionProvider === "claude-code"
+						? createClaudeCodeProvider({
+								model: effectiveExtractionModel || "haiku",
 								defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
 							})
-						: createOllamaProvider({
-								...(effectiveExtractionModel
-									? { model: effectiveExtractionModel }
-									: {}),
-								baseUrl: extractionOllamaFallbackBaseUrl,
-								defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-								...(usingExtractionOllamaFallback
-									? {
-										maxContextTokens:
-											ollamaFallbackMaxContextTokens,
-									}
-									: {}),
-							});
-	if (llmProvider) initLlmProvider(llmProvider);
+						: effectiveExtractionProvider === "codex"
+							? createCodexProvider({
+									model: effectiveExtractionModel || "gpt-5.3-codex",
+									defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+								})
+							: createOllamaProvider({
+									...(effectiveExtractionModel ? { model: effectiveExtractionModel } : {}),
+									baseUrl: extractionOllamaFallbackBaseUrl,
+									defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+									...(usingExtractionOllamaFallback
+										? {
+												maxContextTokens: ollamaFallbackMaxContextTokens,
+											}
+										: {}),
+								});
+	if (llmProvider) {
+		initLlmProvider(llmProvider);
+	}
 
 	// Initialize model registry for dynamic model discovery
 	if (memoryCfg.pipelineV2.modelRegistry.enabled) {
-		const registryAnthropicApiKey = anthropicApiKey ?? await getKey("ANTHROPIC_API_KEY");
-		const registryOpenRouterApiKey =
-			openRouterApiKey ?? await getKey("OPENROUTER_API_KEY");
+		const registryAnthropicApiKey = anthropicApiKey ?? (await getKey("ANTHROPIC_API_KEY"));
+		const registryOpenRouterApiKey = openRouterApiKey ?? (await getKey("OPENROUTER_API_KEY"));
 		initModelRegistry(
 			memoryCfg.pipelineV2.modelRegistry,
 			effectiveExtractionProvider === "ollama" ? extractionOllamaBaseUrl : undefined,
 			registryAnthropicApiKey,
 			registryOpenRouterApiKey,
-			effectiveExtractionProvider === "openrouter"
-				? extractionOpenRouterBaseUrl
-				: undefined,
+			effectiveExtractionProvider === "openrouter" ? extractionOpenRouterBaseUrl : undefined,
 		);
 	}
 
 	// Create synthesis provider — separate from extraction because synthesis
 	// needs a smarter model that can reason across long context
-	if (memoryCfg.pipelineV2.synthesis.enabled && memoryCfg.pipelineV2.synthesis.provider !== "none") {
+	if (memoryCfg.pipelineV2.synthesis.provider === "none") {
+		logger.info("config", "Synthesis provider set to 'none', synthesis disabled");
+	} else if (memoryCfg.pipelineV2.synthesis.enabled) {
 		let effectiveSynthesisProvider = memoryCfg.pipelineV2.synthesis.provider;
 		const synthesisOllamaBaseUrl = normalizeRuntimeBaseUrl(
 			memoryCfg.pipelineV2.synthesis.endpoint,
 			"http://127.0.0.1:11434",
 		);
 		const synthesisOllamaFallbackBaseUrl =
-			memoryCfg.pipelineV2.synthesis.provider === "opencode"
-				? "http://127.0.0.1:11434"
-				: synthesisOllamaBaseUrl;
+			memoryCfg.pipelineV2.synthesis.provider === "opencode" ? "http://127.0.0.1:11434" : synthesisOllamaBaseUrl;
 		const synthesisOpenCodeBaseUrl = normalizeRuntimeBaseUrl(
 			memoryCfg.pipelineV2.synthesis.endpoint,
 			"http://127.0.0.1:4096",
@@ -9770,9 +10813,7 @@ async function main() {
 			memoryCfg.pipelineV2.synthesis.endpoint,
 			"https://openrouter.ai/api/v1",
 		);
-		const synthesisOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(
-			synthesisOpenCodeBaseUrl,
-		);
+		const synthesisOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(synthesisOpenCodeBaseUrl);
 		if (effectiveSynthesisProvider === "opencode") {
 			if (synthesisOpenCodeShouldManage) {
 				const serverReady = await ensureOpenCodeServer(4096);
@@ -9796,20 +10837,27 @@ async function main() {
 				effectiveSynthesisProvider = "ollama";
 			}
 		} else if (effectiveSynthesisProvider === "claude-code") {
-			try {
-				const exitCode = await new Promise<number>((resolve) => {
-					const proc = spawn("claude", ["--version"], {
-						stdio: "pipe",
-						windowsHide: true,
-						env: { ...process.env, SIGNET_NO_HOOKS: "1" },
-					});
-					proc.on("close", (code) => resolve(code ?? 1));
-					proc.on("error", () => resolve(1));
-				});
-				if (exitCode !== 0) throw new Error("non-zero exit");
-			} catch {
+			// Re-resolve here; extraction and synthesis may use different providers.
+			const resolvedClaude = Bun.which("claude");
+			if (resolvedClaude === null) {
 				logger.warn("config", "Claude Code CLI not found, falling back to ollama for synthesis");
 				effectiveSynthesisProvider = "ollama";
+			} else {
+				try {
+					const exitCode = await new Promise<number>((resolve) => {
+						const proc = spawn(resolvedClaude, ["--version"], {
+							stdio: "pipe",
+							windowsHide: true,
+							env: { ...process.env, SIGNET_NO_HOOKS: "1" },
+						});
+						proc.on("close", (code) => resolve(code ?? 1));
+						proc.on("error", () => resolve(1));
+					});
+					if (exitCode !== 0) throw new Error("non-zero exit");
+				} catch {
+					logger.warn("config", "Claude Code CLI not found, falling back to ollama for synthesis");
+					effectiveSynthesisProvider = "ollama";
+				}
 			}
 		}
 		providerRuntimeResolution.synthesis = {
@@ -9835,7 +10883,7 @@ async function main() {
 						? synthesisOpenCodeBaseUrl
 						: effectiveSynthesisProvider === "openrouter"
 							? synthesisOpenRouterBaseUrl
-						: undefined,
+							: undefined,
 			),
 		});
 
@@ -9845,8 +10893,7 @@ async function main() {
 			effectiveSynthesisModel = undefined;
 		}
 		const usingSynthesisOllamaFallback =
-			effectiveSynthesisProvider === "ollama" &&
-			memoryCfg.pipelineV2.synthesis.provider !== "ollama";
+			effectiveSynthesisProvider === "ollama" && memoryCfg.pipelineV2.synthesis.provider !== "ollama";
 
 		const synthesisProvider =
 			effectiveSynthesisProvider === "anthropic" && anthropicApiKey
@@ -9864,34 +10911,32 @@ async function main() {
 							title: readEnvTrimmed("OPENROUTER_TITLE"),
 							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 						})
-				: effectiveSynthesisProvider === "opencode"
-					? createOpenCodeProvider({
-							model: effectiveSynthesisModel || "anthropic/claude-haiku-4-5-20251001",
-							baseUrl: synthesisOpenCodeBaseUrl,
-							ollamaFallbackBaseUrl: synthesisOllamaFallbackBaseUrl,
-							ollamaFallbackMaxContextTokens:
-								ollamaFallbackMaxContextTokens,
-							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
-						})
-					: effectiveSynthesisProvider === "claude-code"
-						? createClaudeCodeProvider({
-								model: effectiveSynthesisModel || "haiku",
+					: effectiveSynthesisProvider === "opencode"
+						? createOpenCodeProvider({
+								model: effectiveSynthesisModel || "anthropic/claude-haiku-4-5-20251001",
+								baseUrl: synthesisOpenCodeBaseUrl,
+								ollamaFallbackBaseUrl: synthesisOllamaFallbackBaseUrl,
+								ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
 								defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 							})
-					: createOllamaProvider({
-							...(effectiveSynthesisModel
-								? { model: effectiveSynthesisModel }
-								: {}),
-							baseUrl: synthesisOllamaFallbackBaseUrl,
-							defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
-							...(usingSynthesisOllamaFallback
-								? {
-									maxContextTokens:
-										ollamaFallbackMaxContextTokens,
-								}
-								: {}),
-						});
+						: effectiveSynthesisProvider === "claude-code"
+							? createClaudeCodeProvider({
+									model: effectiveSynthesisModel || "haiku",
+									defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+								})
+							: createOllamaProvider({
+									...(effectiveSynthesisModel ? { model: effectiveSynthesisModel } : {}),
+									baseUrl: synthesisOllamaFallbackBaseUrl,
+									defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+									...(usingSynthesisOllamaFallback
+										? {
+												maxContextTokens: ollamaFallbackMaxContextTokens,
+											}
+										: {}),
+								});
 		initSynthesisProvider(synthesisProvider);
+		// Widget provider defaults to synthesis provider (needs smart model for HTML gen)
+		initWidgetProvider(synthesisProvider);
 	} else {
 		providerRuntimeResolution.synthesis = {
 			configured: providerHints.synthesis,
@@ -9949,9 +10994,9 @@ async function main() {
 		);
 	}
 
-	// Start extraction pipeline only when explicitly enabled.
+	// Start extraction pipeline only when explicitly enabled and an LLM is available.
 	// shadowMode controls behavior inside the enabled pipeline.
-	if (memoryCfg.pipelineV2.enabled) {
+	if (memoryCfg.pipelineV2.enabled && effectiveExtractionProvider !== "none") {
 		startPipeline(
 			getDbAccessor(),
 			memoryCfg.pipelineV2,
@@ -10031,6 +11076,7 @@ async function main() {
 			shadowProcess = spawn(binary, [], {
 				env: { ...process.env, SIGNET_PORT: "3851", SIGNET_PATH: shadowAgentsDir },
 				stdio: "ignore",
+				windowsHide: true,
 			});
 			shadowProcess.unref();
 			logger.info("shadow", "Rust daemon shadow started", {
@@ -10121,12 +11167,44 @@ async function main() {
 	initFeatureFlags(AGENTS_DIR);
 	startUpdateTimer();
 
-	// Start HTTP server
+	// Start HTTP server with global body size limit (10MB) to prevent
+	// OOM from chunked-encoding requests that bypass content-length checks.
+	const REQUEST_BODY_LIMIT = 10 * 1_048_576;
+	const { createServer: nodeCreateServer } = await import("node:http");
+	const createBoundedServer: typeof nodeCreateServer = (...args: Parameters<typeof nodeCreateServer>) => {
+		const server = nodeCreateServer(...args);
+		server.on("request", (req, res) => {
+			let bytes = 0;
+			let aborted = false;
+			req.on("data", (chunk: Buffer) => {
+				if (aborted) return;
+				bytes += chunk.length;
+				if (bytes > REQUEST_BODY_LIMIT) {
+					aborted = true;
+					logger.warn("http", "Request body exceeded limit", { bytes, limit: REQUEST_BODY_LIMIT });
+					// Send a proper 413 then destroy the socket so Hono's handler
+					// doesn't try to write a second response (ERR_HTTP_HEADERS_SENT).
+					if (!res.headersSent) {
+						res.writeHead(413, { "Content-Type": "application/json" });
+						res.end(JSON.stringify({ error: "payload too large" }), () => {
+							// Destroy after flush so Hono's subsequent write fails
+							// silently on a closed socket rather than emitting
+							// ERR_HTTP_HEADERS_SENT on a finished response.
+							req.socket?.destroy();
+						});
+					}
+				}
+			});
+		});
+		return server;
+	};
+
 	serve(
 		{
 			fetch: app.fetch,
 			port: PORT,
 			hostname: BIND_HOST,
+			createServer: createBoundedServer,
 		},
 		(info) => {
 			logger.info("daemon", "Server listening", {

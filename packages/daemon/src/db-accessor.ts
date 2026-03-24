@@ -18,24 +18,27 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync 
 // search. Use Homebrew's SQLite if available (supports extension loading).
 // ---------------------------------------------------------------------------
 
-const HOMEBREW_SQLITE_PATHS = [
-	"/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib", // Apple Silicon
-	"/usr/local/opt/sqlite/lib/libsqlite3.dylib", // Intel
-];
+// Only attempt Homebrew SQLite override on macOS
+if (process.platform === "darwin") {
+	const HOMEBREW_SQLITE_PATHS = [
+		"/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib", // Apple Silicon
+		"/usr/local/opt/sqlite/lib/libsqlite3.dylib", // Intel
+	];
 
-for (const sqlitePath of HOMEBREW_SQLITE_PATHS) {
-	if (existsSync(sqlitePath)) {
-		try {
-			Database.setCustomSQLite(sqlitePath);
-		} catch (e) {
-			// SQLite already loaded (e.g., in test environment) — skip.
-			// Log so users can diagnose extension-loading failures.
-			console.warn(
-				`[db-accessor] setCustomSQLite(${sqlitePath}) skipped:`,
-				e instanceof Error ? e.message : String(e),
-			);
+	for (const sqlitePath of HOMEBREW_SQLITE_PATHS) {
+		if (existsSync(sqlitePath)) {
+			try {
+				Database.setCustomSQLite(sqlitePath);
+			} catch (e) {
+				// SQLite already loaded (e.g., in test environment) — skip.
+				// Log so users can diagnose extension-loading failures.
+				console.warn(
+					`[db-accessor] setCustomSQLite(${sqlitePath}) skipped:`,
+					e instanceof Error ? e.message : String(e),
+				);
+			}
+			break;
 		}
-		break;
 	}
 }
 import { basename, dirname, join } from "node:path";
@@ -377,6 +380,7 @@ function backfillVecEmbeddings(db: Database): void {
 // ---------------------------------------------------------------------------
 
 const READ_POOL_SIZE = 4;
+const MAX_READ_CONNECTIONS = 16;
 
 function createAccessor(writeConn: Database): DbAccessor {
 	let closed = false;
@@ -392,6 +396,10 @@ function createAccessor(writeConn: Database): DbAccessor {
 		if (pooled) {
 			readInUse.add(pooled);
 			return pooled;
+		}
+		if (readInUse.size >= MAX_READ_CONNECTIONS) {
+			console.warn(`[db] Read connection limit exceeded (${readInUse.size}/${MAX_READ_CONNECTIONS})`);
+			throw new Error("Read connection limit exceeded");
 		}
 		const conn = new Database(dbPath, { readonly: true });
 		conn.exec("PRAGMA busy_timeout = 5000");

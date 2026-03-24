@@ -2,6 +2,407 @@
 
 All notable changes to Signet are documented here.
 
+## [0.74.1] - 2026-03-23
+
+### Features
+
+- **cli**: add configurable Signet workspace path + migration (#302)
+
+
+## [0.74.0] - 2026-03-23
+
+### Bug Fixes
+
+- **dashboard**: remove review-queue tab; fix knowledge tab load performance (#305)
+
+
+## [0.73.8] - 2026-03-23
+
+### Features
+
+- add reviews sync Cloudflare Worker (#296)
+
+### Bug Fixes
+
+- support provider: none for extraction and synthesis (#301)
+
+
+## [0.73.7] - 2026-03-23
+
+### Bug Fixes
+
+- March 2026 codebase review (#294)
+
+
+## [0.73.6] - 2026-03-23
+
+### Bug Fixes
+
+- wire marketplace reviews sync to production Worker endpoint (#293)
+
+
+## [0.73.4] - 2026-03-23
+
+### Bug Fixes
+
+- 5 critical memory and injection stability fixes (#291)
+
+
+## [0.73.3] - 2026-03-23
+
+### Bug Fixes
+
+- **daemon**: align embedding-tracker hash with normalizeAndHashContent (#286)
+
+
+## [0.73.2] - 2026-03-23
+
+### Bug Fixes
+
+- normalize remember tags across daemon and openclaw (#285)
+
+
+## [0.73.1] - 2026-03-22
+
+### Bug Fixes
+
+- **daemon**: normalize Claude Code transcript records (#284)
+
+
+## [0.73.0] - 2026-03-22
+
+### Bug Fixes
+
+- task run output display — stdin close, chunk normalization, terminal rendering (#283)
+
+
+## [0.72.8] - 2026-03-22
+
+### Features
+
+- desire paths retrieval + prospective indexing (#253)
+
+
+## [0.72.7] - 2026-03-22
+
+### Bug Fixes
+
+- **dashboard**: replace @signet/core runtime import with local constant
+- **openclaw**: dedupe marketplace proxy refresh (#281)
+
+
+## [0.72.6] - 2026-03-22
+
+### Bug Fixes
+
+- security hardening — auth timing, SSRF, YAML injection, scope enforcement (#276)
+
+
+## [0.72.5] - 2026-03-22
+
+### Bug Fixes
+
+- address 9 security and stability issues (#275)
+
+
+## [0.72.4] - 2026-03-22
+
+### Bug Fixes
+
+- resolve daemon path in published bundle (#274)
+
+
+## [0.72.2] - 2026-03-22
+
+### Bug Fixes
+
+- comprehensive security audit hardening (#271)
+
+
+## [0.72.1] - 2026-03-22
+
+### Bug Fixes
+
+- harden error handling and resource cleanup (#272)
+- codex MCP config uses string command, not array (#273)
+
+
+## [0.71.6] - 2026-03-22
+
+### Features
+
+- **os**: Visual GUI Agent — Page-Agent Integration (#266)
+
+
+## [0.71.5] - 2026-03-21
+
+### Bug Fixes
+
+- **troubleshooter**: handle daemon stop/restart lifecycle commands (#265)
+
+
+## [0.71.4] - 2026-03-21
+
+### Bug Fixes
+
+- **tray**: add icon.ico for Windows build (#263)
+
+
+## [0.71.3] - 2026-03-21
+
+### Bug Fixes
+
+- **tray**: cross-platform build script for Windows CI (#262)
+
+
+## [0.71.2] - 2026-03-21
+
+### Bug Fixes
+
+- **tray**: restore npm tauri CLI + convert icons to RGBA (#261)
+
+
+## [0.71.1] - 2026-03-21
+
+### Bug Fixes
+
+- pipeline worker stall after burst processing (#259)
+
+
+## [0.71.0] - 2026-03-21
+
+### Bug Fixes
+
+- **tray**: revert to cargo tauri CLI, convert icons to RGBA (#260)
+
+
+## [0.70.0] - 2026-03-21
+
+### Features
+
+- **connector-codex**: native hooks + MCP for full mid-session memory (#258)
+
+
+## [0.69.5] - 2026-03-21
+
+### Features
+
+- **dashboard**: Cortex page — unified Memory, Apps, Tasks, Troubleshooter (#256)
+
+
+## [0.69.3] - 2026-03-21
+
+### Bug Fixes
+
+- use npm tauri CLI instead of cargo plugin in tray scripts (#254)
+
+
+## [0.69.2] - 2026-03-20
+
+### Bug Fixes
+
+- install tray deps explicitly in desktop build workflow
+
+
+## [0.69.1] - 2026-03-20
+
+### Bug Fixes
+
+- use RELEASE_PAT in release workflow for branch protection bypass
+
+
+## [0.69.0] - 2026-03-20
+
+### Bug Fixes
+
+- use local timezone for timeline Today boundaries (#252)
+
+
+## [0.68.3] - 2026-03-20
+
+### Features
+
+- homepage spotlights, dynamic insights, and health consistency (#250)
+
+
+## [0.68.2] - 2026-03-20
+
+### Bug Fixes
+
+- settings persist across refresh without daemon restart (#251)
+
+
+## [0.68.1] - 2026-03-20
+
+### Bug Fixes
+
+- remove provider icon tinting and auto-sync pre-installed apps (#249)
+
+
+## [0.68.0] - 2026-03-20
+
+### Bug Fixes
+
+- prevent CMD window flashing on Windows and fix workspace path matching (#247)
+
+
+## [0.67.0] - 2026-03-20
+
+### Features
+
+- Signet OS v2 — sandboxed widget rendering, LLM auto-generation, MCP app dashboard
+
+
+## [0.66.1] - 2026-03-19
+
+### Features
+
+- add scope column for memory isolation (#245)
+
+
+## [0.66.0] - 2026-03-19
+
+### Bug Fixes
+
+- **openclaw**: harden plugin sync and patch plugins.allow (#246)
+
+
+## [0.65.9] - 2026-03-19
+
+### Features
+
+- retroactive memory supersession (#244)
+
+
+## [0.65.8] - 2026-03-19
+
+### Bug Fixes
+
+- MCP stdio server process leak on session end (#243)
+
+
+## [0.65.7] - 2026-03-19
+
+### Bug Fixes
+
+- add missing --project option to pre-compaction hook (#242)
+
+
+## [0.65.6] - 2026-03-19
+
+### Bug Fixes
+
+- prevent CMD window flashing and fix workspace path matching on Windows (#241)
+
+
+## [0.65.5] - 2026-03-19
+
+### Bug Fixes
+
+- Windows compatibility across daemon, core, and connectors (#238)
+
+### Docs
+
+- add BusyBee3333, stephenwoska2-cpu, and PatchyToes to contributors (#240)
+
+
+## [0.65.4] - 2026-03-19
+
+### Bug Fixes
+
+- use bash shell for cargo build steps on Windows runners (#239)
+
+
+## [0.65.3] - 2026-03-19
+
+### Bug Fixes
+
+- move @signet/core to devDependencies in openclaw plugin (#237)
+
+
+## [0.65.2] - 2026-03-19
+
+### Bug Fixes
+
+- predictor sidecar binary distribution for Windows (#236)
+
+
+## [0.65.1] - 2026-03-19
+
+### Bug Fixes
+
+- support optional column artifacts for conditional migrations
+- scope workspace version check to [package] section only
+- add migration for missing embeddings.vector column on older DBs
+- release pipeline — skip workspace-inherited Cargo versions and clobber duplicate assets
+
+
+## [0.64.0] - 2026-03-19
+
+### Features
+
+- Signet OS — browser, MCP app dashboard, event bus, ambient awareness
+
+
+## [0.63.3] - 2026-03-19
+
+### Features
+
+- deploy Signet logo across all surfaces
+
+### Bug Fixes
+
+- handle malformed timestamps in log formatter
+- swap logo variants for correct theme visibility
+- use white logo variant in README for dark mode visibility
+- replace ASCII art with clean h1 header
+- remove pre tag spacing, match image heights in table
+- center ASCII art with pre tag, side-by-side poster images
+
+### Docs
+
+- add Discord badge and nav link to README
+- refactor README and add Why Signet to quickstart
+- add AI policy, PR template, and GitHub Discussions setup
+
+
+## [0.63.2] - 2026-03-18
+
+### Bug Fixes
+
+- address PR review feedback for version-sync
+- resolve three signet sync failures
+- address review — document spawnHidden throw safety, clarify Bun.which calls
+- resolve CLI binary paths on Windows for extraction/synthesis providers
+
+
+## [0.63.1] - 2026-03-18
+
+### Bug Fixes
+
+- add sharp to optionalDependencies for Windows ARM64 support
+
+
+## [0.63.0] - 2026-03-18
+
+### Refactoring
+
+- **docs**: organize docs into research-to-implementation pipeline
+
+
+## [0.62.0] - 2026-03-18
+
+### Features
+
+- add Windows and ARM64 Windows support across the codebase
+
+### Bug Fixes
+
+- **sync**: add timeouts for predictor download fetches
+- **sync**: harden runtime artifact sync and warmup
+- **sync**: move runtime downloads from postinstall to signet sync
+
+
 ## [0.61.0] - 2026-03-18
 
 ### Features

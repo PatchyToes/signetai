@@ -120,12 +120,26 @@ function findSqliteVecExtension(): string | null {
 			extFile,
 		),
 		// Well-known npm global prefixes (when process.execPath is bun, not node)
-		join("/opt/homebrew/lib/node_modules", platformPkg, extFile),
-		join("/opt/homebrew/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
-		join("/usr/local/lib/node_modules", platformPkg, extFile),
-		join("/usr/local/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
-		join("/usr/lib/node_modules", platformPkg, extFile),
-		join("/usr/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
+		...(platform !== "win32"
+			? [
+					join("/opt/homebrew/lib/node_modules", platformPkg, extFile),
+					join("/opt/homebrew/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
+					join("/usr/local/lib/node_modules", platformPkg, extFile),
+					join("/usr/local/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
+					join("/usr/lib/node_modules", platformPkg, extFile),
+					join("/usr/lib/node_modules", "signetai", "node_modules", platformPkg, extFile),
+				]
+			: [
+					// Windows: npm global prefix is typically in AppData
+					join(
+						process.env.APPDATA || join(homedir(), "AppData", "Roaming"),
+						"npm", "node_modules", platformPkg, extFile,
+					),
+					join(
+						process.env.APPDATA || join(homedir(), "AppData", "Roaming"),
+						"npm", "node_modules", "signetai", "node_modules", platformPkg, extFile,
+					),
+				]),
 		// nvm global paths
 		join(homedir(), ".nvm", "versions", "node", "*", "lib", "node_modules", platformPkg, extFile),
 		join(homedir(), ".nvm", "versions", "node", "*", "lib", "node_modules", "signetai", "node_modules", platformPkg, extFile),
@@ -231,7 +245,9 @@ export class Database {
 			} catch {
 				throw new Error(
 					"Signet requires Bun (recommended) or the better-sqlite3 npm package. " +
-					"Install Bun: curl -fsSL https://bun.sh/install | bash\n" +
+					(platform === "win32"
+						? "Install Bun: powershell -c \"irm bun.sh/install.ps1 | iex\"\n"
+						: "Install Bun: curl -fsSL https://bun.sh/install | bash\n") +
 					"Or install better-sqlite3: npm install -g better-sqlite3",
 				);
 			}
@@ -584,6 +600,15 @@ export class Database {
 
 // -- Row mappers (module-level, no `this`) --
 
+function safeJsonParse(raw: unknown, fallback: unknown): unknown {
+	if (typeof raw !== "string" || raw.length === 0) return fallback;
+	try {
+		return JSON.parse(raw);
+	} catch {
+		return fallback;
+	}
+}
+
 function rowToMemory(row: Record<string, unknown>): Memory {
 	return {
 		id: row.id as string,
@@ -593,11 +618,11 @@ function rowToMemory(row: Record<string, unknown>): Memory {
 		confidence: row.confidence as number,
 		sourceId: row.source_id as string | undefined,
 		sourceType: row.source_type as string | undefined,
-		tags: JSON.parse((row.tags as string) || "[]"),
+		tags: safeJsonParse(row.tags, []) as string[],
 		createdAt: row.created_at as string,
 		updatedAt: row.updated_at as string,
 		updatedBy: row.updated_by as string,
-		vectorClock: JSON.parse((row.vector_clock as string) || "{}"),
+		vectorClock: safeJsonParse(row.vector_clock, {}) as Record<string, number>,
 		version: row.version as number,
 		manualOverride: Boolean(row.manual_override),
 		// v2 optional fields

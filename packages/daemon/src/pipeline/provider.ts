@@ -9,7 +9,10 @@
 import type { LlmProvider, LlmGenerateResult } from "@signet/core";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-// node:child_process removed — using Bun.spawn directly for reliable I/O
+// On Windows, use node:child_process spawn with windowsHide to prevent
+// console window flashing. Bun.spawn doesn't support windowsHide.
+import { spawn as nodeSpawn } from "node:child_process";
+import { Readable } from "node:stream";
 import { logger } from "../logger";
 import { trimTrailingSlash } from "./url";
 
@@ -91,9 +94,9 @@ async function withSemaphore<T>(fn: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 // Subprocess spawn helper
 // ---------------------------------------------------------------------------
-// Wraps Bun.spawn with a simplified interface for CLI subprocess calls.
-// Note: Bun.spawn does not support windowsHide, so CLI subprocesses may
-// flash a console window on Windows.
+// Wraps subprocess spawning with a simplified interface for CLI calls.
+// On Windows, uses node:child_process with windowsHide: true to prevent
+// console window flashing. On other platforms, uses Bun.spawn directly.
 
 interface SpawnResult {
 	readonly stdout: ReadableStream<Uint8Array>;
@@ -102,25 +105,80 @@ interface SpawnResult {
 	kill(signal?: string): void;
 }
 
+// Module-level helper to avoid allocating a new closure per spawnHidden call.
+const toWebStream = (nodeStream: import("node:stream").Readable): ReadableStream<Uint8Array> =>
+	Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
+
 function spawnHidden(cmd: string[], options?: { env?: Record<string, string | undefined> }): SpawnResult {
-	// Use Bun.spawn directly — it natively returns ReadableStreams and
-	// handles subprocess I/O correctly. The previous node:child_process
-	// wrapper had stream-closing issues that caused hangs.
+	// Resolve the binary via Bun.which() so that .cmd wrappers on Windows
+	// are found correctly (mirrors scheduler/spawn.ts pattern).
+	const [bin, ...args] = cmd;
+	const resolvedBin = Bun.which(bin);
+	if (resolvedBin === null) {
+		throw new Error(`spawnHidden: binary "${bin}" not found on PATH`);
+	}
 	const sanitizedEnv: Record<string, string> = {};
 	if (options?.env) {
 		for (const [k, v] of Object.entries(options.env)) {
 			if (v !== undefined) sanitizedEnv[k] = v;
 		}
 	}
-	const proc = Bun.spawn(cmd, {
+
+	// On Windows, use node:child_process with windowsHide to prevent
+	// console window flashing. Bun.spawn doesn't support windowsHide.
+	if (process.platform === "win32") {
+		// .cmd wrappers (e.g. claude.cmd, codex.cmd from npm) are batch scripts,
+		// not PE executables. Instead of shell: true (which exposes args to
+		// cmd.exe metacharacter interpretation — injection risk), invoke cmd.exe
+		// explicitly with properly quoted arguments.
+		let child: import("node:child_process").ChildProcess;
+		if (resolvedBin.endsWith(".cmd")) {
+			const quote = (s: string) => `"${s.replace(/%/g, "%%").replace(/"/g, '""')}"`;
+			const cmdLine = [quote(resolvedBin), ...args.map(quote)].join(" ");
+			child = nodeSpawn(process.env.COMSPEC || "cmd.exe", ["/d", "/s", "/c", `"${cmdLine}"`], {
+				stdio: ["ignore", "pipe", "pipe"],
+				env: options?.env ? sanitizedEnv : undefined,
+				windowsHide: true,
+			});
+		} else {
+			child = nodeSpawn(resolvedBin, args, {
+				stdio: ["ignore", "pipe", "pipe"],
+				env: options?.env ? sanitizedEnv : undefined,
+				windowsHide: true,
+			});
+		}
+
+		const exitPromise = new Promise<number>((resolve, reject) => {
+			child.on("exit", (code) => resolve(code ?? 1));
+			child.on("error", (err) => reject(err));
+		});
+
+		if (!child.stdout || !child.stderr) {
+			throw new Error("spawnHidden(win32): stdout/stderr unexpectedly null");
+		}
+
+		return {
+			stdout: toWebStream(child.stdout),
+			stderr: toWebStream(child.stderr),
+			exited: exitPromise,
+			kill(signal?: string) {
+				if (signal === "SIGKILL") {
+					child.kill();
+				} else {
+					child.kill("SIGTERM");
+				}
+			},
+		};
+	}
+
+	// Non-Windows: use Bun.spawn directly for reliable I/O.
+	const proc = Bun.spawn([resolvedBin, ...args], {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
 		env: options?.env ? sanitizedEnv : undefined,
 	});
 
-	// Bun.spawn with stdout:"pipe" guarantees ReadableStream, but the
-	// type is nullable in the general case. Guard at runtime.
 	if (!proc.stdout || !proc.stderr) {
 		throw new Error("spawnHidden: stdout/stderr unexpectedly null despite pipe mode");
 	}
@@ -211,6 +269,7 @@ export function resolveDefaultOllamaFallbackMaxContextTokens(): number {
 
 interface OllamaGenerateResponse {
 	readonly response?: string;
+	readonly thinking?: string;
 	readonly eval_count?: number;
 	readonly prompt_eval_count?: number;
 	readonly total_duration?: number;
@@ -288,16 +347,21 @@ export function createOllamaProvider(
 
 		async generate(prompt, opts): Promise<string> {
 			const data = await callOllama(prompt, opts);
-			return (data.response ?? "").trim();
+			// Thinking models (qwen3, deepseek) may put content in `thinking`
+			// field and leave `response` empty when using /api/generate
+			const text = (data.response ?? "").trim();
+			if (text.length > 0) return text;
+			return (data.thinking ?? "").trim();
 		},
 
 		async generateWithUsage(prompt, opts): Promise<LlmGenerateResult> {
 			const data = await callOllama(prompt, opts);
 			const nsToMs = (ns: number | undefined): number | null =>
 				typeof ns === "number" ? Math.round(ns / 1_000_000) : null;
+			const text = (data.response ?? "").trim();
 
 			return {
-				text: (data.response ?? "").trim(),
+				text: text.length > 0 ? text : (data.thinking ?? "").trim(),
 				usage: {
 					inputTokens: data.prompt_eval_count ?? null,
 					outputTokens: data.eval_count ?? null,
@@ -1277,19 +1341,9 @@ const DEFAULT_OPENCODE_CONFIG: OpenCodeProviderConfig = {
  * then falls back to the well-known install location.
  */
 function resolveOpenCodeBin(): string | null {
-	// Check PATH first
-	try {
-		const proc = Bun.spawnSync(["which", "opencode"], {
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		if (proc.exitCode === 0) {
-			const path = proc.stdout.toString().trim();
-			if (path.length > 0) return path;
-		}
-	} catch {
-		// which not available or failed
-	}
+	// Check PATH first (Bun.which works cross-platform)
+	const found = Bun.which("opencode");
+	if (found) return found;
 
 	// Fall back to ~/.opencode/bin/opencode
 	const fallback = `${homedir()}/.opencode/bin/opencode`;

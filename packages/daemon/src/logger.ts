@@ -48,7 +48,13 @@ export type LogCategory =
 	| "retention" // Retention worker (decay + cold archival)
 	| "summary-condensation" // Session summary DAG condensation
 	| "system" // System events
-	| "update"; // Auto-update cycle
+	| "update" // Auto-update cycle
+	| "probe" // MCP server auto-probe (Signet OS)
+	| "event-bus" // Signet OS event bus
+	| "event-bridge" // Browser-to-event-bus bridge
+	| "widget" // Widget HTML generation (Signet OS)
+	| "os-chat" // OS chat agent (natural language → MCP tools)
+	| "os-agent"; // OS page-agent (visual GUI automation)
 
 export interface LogEntry {
 	timestamp: string;
@@ -196,7 +202,8 @@ class Logger extends EventEmitter {
 		const reset = "\x1b[0m";
 		const dim = "\x1b[2m";
 
-		const time = entry.timestamp.split("T")[1].slice(0, 8);
+		const parts = entry.timestamp.split("T");
+		const time = (parts[1] ?? "").slice(0, 8) || "00:00:00";
 		const level = entry.level.toUpperCase().padEnd(5);
 		const category = `[${entry.category}]`.padEnd(12);
 
