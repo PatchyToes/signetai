@@ -10,6 +10,7 @@ use tracing::info;
 
 #[allow(dead_code)] // Auth module built but not wired into routes until later phases
 mod auth;
+mod feedback;
 mod mcp;
 mod routes;
 mod service;
@@ -131,6 +132,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/memory/modify",
             axum::routing::post(routes::write::modify_batch),
+        )
+        .route(
+            "/api/memory/feedback",
+            axum::routing::post(routes::memory::feedback),
         )
         // Config routes
         .route(

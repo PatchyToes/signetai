@@ -38,7 +38,13 @@ import {
 	runPredictorScoring,
 } from "./predictor-scoring";
 import { propagateMemoryStatus } from "./knowledge-graph";
-import { invalidateTraversalCache, resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
+import {
+	type TraversalPath,
+	invalidateTraversalCache,
+	resolveFocalEntities,
+	setTraversalStatus,
+	traverseKnowledgeGraph,
+} from "./pipeline/graph-traversal";
 import {
 	applyFtsOverlapFeedback,
 	decayAspectWeights,
@@ -114,6 +120,18 @@ function sanitizePeerPromptField(value: string | undefined): string {
 		.replace(/[\r\n`*#[\]<>]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function toUnique(values: ReadonlyArray<string>): string[] {
+	return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+}
+
+function serializeTraversalPath(path: TraversalPath): string {
+	return JSON.stringify({
+		entity_ids: toUnique(path.entityIds),
+		aspect_ids: toUnique(path.aspectIds),
+		dependency_ids: toUnique(path.dependencyIds),
+	});
 }
 
 // ============================================================================
@@ -998,6 +1016,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	let traversalConstraints = 0;
 	let traversalTimedOut = false;
 	let traversalActiveAspectIds: ReadonlyArray<string> = [];
+	const traversalPathById = new Map<string, string>();
 	let constraintsForInject: ReadonlyArray<{
 		readonly entityName: string;
 		readonly content: string;
@@ -1026,6 +1045,9 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				constraintsForInject = traversalResult.constraints;
 				traversalConstraints = traversalResult.constraints.length;
 				traversalActiveAspectIds = traversalResult.activeAspectIds;
+				for (const [memoryId, path] of traversalResult.memoryPaths) {
+					traversalPathById.set(memoryId, serializeTraversalPath(path));
+				}
 
 				for (const memoryId of traversalResult.memoryIds) {
 					if (!candidateById.has(memoryId)) {
@@ -1270,6 +1292,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				aspectSlot: sf?.aspectSlot ?? 0,
 				isConstraint: sf?.isConstraint ?? 0,
 				structuralDensity: sf?.structuralDensity ?? 0,
+				pathJson: traversalPathById.get(c.id) ?? null,
 			};
 		}),
 		...predictedMemories
@@ -1287,10 +1310,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 					aspectSlot: sf?.aspectSlot ?? 0,
 					isConstraint: sf?.isConstraint ?? 0,
 					structuralDensity: sf?.structuralDensity ?? 0,
+					pathJson: traversalPathById.get(m.id) ?? null,
 				};
 			}),
 	];
-	recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet);
+	recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet, agentId);
 
 	// Format inject text
 	const injectParts: string[] = [];
@@ -1822,7 +1846,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		try {
 			const parsed = parseFeedback(req.memory_feedback);
 			if (parsed) {
-				recordAgentFeedback(req.sessionKey, parsed);
+				recordAgentFeedback(req.sessionKey, parsed, req.agentId ?? "default");
 			} else {
 				logger.warn("hooks", "Invalid memory_feedback format, skipping", {
 					sessionKey: req.sessionKey,
@@ -1914,7 +1938,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 
 		// Track FTS hits for predictive scorer data collection (full results, pre-dedup)
 		const allMatchedIds = recall.results.map((result) => result.id);
-		trackFtsHits(req.sessionKey, allMatchedIds);
+		trackFtsHits(req.sessionKey, allMatchedIds, req.agentId ?? "default");
 
 		// Filter out memories already injected within the sliding window
 		let selected = budgetSelected;
