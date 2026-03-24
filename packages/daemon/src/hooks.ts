@@ -11,23 +11,42 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseSimpleYaml } from "@signet/core";
-import { logger } from "./logger";
-import { getDbAccessor } from "./db-accessor";
+import {
+	clearContinuity,
+	consumeState,
+	initContinuity,
+	recordPrompt,
+	recordRemember,
+	setStructuralSnapshot,
+	shouldCheckpoint,
+} from "./continuity-state";
 import { listAgentPresence } from "./cross-agent";
-import { fetchEmbedding } from "./embedding-fetch";
-import { hybridRecall } from "./memory-search";
-import { enqueueSummaryJob } from "./pipeline/summary-worker";
-import { getUpdateSummary } from "./update-system";
-import { loadMemoryConfig } from "./memory-config";
-import { recordSessionCandidates, trackFtsHits, parseFeedback, recordAgentFeedback } from "./session-memories";
-import { listSecrets } from "./secrets";
-import { buildCandidateFeatures, getStructuralFeatures } from "./structural-features";
 import { getPredictorClient, recordPredictorLatency } from "./daemon";
-import { getPredictorState, updatePredictorState } from "./predictor-state";
+import { getDbAccessor } from "./db-accessor";
+import { fetchEmbedding } from "./embedding-fetch";
+import { propagateMemoryStatus } from "./knowledge-graph";
+import { logger } from "./logger";
+import { loadMemoryConfig } from "./memory-config";
+import { hybridRecall } from "./memory-search";
+import {
+	applyFtsOverlapFeedback,
+	decayAspectWeights,
+	getFeedbackTelemetry,
+	recordFeedbackTelemetry,
+	shouldRunSessionDecay,
+} from "./pipeline/aspect-feedback";
+import {
+	type TraversalPath,
+	invalidateTraversalCache,
+	resolveFocalEntities,
+	setTraversalStatus,
+	traverseKnowledgeGraph,
+} from "./pipeline/graph-traversal";
+import { enqueueSummaryJob } from "./pipeline/summary-worker";
 import {
 	type CandidateInput,
 	type CandidateSource,
@@ -37,41 +56,23 @@ import {
 	maybeExplore,
 	runPredictorScoring,
 } from "./predictor-scoring";
-import { propagateMemoryStatus } from "./knowledge-graph";
+import { getPredictorState, updatePredictorState } from "./predictor-state";
+import { listSecrets } from "./secrets";
 import {
-	type TraversalPath,
-	invalidateTraversalCache,
-	resolveFocalEntities,
-	setTraversalStatus,
-	traverseKnowledgeGraph,
-} from "./pipeline/graph-traversal";
-import {
-	applyFtsOverlapFeedback,
-	decayAspectWeights,
-	getFeedbackTelemetry,
-	recordFeedbackTelemetry,
-	shouldRunSessionDecay,
-} from "./pipeline/aspect-feedback";
-import {
-	initContinuity,
-	recordPrompt,
-	recordRemember,
-	shouldCheckpoint,
-	consumeState,
-	clearContinuity,
-	setStructuralSnapshot,
-} from "./continuity-state";
-import {
-	getLatestCheckpoint,
-	getLatestCheckpointBySession,
-	formatRecoveryDigest,
+	flushPendingCheckpoints,
 	formatPeriodicDigest,
 	formatPreCompactionDigest,
+	formatRecoveryDigest,
 	formatSessionEndDigest,
-	writeCheckpoint,
+	getLatestCheckpoint,
+	getLatestCheckpointBySession,
 	queueCheckpointWrite,
-	flushPendingCheckpoints,
+	writeCheckpoint,
 } from "./session-checkpoints";
+import { parseFeedback, recordAgentFeedback, recordSessionCandidates, trackFtsHits } from "./session-memories";
+import { getExpiryWarning } from "./session-tracker";
+import { buildCandidateFeatures, getStructuralFeatures } from "./structural-features";
+import { getUpdateSummary } from "./update-system";
 
 const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
 const MEMORY_DB = join(AGENTS_DIR, "memory", "memories.db");
@@ -148,10 +149,18 @@ export interface HooksConfig {
 		query?: string;
 		maxInjectChars?: number;
 	};
+	userPromptSubmit?: {
+		/** Set to false to disable per-prompt memory injection entirely. Default: true. */
+		enabled?: boolean;
+		recallLimit?: number;
+		maxInjectChars?: number;
+	};
 	preCompaction?: {
 		summaryGuidelines?: string;
 		includeRecentMemories?: boolean;
 		memoryLimit?: number;
+		/** Cap the generated summary at this many characters. */
+		maxSummaryChars?: number;
 	};
 }
 
@@ -190,6 +199,7 @@ export interface SessionStartResponse {
 	}>;
 	recentContext?: string;
 	inject: string;
+	warnings?: string[];
 }
 
 export interface PreCompactionRequest {
@@ -224,6 +234,7 @@ export interface UserPromptSubmitResponse {
 	memoryCount: number;
 	queryTerms?: string;
 	engine?: string;
+	warnings?: string[];
 }
 
 export interface SessionEndRequest {
@@ -744,6 +755,9 @@ function updateAccessTracking(ids: string[]): void {
 // Config Loading
 // ============================================================================
 
+// Derived from HooksConfig — update when adding new config sections.
+const KNOWN_HOOKS_KEYS: ReadonlySet<keyof HooksConfig> = new Set<keyof HooksConfig>(["sessionStart", "userPromptSubmit", "preCompaction"]);
+
 function loadHooksConfig(): HooksConfig {
 	const configPath = join(AGENTS_DIR, "agent.yaml");
 	if (!existsSync(configPath)) {
@@ -752,8 +766,24 @@ function loadHooksConfig(): HooksConfig {
 
 	try {
 		const content = readFileSync(configPath, "utf-8");
-		const config = parseSimpleYaml(content);
-		return config.hooks || getDefaultConfig();
+		const parsed = parseSimpleYaml(content);
+		const hooks = parsed.hooks;
+		if (!hooks || typeof hooks !== "object") {
+			return getDefaultConfig();
+		}
+		// Warn on unrecognized keys so users catch typos early
+		const record = hooks as Record<string, unknown>;
+		for (const key of Object.keys(record)) {
+			if (!KNOWN_HOOKS_KEYS.has(key as keyof HooksConfig)) {
+				logger.warn("hooks", `Unknown hooks config key: ${key} — check agent.yaml`);
+			}
+		}
+		const cfg: HooksConfig = {
+			sessionStart: typeof record.sessionStart === "object" && record.sessionStart !== null ? record.sessionStart as HooksConfig["sessionStart"] : undefined,
+			userPromptSubmit: typeof record.userPromptSubmit === "object" && record.userPromptSubmit !== null ? record.userPromptSubmit as HooksConfig["userPromptSubmit"] : undefined,
+			preCompaction: typeof record.preCompaction === "object" && record.preCompaction !== null ? record.preCompaction as HooksConfig["preCompaction"] : undefined,
+		};
+		return cfg;
 	} catch (e) {
 		logger.warn("hooks", "Failed to load hooks config, using defaults");
 		return getDefaultConfig();
@@ -768,6 +798,11 @@ function getDefaultConfig(): HooksConfig {
 			includeIdentity: true,
 			includeRecentContext: true,
 			recencyBias: 0.7,
+		},
+		userPromptSubmit: {
+			enabled: true,
+			recallLimit: 10,
+			maxInjectChars: 500,
 		},
 		preCompaction: {
 			summaryGuidelines: `Summarize this session focusing on:
@@ -962,10 +997,14 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			dateStyle: "full",
 			timeStyle: "short",
 		});
+		const warnings = req.sessionKey
+			? [getExpiryWarning(req.sessionKey)].filter((w): w is string => w !== null)
+			: undefined;
 		return {
 			identity: { name: "Agent" },
 			memories: [],
 			inject: `[memory active | /remember | /recall]\n# Current Date & Time\n${now} (${tz})`,
+			warnings: warnings?.length ? warnings : undefined,
 		};
 	}
 
@@ -1476,7 +1515,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const mainBudget = Math.max(0, maxInject - reservedChars);
 	let inject = injectParts.join("\n");
 	if (inject.length > mainBudget) {
-		inject = inject.slice(0, mainBudget) + "\n[context truncated]";
+		inject = `${inject.slice(0, mainBudget)}\n[context truncated]`;
 	}
 	if (constraintsSection) {
 		inject += constraintsSection;
@@ -1515,6 +1554,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		})),
 		recentContext: memoryMdContent,
 		inject,
+		warnings: (() => {
+			if (!req.sessionKey) return undefined;
+			const w = [getExpiryWarning(req.sessionKey)].filter((v): v is string => v !== null);
+			return w.length > 0 ? w : undefined;
+		})(),
 	};
 }
 
@@ -1836,6 +1880,7 @@ function resolveRecallUserMessage(req: UserPromptSubmitRequest): string {
 
 export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Promise<UserPromptSubmitResponse> {
 	const start = Date.now();
+	const submitCfg = loadHooksConfig().userPromptSubmit ?? {};
 	const userMessage = resolveRecallUserMessage(req);
 	const { keywordTerms, vectorQuery } = buildRecallQueryShape(userMessage, req.lastAssistantMessage);
 
@@ -1903,18 +1948,25 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		timeStyle: "short",
 	});
 	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n`;
+	const expiryWarning = req.sessionKey ? getExpiryWarning(req.sessionKey) : null;
+	const warnings = expiryWarning ? [expiryWarning] : undefined;
+
+	if (submitCfg.enabled === false) {
+		return { inject: metadataHeader, memoryCount: 0, warnings };
+	}
 
 	if (keywordTerms.length < 1 || vectorQuery.length === 0 || !existsSync(MEMORY_DB)) {
-		return { inject: metadataHeader, memoryCount: 0 };
+		return { inject: metadataHeader, memoryCount: 0, warnings };
 	}
 
 	try {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const recallLimit = submitCfg.recallLimit ?? 10;
 		const recall = await hybridRecall(
 			{
 				query: vectorQuery,
 				keywordQuery: vectorQuery,
-				limit: 10,
+				limit: recallLimit,
 				importance_min: 0.3,
 			},
 			cfg,
@@ -1922,15 +1974,15 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		);
 
 		if (recall.results.length === 0 || typeof recall.results[0]?.score !== "number" || recall.results[0].score < 0.4) {
-			return { inject: metadataHeader, memoryCount: 0 };
+			return { inject: metadataHeader, memoryCount: 0, warnings };
 		}
 
-		const budget = cfg.pipelineV2.guardrails.contextBudgetChars;
+		const injectBudget = submitCfg.maxInjectChars ?? cfg.pipelineV2.guardrails.contextBudgetChars;
 		const mapped = recall.results.map((result) => ({
 			...result,
 			pinned: result.pinned ? 1 : 0,
 		}));
-		const budgetFiltered = selectWithBudget(mapped, budget);
+		const budgetFiltered = selectWithBudget(mapped, injectBudget);
 		const budgetSelected = budgetFiltered.slice(0, 5);
 		// omitted reflects only budget truncation, not the 5-item display cap,
 		// so the hint correctly directs users to raise contextBudgetChars.
@@ -1954,7 +2006,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		}
 
 		if (selected.length === 0) {
-			return { inject: metadataHeader, memoryCount: 0 };
+			return { inject: metadataHeader, memoryCount: 0, warnings };
 		}
 
 		const queryTerms = vectorQuery.slice(0, 80);
@@ -2003,10 +2055,11 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 			memoryCount: selected.length,
 			queryTerms,
 			engine: "hybrid",
+			warnings,
 		};
 	} catch (e) {
 		logger.error("hooks", "User prompt submit failed", e as Error);
-		return { inject: "", memoryCount: 0 };
+		return { inject: "", memoryCount: 0, warnings };
 	}
 }
 
@@ -2228,7 +2281,10 @@ export function normalizeSessionTranscript(harness: string, raw: string): string
 // Returns string (possibly empty) when input IS JSON-line — empty means
 // all lines were non-conversational (tool calls, metadata, etc.).
 export function normalizeJsonConversationTranscript(raw: string): string | null {
-	const rawLines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const rawLines = raw
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
 	if (rawLines.length === 0) return "";
 
 	const parsedLines: Array<Record<string, unknown> | null> = [];
@@ -2379,7 +2435,6 @@ export function normalizeCodexTranscript(raw: string): string {
 					lines.push(`Assistant: ${record.text.trim().replace(/[\r\n]+/g, " ")}`);
 				}
 			}
-			continue;
 		}
 
 		// response_item events (tool calls/outputs) are intentionally omitted
