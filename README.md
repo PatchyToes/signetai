@@ -27,17 +27,18 @@
 - Captures and injects relevant memory automatically between sessions
 - Runs local-first, with inspectable storage and no vendor lock-in
 
-Most agent setups only remember things when the model explicitly decides
-to call a memory tool. That is not memory, that's a filing cabinet.
+Most agents only remember when explicitly told to.
 
-Signet makes memory ambient. It runs locally, extracts useful context in
-the background, and injects relevant history before the next prompt.
-Your agent does not have to remember to remember.
+That is not memory, that's a filing cabinet.
+
+Signet makes memory ambient. It extracts and injects context
+automatically, between sessions, before the next prompt starts.
+Your agent just has memory.
 
 Why teams adopt it:
-- local-first storage (SQLite + markdown)
-- cross-harness compatibility (Claude Code, OpenCode, OpenClaw, Codex)
-- inspectable memory with provenance and policy scopes
+- less prompt re-explaining between sessions
+- one memory layer across Claude Code, OpenCode, OpenClaw, and Codex
+- clear visibility into what was recalled, why, and from which scope
 
 **Benchmark note:** early LoCoMo results show **87.5% answer accuracy**
 and **100% Hit@10 retrieval** on an **8-question full-stack sample**.
@@ -100,9 +101,17 @@ Use Signet if you want:
 Signet may be overkill if you only need short-lived chat memory inside a
 single hosted assistant.
 
-## Supporting capabilities
+## Why you can trust this
 
-These improve quality and reliability of the core memory loop:
+- runs local-first by default
+- memory is stored in SQLite + markdown
+- recall is inspectable with provenance and scopes
+- memory can be repaired (edit, supersede, delete, reclassify)
+- no vendor lock-in, your data stays portable
+
+## What keeps it reliable
+
+These systems improve quality and reliability of the core memory loop:
 
 | Supporting | What it does |
 |---|---|
@@ -276,7 +285,7 @@ CLI (signet)
   setup, knowledge, secrets, skills, hooks, git sync, service mgmt
 
 Daemon (@signet/daemon, localhost:3850)
-  |-- HTTP API (90+ endpoints across 18 domains)
+  |-- HTTP API (modular endpoints for memory, retrieval, auth, and tooling)
   |-- Distillation Layer
   |     extraction -> decision -> graph -> retention
   |-- Retrieval
