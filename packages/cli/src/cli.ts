@@ -4,8 +4,8 @@
  * Own your agent. Bring it anywhere.
  */
 
-import { spawnSync } from "child_process";
-import { createHash } from "crypto";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
@@ -22,10 +22,10 @@ import {
 	statSync,
 	symlinkSync,
 	writeFileSync,
-} from "fs";
-import { homedir, tmpdir } from "os";
-import { dirname, join, resolve as resolvePath } from "path";
-import { fileURLToPath } from "url";
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeCodeConnector } from "@signet/connector-claude-code";
 import { CodexConnector } from "@signet/connector-codex";
 import { OpenClawConnector } from "@signet/connector-openclaw";
@@ -40,39 +40,21 @@ import {
 	detectExistingSetup as detectExistingSetupCore,
 	formatYaml,
 	getGlobalInstallCommand,
-	resolveGlobalPackagePath,
 	getMissingIdentityFiles,
 	getSkillsRunnerCommand,
 	hasValidIdentity,
 	importMemoryLogs,
 	loadSqliteVec,
 	parseSimpleYaml,
+	readStaticIdentity,
+	resolveGlobalPackagePath,
 	resolvePrimaryPackageManager,
 	symlinkSkills,
-	readStaticIdentity,
 	unifySkills,
 } from "@signet/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import ora from "ora";
-import {
-	type CondaInfo,
-	type PyenvInfo,
-	type PythonInfo,
-	checkZvecInstalled,
-	createCondaEnv,
-	createVenv,
-	detectBestPython,
-	detectConda,
-	detectPyenv,
-	detectSystemPython,
-	getCondaPython,
-	getPyenvPython,
-	installDeps,
-	installPyenvPython,
-	isZvecCompatible,
-} from "./python.js";
-import Database from "./sqlite.js";
 import { registerBrowseCommand } from "./browse.js";
 import { registerAgentCommands } from "./commands/agent.js";
 import { registerAppCommands } from "./commands/app.js";
@@ -88,7 +70,16 @@ import { registerUpdateCommands } from "./commands/update.js";
 import { registerVectorCommands } from "./commands/vector.js";
 import { registerWorkspaceCommands } from "./commands/workspace.js";
 import { configureAgent } from "./features/configure.js";
-import { doRestart, doStart, doStop, launchDashboard, migrateSchema, showLogs } from "./features/daemon.js";
+import {
+	doPause,
+	doRestart,
+	doResume,
+	doStart,
+	doStop,
+	launchDashboard,
+	migrateSchema,
+	showLogs,
+} from "./features/daemon.js";
 import { getStatusReport, showDoctor, showStatus } from "./features/health.js";
 import { importFromGitHub } from "./features/import.js";
 import { setupWizard } from "./features/setup.js";
@@ -106,6 +97,7 @@ import {
 	startDaemon,
 	stopDaemon,
 } from "./lib/runtime.js";
+import "./sqlite.js";
 
 // Template directory location (relative to built CLI)
 function getTemplatesDir() {
@@ -1181,7 +1173,7 @@ program.hook("preAction", async (_thisCommand, actionCommand) => {
 	let current: Command | null = actionCommand;
 	let topLevelCommand = "";
 
-	while (current && current.parent) {
+	while (current?.parent) {
 		if (current.parent.name() === "signet") {
 			topLevelCommand = current.name();
 			break;
@@ -1283,7 +1275,9 @@ registerAppCommands(program, {
 });
 
 registerDaemonCommands(program, {
+	doPause: (options) => doPause(options, daemonDeps),
 	doRestart: (options) => doRestart(options, daemonDeps),
+	doResume: (options) => doResume(options, daemonDeps),
 	doStart: (options) => doStart(options, daemonDeps),
 	doStop: (options) => doStop(options, daemonDeps),
 	showLogs: (options) => showLogs(options, daemonDeps),

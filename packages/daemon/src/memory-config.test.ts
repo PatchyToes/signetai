@@ -632,6 +632,28 @@ describe("loadPipelineConfig", () => {
 		expect(result.autonomous.maintenanceMode).toBe(DEFAULT_PIPELINE_V2.autonomous.maintenanceMode);
 	});
 
+	it("defaults paused to false when absent", () => {
+		const result = loadPipelineConfig({
+			memory: { pipelineV2: { enabled: true } },
+		});
+
+		expect(result.paused).toBe(false);
+	});
+
+	it("loads explicit paused state", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					enabled: true,
+					paused: true,
+				},
+			},
+		});
+
+		expect(result.enabled).toBe(true);
+		expect(result.paused).toBe(true);
+	});
+
 	it("preserves explicit false values over defaults", () => {
 		const result = loadPipelineConfig({
 			memory: {

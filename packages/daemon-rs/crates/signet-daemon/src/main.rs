@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,7 +18,45 @@ mod routes;
 mod service;
 mod state;
 
+use auth::rate_limiter::{AuthRateLimiter, RateLimitRule, default_limits};
+use auth::tokens::load_or_create_secret;
+use auth::types::AuthMode;
 use state::AppState;
+
+fn read_auth_mode(config: &DaemonConfig) -> AuthMode {
+    config
+        .manifest
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.mode.as_deref())
+        .map(AuthMode::from_str_lossy)
+        .unwrap_or_default()
+}
+
+fn merge_rate_limits(config: &DaemonConfig) -> HashMap<String, RateLimitRule> {
+    let mut rules = default_limits();
+
+    let Some(auth) = config.manifest.auth.as_ref() else {
+        return rules;
+    };
+    let Some(raw) = auth.rate_limits.as_ref() else {
+        return rules;
+    };
+
+    for (name, cfg) in raw {
+        let Some(rule) = rules.get_mut(name) else {
+            continue;
+        };
+        if let Some(window_ms) = cfg.window_ms.filter(|n| *n > 0) {
+            rule.window_ms = window_ms;
+        }
+        if let Some(max) = cfg.max.filter(|n| *n > 0) {
+            rule.max = max;
+        }
+    }
+
+    rules
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -84,14 +124,43 @@ async fn main() -> anyhow::Result<()> {
     let (pool, writer_handle) = DbPool::open(&config.db_path).context("failed to open database")?;
 
     // Initialize embedding provider
-    let embedding = config
+    let pipeline_paused = config
         .manifest
-        .embedding
+        .memory
         .as_ref()
-        .map(|cfg| signet_pipeline::embedding::from_config(cfg, None));
+        .and_then(|m| m.pipeline_v2.as_ref())
+        .map(|p| p.paused)
+        .unwrap_or(false);
+    let embedding = if pipeline_paused {
+        info!("pipeline paused; embedding provider startup deferred");
+        None
+    } else {
+        config
+            .manifest
+            .embedding
+            .as_ref()
+            .map(|cfg| signet_pipeline::embedding::from_config(cfg, None))
+    };
+
+    let auth_mode = read_auth_mode(&config);
+    let auth_secret = if auth_mode == AuthMode::Local {
+        info!("auth mode local, admin routes unrestricted on loopback runtime");
+        None
+    } else {
+        let path = config.base_path.join(".daemon").join("auth-secret");
+        Some(load_or_create_secret(&path).context("failed to load auth secret")?)
+    };
+    let auth_admin_limiter = AuthRateLimiter::from_rules(&merge_rate_limits(&config));
 
     // Build app state
-    let state = Arc::new(AppState::new(config.clone(), pool, embedding));
+    let state = Arc::new(AppState::new(
+        config.clone(),
+        pool,
+        embedding,
+        auth_mode,
+        auth_secret,
+        auth_admin_limiter,
+    ));
 
     // Build router
     let app = Router::new()
@@ -174,7 +243,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(routes::hooks::compaction_complete),
         )
         // Agent roster routes (multi-agent support — migration 043)
-        .route("/api/agents", get(routes::agents::list).post(routes::agents::create))
+        .route(
+            "/api/agents",
+            get(routes::agents::list).post(routes::agents::create),
+        )
         .route(
             "/api/agents/{name}",
             get(routes::agents::get).delete(routes::agents::delete),
@@ -232,6 +304,14 @@ async fn main() -> anyhow::Result<()> {
         )
         // Pipeline routes
         .route("/api/pipeline/status", get(routes::pipeline::status))
+        .route(
+            "/api/pipeline/pause",
+            axum::routing::post(routes::pipeline::pause),
+        )
+        .route(
+            "/api/pipeline/resume",
+            axum::routing::post(routes::pipeline::resume),
+        )
         .route("/api/pipeline/models", get(routes::pipeline::models))
         .route(
             "/api/pipeline/models/by-provider",
@@ -470,10 +550,13 @@ async fn main() -> anyhow::Result<()> {
     info!(%addr, "listening");
 
     // Serve with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     info!("shutting down");
 
