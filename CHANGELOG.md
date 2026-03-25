@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.76.5] - 2026-03-25
+
+### Bug Fixes
+
+- recover stuck processing summary_jobs on startup + fix embed backfill infinite cycle (#319)
+
+
 ## [0.76.2] - 2026-03-24
 
 ### Bug Fixes
