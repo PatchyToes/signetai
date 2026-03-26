@@ -24,6 +24,7 @@ import { getSecret } from "../secrets";
 import {
 	createAnthropicProvider,
 	createClaudeCodeProvider,
+	createCodexProvider,
 	createOllamaProvider,
 	createOpenCodeProvider,
 	createOpenRouterProvider,
@@ -999,12 +1000,17 @@ export function recoverSummaryJobs(accessor: DbAccessor, limit: number = RECOVER
 	});
 }
 
-async function resolveProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promise<LlmProvider> {
+export async function resolveSummaryProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promise<LlmProvider> {
 	const p = cfg.pipelineV2.synthesis.provider;
 	const model = cfg.pipelineV2.synthesis.model;
 	const timeout = cfg.pipelineV2.synthesis.timeout;
 	const endpoint = cfg.pipelineV2.synthesis.endpoint;
 	const ollamaFallbackMaxContextTokens = resolveDefaultOllamaFallbackMaxContextTokens();
+	const fallback = () =>
+		createOllamaProvider({
+			defaultTimeoutMs: timeout,
+			maxContextTokens: ollamaFallbackMaxContextTokens,
+		});
 	switch (p) {
 		case "none":
 			throw new Error("Summary worker requires an LLM provider but synthesis.provider is 'none'");
@@ -1022,10 +1028,7 @@ async function resolveProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promis
 					"summary-worker",
 					"ANTHROPIC_API_KEY not found for summary worker — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`",
 				);
-				return createOllamaProvider({
-					defaultTimeoutMs: timeout,
-					maxContextTokens: ollamaFallbackMaxContextTokens,
-				});
+				return fallback();
 			}
 			return createAnthropicProvider({ model: model || "haiku", apiKey, defaultTimeoutMs: timeout });
 		}
@@ -1043,10 +1046,7 @@ async function resolveProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promis
 					"summary-worker",
 					"OPENROUTER_API_KEY not found for summary worker — falling back to ollama. Set via env or `signet secrets set OPENROUTER_API_KEY`",
 				);
-				return createOllamaProvider({
-					defaultTimeoutMs: timeout,
-					maxContextTokens: ollamaFallbackMaxContextTokens,
-				});
+				return fallback();
 			}
 			return createOpenRouterProvider({
 				model: model || "openai/gpt-4o-mini",
@@ -1057,8 +1057,18 @@ async function resolveProvider(cfg: ReturnType<typeof loadMemoryConfig>): Promis
 				defaultTimeoutMs: timeout,
 			});
 		}
-		case "claude-code":
-			return createClaudeCodeProvider({ model: model || "haiku", defaultTimeoutMs: timeout });
+		case "claude-code": {
+			const provider = createClaudeCodeProvider({ model: model || "haiku", defaultTimeoutMs: timeout });
+			if (await provider.available()) return provider;
+			logger.warn("summary-worker", "Claude Code CLI not available for summary worker — falling back to ollama");
+			return fallback();
+		}
+		case "codex": {
+			const provider = createCodexProvider({ model: model || "gpt-5-codex-mini", defaultTimeoutMs: timeout });
+			if (await provider.available()) return provider;
+			logger.warn("summary-worker", "Codex CLI not available for summary worker — falling back to ollama");
+			return fallback();
+		}
 		case "opencode":
 			return createOpenCodeProvider({
 				model: model || "anthropic/claude-haiku-4-5-20251001",
@@ -1151,7 +1161,7 @@ export function startSummaryWorker(accessor: DbAccessor): SummaryWorkerHandle {
 			const providerKey = `${cfg.pipelineV2.synthesis.provider}:${cfg.pipelineV2.synthesis.model}:${cfg.pipelineV2.synthesis.timeout}:${keyFingerprint}`;
 			const cacheExpired = Date.now() - cachedProviderAt > PROVIDER_CACHE_TTL_MS;
 			if (!cachedProvider || providerKey !== cachedProviderKey || cacheExpired) {
-				cachedProvider = await resolveProvider(cfg);
+				cachedProvider = await resolveSummaryProvider(cfg);
 				cachedProviderKey = providerKey;
 				cachedProviderAt = Date.now();
 			}

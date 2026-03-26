@@ -169,6 +169,7 @@ import {
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	stopOpenCodeServer,
 } from "./pipeline/provider";
+import { resolveRuntimeModel } from "./pipeline/provider-resolution";
 import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
 import { type PredictorClient, createPredictorClient, resolvePredictorCheckpointPath } from "./predictor-client";
@@ -11076,7 +11077,7 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	const providerHints = getConfiguredProviderHints(AGENTS_DIR);
 	const validExtractionProviders = new Set(["none", "ollama", "claude-code", "opencode", "codex", "anthropic", "openrouter"]);
-	const validSynthesisProviders = new Set(["none", "ollama", "claude-code", "opencode", "anthropic", "openrouter"]);
+	const validSynthesisProviders = new Set(["none", "ollama", "claude-code", "codex", "opencode", "anthropic", "openrouter"]);
 
 	providerRuntimeResolution.extraction = {
 		configured: providerHints.extraction,
@@ -11242,10 +11243,11 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 
 	// When falling back to ollama, reset model so ollama uses its own default
 	// instead of inheriting an anthropic-specific alias like "haiku".
-	let effectiveExtractionModel: string | undefined = memoryCfg.pipelineV2.extraction.model;
-	if (effectiveExtractionProvider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama") {
-		effectiveExtractionModel = undefined;
-	}
+	const effectiveExtractionModel = resolveRuntimeModel(
+		effectiveExtractionProvider,
+		memoryCfg.pipelineV2.extraction.provider,
+		memoryCfg.pipelineV2.extraction.model,
+	);
 	const usingExtractionOllamaFallback =
 		effectiveExtractionProvider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama";
 	providerRuntimeResolution.extraction = {
@@ -11453,6 +11455,32 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 					effectiveSynthesisProvider = "ollama";
 				}
 			}
+		} else if (effectiveSynthesisProvider === "codex") {
+			const resolvedCodex = Bun.which("codex");
+			if (resolvedCodex === null) {
+				logger.warn("config", "Codex CLI not found, falling back to ollama for synthesis");
+				effectiveSynthesisProvider = "ollama";
+			} else {
+				try {
+					const exitCode = await new Promise<number>((resolve) => {
+						const proc = spawn(resolvedCodex, ["--version"], {
+							stdio: "pipe",
+							windowsHide: true,
+							env: {
+								...process.env,
+								SIGNET_NO_HOOKS: "1",
+								SIGNET_CODEX_BYPASS_WRAPPER: "1",
+							},
+						});
+						proc.on("close", (code) => resolve(code ?? 1));
+						proc.on("error", () => resolve(1));
+					});
+					if (exitCode !== 0) throw new Error("non-zero exit");
+				} catch {
+					logger.warn("config", "Codex CLI not found, falling back to ollama for synthesis");
+					effectiveSynthesisProvider = "ollama";
+				}
+			}
 		}
 		providerRuntimeResolution.synthesis = {
 			configured: providerHints.synthesis,
@@ -11482,10 +11510,11 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 		});
 
 		// When falling back to ollama, reset model so ollama uses its own default
-		let effectiveSynthesisModel: string | undefined = memoryCfg.pipelineV2.synthesis.model;
-		if (effectiveSynthesisProvider === "ollama" && memoryCfg.pipelineV2.synthesis.provider !== "ollama") {
-			effectiveSynthesisModel = undefined;
-		}
+		const effectiveSynthesisModel = resolveRuntimeModel(
+			effectiveSynthesisProvider,
+			memoryCfg.pipelineV2.synthesis.provider,
+			memoryCfg.pipelineV2.synthesis.model,
+		);
 		const usingSynthesisOllamaFallback =
 			effectiveSynthesisProvider === "ollama" && memoryCfg.pipelineV2.synthesis.provider !== "ollama";
 
@@ -11513,6 +11542,11 @@ async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?:
 								ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
 								defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 							})
+						: effectiveSynthesisProvider === "codex"
+							? createCodexProvider({
+									model: effectiveSynthesisModel || "gpt-5-codex-mini",
+									defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+								})
 						: effectiveSynthesisProvider === "claude-code"
 							? createClaudeCodeProvider({
 									model: effectiveSynthesisModel || "haiku",
