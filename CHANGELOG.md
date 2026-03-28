@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.82.3] - 2026-03-28
+
+### Bug Fixes
+
+- **ci**: harden self-signed desktop signing on macOS and windows (#384)
+
+
 ## [0.82.2] - 2026-03-28
 
 ### Bug Fixes
