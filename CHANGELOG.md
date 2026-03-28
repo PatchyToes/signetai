@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.82.4] - 2026-03-28
+
+### Bug Fixes
+
+- **tray**: resolve macOS bundled-daemon path compile regression (#387)
+
+
 ## [0.82.3] - 2026-03-28
 
 ### Bug Fixes
