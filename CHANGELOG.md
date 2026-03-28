@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.82.2] - 2026-03-28
+
+### Bug Fixes
+
+- **ci**: add self-signed desktop signing and arch package validation (#383)
+
+
 ## [0.82.0] - 2026-03-28
 
 ### Bug Fixes
