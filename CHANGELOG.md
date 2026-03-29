@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.85.0] - 2026-03-29
+
+### Bug Fixes
+
+- distinguish session-start timeouts from offline fallback (#395)
+
+
 ## [0.84.2] - 2026-03-29
 
 ### Features
