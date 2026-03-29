@@ -257,7 +257,10 @@ async fn process_summary(
         let parsed = crate::extraction::parse(&raw.text);
         total_facts += parsed.facts.len();
 
-        // TODO: Phase 5.3 — write summary to file, insert facts, update session_summaries DAG
+        // TODO: Phase 5.3 — write summary to file, insert facts, update session_summaries DAG.
+        // Parity note (PR #372): when fact insertion is implemented here, include
+        // content_hash in the INSERT (computed via normalize_and_hash). Without it,
+        // the embedding tracker skips null-hash rows and the backfill cycles indefinitely.
     }
 
     Ok(SummaryResult {

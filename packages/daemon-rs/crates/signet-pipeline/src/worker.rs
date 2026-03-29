@@ -271,6 +271,31 @@ async fn worker_loop(
         guard.mark_running(true);
     }
 
+    // Startup recovery: mark memory_jobs stuck in 'pending' with exhausted
+    // attempts as 'dead'. The tick loop requires attempts < max_attempts, so
+    // these jobs are silently skipped forever without this step, causing the
+    // stall detector to fire on every interval.
+    // Parity: mirrors recoverMemoryJobs() added to JS worker.ts in PR #372.
+    {
+        let recover = pool
+            .write(signet_core::db::Priority::Low, |conn| {
+                let updated = conn.execute(
+                    "UPDATE memory_jobs SET status = 'dead'
+                     WHERE status = 'pending' AND attempts >= max_attempts",
+                    [],
+                )?;
+                Ok(updated.into())
+            })
+            .await;
+        match recover {
+            Ok(ref v) if v.as_u64().unwrap_or(0) > 0 => {
+                info!(updated = v.as_u64().unwrap_or(0), "startup recovery: marked exhausted pending job(s) as dead")
+            }
+            Ok(_) => {}
+            Err(e) => warn!("startup recovery failed (non-fatal): {e}"),
+        }
+    }
+
     loop {
         // Check shutdown
         if *shutdown.borrow() {

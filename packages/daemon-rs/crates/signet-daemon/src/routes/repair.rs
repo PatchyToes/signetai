@@ -282,7 +282,12 @@ pub async fn re_embed(
     State(_state): State<Arc<AppState>>,
     Json(_body): Json<Option<ReEmbedBody>>,
 ) -> impl IntoResponse {
-    // TODO: Wire to embedding provider for re-embedding
+    // TODO: Wire to embedding provider for re-embedding.
+    // Parity note (PR #372): when implemented, write content_hash back to
+    // memories.content_hash for null-hash rows after embedding, but guard
+    // against the unique partial index (idx_memories_content_hash_unique):
+    // check that no other non-deleted memory already owns the hash before
+    // writing -- skip and let dedup clean it up if there is a collision.
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(repair_result(
