@@ -2,6 +2,14 @@
 
 All notable changes to Signet are documented here.
 
+## [0.82.5] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: prototype DP-19 adaptive write gate with scoped guards (#380)
+- **tray**: unblock mac self-signed CI and prefer bundled linux daemon (#388)
+
+
 ## [0.82.4] - 2026-03-28
 
 ### Bug Fixes
