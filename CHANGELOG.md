@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.84.1] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: populate content_hash in summary facts, backfill write-back, exhausted job recovery (#372)
+
+
 ## [0.84.0] - 2026-03-29
 
 ### Bug Fixes
