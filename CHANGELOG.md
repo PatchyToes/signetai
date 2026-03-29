@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.82.6] - 2026-03-29
+
+### Bug Fixes
+
+- **ci**: replace mapfile for macOS-compatible release uploads (#392)
+
+
 ## [0.82.5] - 2026-03-29
 
 ### Bug Fixes
