@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.86.2] - 2026-03-29
+
+### Bug Fixes
+
+- extraction-model reranker can synthesize recall summary (#402)
+
+
 ## [0.86.1] - 2026-03-29
 
 ### Bug Fixes
