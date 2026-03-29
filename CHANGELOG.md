@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.85.2] - 2026-03-29
+
+### Bug Fixes
+
+- **core**: align Signet prompt with identity stewardship (#398)
+
+
 ## [0.85.1] - 2026-03-29
 
 ### Bug Fixes
