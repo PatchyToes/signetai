@@ -2,6 +2,13 @@
 
 All notable changes to Signet are documented here.
 
+## [0.85.1] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: preserve reranker score calibration + gate low-confidence prompt recalls (#396)
+
+
 ## [0.85.0] - 2026-03-29
 
 ### Bug Fixes
