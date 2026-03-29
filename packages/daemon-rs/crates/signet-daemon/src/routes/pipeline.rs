@@ -154,7 +154,7 @@ fn set_pipeline_paused(
     ))
 }
 
-fn is_loopback(addr: &SocketAddr) -> bool {
+pub(crate) fn is_loopback(addr: &SocketAddr) -> bool {
     match addr.ip() {
         IpAddr::V4(ip) => ip.is_loopback(),
         IpAddr::V6(ip) => {
@@ -605,9 +605,11 @@ mod tests {
             },
             pool,
             embedding,
+            None, // llm provider
             None,
             mode,
             secret.clone(),
+            AuthRateLimiter::from_rules(&rules),
             AuthRateLimiter::from_rules(&rules),
         ));
 

@@ -5,6 +5,7 @@ use std::{collections::HashMap, time::SystemTime};
 use signet_core::config::DaemonConfig;
 use signet_core::db::DbPool;
 use signet_pipeline::embedding::EmbeddingProvider;
+use signet_pipeline::provider::LlmProvider;
 use signet_pipeline::summary::SummaryHandle;
 use signet_pipeline::synthesis::SynthesisHandle;
 use signet_pipeline::worker::{SharedWorkerRuntimeStats, WorkerHandle};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub config: DaemonConfig,
     pub pool: DbPool,
     pub embedding: RwLock<Option<Arc<dyn EmbeddingProvider>>>,
+    /// LLM provider for reranking and recall summary synthesis.
+    pub llm: RwLock<Option<Arc<dyn LlmProvider>>>,
     pub pipeline_paused: AtomicBool,
     pub pipeline_transition: AtomicBool,
     pub extraction_worker_handle: Mutex<Option<WorkerHandle>>,
@@ -42,6 +45,8 @@ pub struct AppState {
     pub auth_mode: AuthMode,
     pub auth_secret: Option<Vec<u8>>,
     pub auth_admin_limiter: AuthRateLimiter,
+    /// Independent limiter for the LLM-enabled recall path.
+    pub recall_llm_limiter: AuthRateLimiter,
     pub sessions: SessionTracker,
     pub continuity: ContinuityTracker,
     pub dedup: DedupState,
@@ -85,10 +90,12 @@ impl AppState {
         config: DaemonConfig,
         pool: DbPool,
         embedding: Option<Arc<dyn EmbeddingProvider>>,
+        llm: Option<Arc<dyn LlmProvider>>,
         extraction_worker_stats: Option<SharedWorkerRuntimeStats>,
         auth_mode: AuthMode,
         auth_secret: Option<Vec<u8>>,
         auth_admin_limiter: AuthRateLimiter,
+        recall_llm_limiter: AuthRateLimiter,
     ) -> Self {
         let paused = config
             .manifest
@@ -119,6 +126,7 @@ impl AppState {
             config,
             pool,
             embedding: RwLock::new(embedding),
+            llm: RwLock::new(llm),
             pipeline_paused: AtomicBool::new(paused),
             pipeline_transition: AtomicBool::new(false),
             extraction_worker_handle: Mutex::new(None),
@@ -128,6 +136,7 @@ impl AppState {
             auth_mode,
             auth_secret,
             auth_admin_limiter,
+            recall_llm_limiter,
             sessions: SessionTracker::new(),
             continuity: ContinuityTracker::new(),
             dedup: DedupState::new(),

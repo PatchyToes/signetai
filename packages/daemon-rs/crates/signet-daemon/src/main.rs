@@ -15,6 +15,7 @@ use tracing::{info, warn};
 mod auth;
 mod feedback;
 mod mcp;
+mod reranker;
 mod routes;
 mod service;
 mod state;
@@ -124,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
     // Open database (runs migrations, starts writer task)
     let (pool, writer_handle) = DbPool::open(&config.db_path).context("failed to open database")?;
 
-    // Initialize embedding provider
+    // Initialize embedding and LLM providers
     let pipeline_paused = config
         .manifest
         .memory
@@ -142,6 +143,32 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map(|cfg| signet_pipeline::embedding::from_config(cfg, None))
     };
+    // Build LLM provider from extraction config so the recall reranker path
+    // is available immediately, independent of when the extraction worker starts.
+    // Recall is a read path — do not gate on pipeline_paused (which only
+    // controls extraction writes).
+    let llm_startup: Option<Arc<dyn signet_pipeline::provider::LlmProvider>> = config
+        .manifest
+        .memory
+        .as_ref()
+        .and_then(|m| m.pipeline_v2.as_ref())
+        .filter(|p| p.reranker.enabled && p.reranker.use_extraction_model)
+        .map(|p| {
+            let provider = p.extraction.provider.clone();
+            let endpoint = p.extraction.endpoint.clone();
+            let model = p.extraction.model.clone();
+            let timeout = p.extraction.timeout;
+            let api_key = std::env::var("OPENAI_API_KEY").ok();
+            signet_pipeline::provider::from_config(
+                &signet_pipeline::provider::LlmProviderConfig {
+                    provider,
+                    model,
+                    base_url: endpoint,
+                    api_key,
+                    timeout_ms: Some(timeout),
+                },
+            )
+        });
 
     let auth_mode = read_auth_mode(&config);
     let auth_secret = if auth_mode == AuthMode::Local {
@@ -151,19 +178,25 @@ async fn main() -> anyhow::Result<()> {
         let path = config.base_path.join(".daemon").join("auth-secret");
         Some(load_or_create_secret(&path).context("failed to load auth secret")?)
     };
-    let auth_admin_limiter = AuthRateLimiter::from_rules(&merge_rate_limits(&config));
+    let merged = merge_rate_limits(&config);
+    let auth_admin_limiter = AuthRateLimiter::from_rules(&merged);
+    // Independent limiter for LLM-enabled recall — separate from admin so
+    // the two buckets don't share state and operators can tune them independently.
+    let recall_llm_limiter = AuthRateLimiter::from_rules(&merged);
 
     let extraction_worker_stats: Option<signet_pipeline::worker::SharedWorkerRuntimeStats> = None;
 
-    // Build app state
+    // Build app state — LLM provider pre-wired at startup for recall reranking.
     let state = Arc::new(AppState::new(
         config.clone(),
         pool,
         embedding,
+        llm_startup,
         extraction_worker_stats,
         auth_mode,
         auth_secret,
         auth_admin_limiter,
+        recall_llm_limiter,
     ));
 
     // Run extraction preflight synchronously before serving requests.
@@ -816,6 +849,8 @@ async fn start_extraction_worker_inner(state: &AppState, dead_letter_on_blocked:
         timeout_ms: Some(pipeline.extraction.timeout),
     };
     let provider = signet_pipeline::provider::from_config(&provider_cfg);
+    // Share the same provider with the recall handler for LLM reranking.
+    *state.llm.write().await = Some(provider.clone());
     let semaphore = Arc::new(signet_pipeline::provider::LlmSemaphore::default());
     let worker_config = signet_pipeline::worker::WorkerConfig {
         poll_ms: pipeline.worker.poll_ms,
@@ -1678,11 +1713,11 @@ mod tests {
                 &EmbeddingConfig::default(),
                 None,
             )),
-            Some(signet_pipeline::worker::new_runtime_stats_handle(
-                0.8, 30_000,
-            )),
+            None, // llm provider — not wired in test helpers
+            Some(signet_pipeline::worker::new_runtime_stats_handle(0.8, 30_000)),
             AuthMode::Local,
             None,
+            AuthRateLimiter::from_rules(&rules),
             AuthRateLimiter::from_rules(&rules),
         ))
     }

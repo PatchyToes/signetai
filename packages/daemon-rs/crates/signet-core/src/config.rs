@@ -183,6 +183,7 @@ fn normalize_manifest(
     let raw_pipeline = raw_child(raw, "memory").and_then(|value| raw_child(value, "pipelineV2"));
     normalize_pipeline_extraction(pipeline, raw_pipeline)?;
     normalize_pipeline_worker(pipeline, raw_pipeline);
+    normalize_pipeline_reranker(pipeline, raw_pipeline);
     normalize_pipeline_synthesis(pipeline, raw_pipeline)?;
     Ok(manifest)
 }
@@ -286,6 +287,22 @@ fn normalize_pipeline_worker(pipeline: &mut PipelineV2Config, raw: Option<&serde
         .or_else(|| raw.and_then(|value| raw_u64(value, "workerOverloadBackoffMs")));
     if let Some(value) = overload_backoff_ms {
         pipeline.worker.overload_backoff_ms = value.clamp(1_000, 300_000);
+    }
+}
+
+fn normalize_pipeline_reranker(
+    pipeline: &mut PipelineV2Config,
+    raw: Option<&serde_yml::Value>,
+) {
+    let nested = raw
+        .and_then(|value| raw_child(value, "reranker"))
+        .and_then(|value| raw_child(value, "useExtractionModel"))
+        .and_then(serde_yml::Value::as_bool);
+    let flat = raw
+        .and_then(|value| raw_child(value, "rerankerUseExtractionModel"))
+        .and_then(serde_yml::Value::as_bool);
+    if let Some(value) = nested.or(flat) {
+        pipeline.reranker.use_extraction_model = value;
     }
 }
 
@@ -949,6 +966,57 @@ memory:
     }
 
     #[test]
+    fn reranker_use_extraction_model_loads_from_nested_or_flat_keys() {
+        let nested = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    reranker:
+      useExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let nested_pipeline = nested
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(nested_pipeline.reranker.use_extraction_model);
+
+        let flat = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    rerankerUseExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let flat_pipeline = flat
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(flat_pipeline.reranker.use_extraction_model);
+    }
+
+    #[test]
+    fn reranker_nested_key_takes_precedence_over_flat_key() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    rerankerUseExtractionModel: false
+    reranker:
+      useExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(pipeline.reranker.use_extraction_model);
+    }
+
+    #[test]
     fn extraction_fallback_provider_rejects_invalid_string_values() {
         let error = parse_manifest_result(
             r#"
@@ -1313,8 +1381,19 @@ impl Default for TraversalConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct RerankerConfig {
     pub enabled: bool,
+    /// Model name for the non-extraction reranker path. Only read when
+    /// `use_extraction_model` is false and a non-LLM reranker is wired up.
     pub model: String,
+    /// When true, uses the extraction LLM for reranking and recall summary.
+    /// `top_n`, `timeout_ms`, and `model` below are only read in this path.
+    /// Existing behavior (use_extraction_model: false) is unaffected by their
+    /// values. Defaults match the TS daemon.
+    pub use_extraction_model: bool,
+    /// Max candidates passed to the LLM reranker. Only used when
+    /// `use_extraction_model: true`. Default matches TS daemon (topN: 20).
     pub top_n: usize,
+    /// Shared timeout budget for rerank + summary LLM calls (ms). Only used
+    /// when `use_extraction_model: true`. Default matches TS daemon (2000 ms).
     pub timeout_ms: u64,
 }
 
@@ -1322,9 +1401,14 @@ impl Default for RerankerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "nomic-embed-text".to_string(),
-            top_n: 10,
-            timeout_ms: 5_000,
+            model: String::new(),
+            use_extraction_model: false,
+            // top_n and timeout_ms match TS daemon defaults (topN: 20,
+            // timeoutMs: 2000). These fields are only read when
+            // use_extraction_model is true, so existing behavior is
+            // unaffected when the toggle is off.
+            top_n: 20,
+            timeout_ms: 2_000,
         }
     }
 }

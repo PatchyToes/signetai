@@ -795,8 +795,32 @@ Only `query` is required.
 }
 ```
 
-`source` per result is one of `hybrid`, `vector`, or `keyword`. `method` on
-the response reflects whether vector search was available for this call.
+`source` per result is one of `hybrid`, `vector`, `keyword`, or `llm_summary`.
+`method` on the response reflects whether vector search was available for
+this call.
+
+When `memory.pipelineV2.reranker.useExtractionModel` is enabled, an
+additional synthesized summary card may be prepended to results. This card
+has `source: "llm_summary"`, `supplementary: true`, and an id of the form
+`summary:<sha1-12>`. It is only injected when `limit >= 2` so callers
+always receive at least one real memory to verify the summary against. The
+card is not stored in the database and does not affect access-time tracking.
+
+**Operational note**: `useExtractionModel` moves recall onto a live LLM
+call path. When auth mode is not `local`, the daemon enforces a dedicated
+rate-limit bucket — `auth.rateLimits.recallLlm` (default: 60 req/min per
+token). Configure it in `agent.yaml` alongside the other operation limits:
+
+```yaml
+auth:
+  mode: team
+  rateLimits:
+    recallLlm:
+      windowMs: 60000
+      max: 30
+```
+
+No additional permission level is required beyond `recall`.
 
 ### GET /api/memory/search
 

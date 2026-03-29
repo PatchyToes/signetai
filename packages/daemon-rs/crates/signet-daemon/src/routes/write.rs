@@ -878,9 +878,11 @@ mod tests {
                 },
                 pool,
                 None,
+                None, // llm provider
                 None,
                 AuthMode::Local,
                 None,
+                AuthRateLimiter::from_rules(&rules),
                 AuthRateLimiter::from_rules(&rules),
             )),
             dir,

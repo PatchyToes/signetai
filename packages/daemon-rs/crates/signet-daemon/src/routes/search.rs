@@ -1,10 +1,11 @@
 //! Search and recall route handlers.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -13,6 +14,10 @@ use signet_core::search::{
     RecallFilter, fts_search, merge_scores, touch_accessed, vec_search_scored,
 };
 
+use crate::auth::middleware::{authenticate_headers, require_rate_limit_guard};
+use crate::auth::types::AuthMode;
+use crate::reranker;
+use crate::routes::pipeline::is_loopback;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -59,10 +64,14 @@ pub struct RecallHit {
     pub who: Option<String>,
     pub project: Option<String>,
     pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supplementary: Option<bool>,
 }
 
 pub async fn recall(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<RecallBody>,
 ) -> impl IntoResponse {
     let query = body.query.trim().to_string();
@@ -72,6 +81,37 @@ pub async fn recall(
             Json(serde_json::json!({"error": "query is required"})),
         )
             .into_response();
+    }
+
+    // Rate-limit LLM-enabled recall independently of plain recall.
+    // Skipped in local auth mode; active in team/hybrid modes.
+    {
+        let (reranker_enabled, use_extraction_model) = state
+            .config
+            .manifest
+            .memory
+            .as_ref()
+            .and_then(|m| m.pipeline_v2.as_ref())
+            .map(|p| (p.reranker.enabled, p.reranker.use_extraction_model))
+            .unwrap_or((false, false));
+        if reranker_enabled && use_extraction_model && state.auth_mode != AuthMode::Local {
+            // authenticate_headers returns Err only for hard auth failures; in local
+            // mode we already returned above, so unwrap_or with unauthenticated is safe.
+            let auth = authenticate_headers(
+                state.auth_mode,
+                state.auth_secret.as_deref(),
+                &headers,
+                is_loopback(&peer),
+            )
+            .unwrap_or_else(|_| crate::auth::middleware::AuthState {
+                result: crate::auth::types::AuthResult::unauthenticated(),
+            });
+            if let Err(resp) =
+                require_rate_limit_guard(&auth, "recallLlm", &state.recall_llm_limiter, state.auth_mode, None)
+            {
+                return (*resp).into_response();
+            }
+        }
     }
 
     let limit = body.limit.unwrap_or(10);
@@ -257,6 +297,7 @@ pub async fn recall(
                             who: row.get(6)?,
                             project: row.get(7)?,
                             created_at: row.get(8)?,
+                            supplementary: None,
                         },
                     ))
                 })?
@@ -282,11 +323,151 @@ pub async fn recall(
         })
         .await;
 
+    // --- Optional LLM reranker + recall summary (parity with TS daemon) ---
+    // LLM calls are only made when the user has explicitly opted in via
+    // `memory.pipelineV2.reranker.enabled: true` AND
+    // `memory.pipelineV2.reranker.useExtractionModel: true`.
+    // Callers should be aware of the per-request LLM cost this incurs.
+    // The recall endpoint sits behind the daemon's existing auth middleware;
+    // operators should use token auth + rate limiting if recall is exposed
+    // beyond the local loopback.
+    let result = match result {
+        Ok(mut resp) if !resp.results.is_empty() => {
+            let (reranker_enabled, use_extraction_model) = state
+                .config
+                .manifest
+                .memory
+                .as_ref()
+                .and_then(|m| m.pipeline_v2.as_ref())
+                .map(|p| (p.reranker.enabled, p.reranker.use_extraction_model))
+                .unwrap_or((false, false));
+
+            if reranker_enabled && use_extraction_model {
+                let llm = state.llm.read().await.clone();
+                if let Some(ref provider) = llm {
+                    let timeout_ms = state
+                        .config
+                        .manifest
+                        .memory
+                        .as_ref()
+                        .and_then(|m| m.pipeline_v2.as_ref())
+                        .map(|p| p.reranker.timeout_ms)
+                        .unwrap_or(2_000);
+                    let top_n = state
+                        .config
+                        .manifest
+                        .memory
+                        .as_ref()
+                        .and_then(|m| m.pipeline_v2.as_ref())
+                        .map(|p| p.reranker.top_n)
+                        .unwrap_or(20);
+
+                    let candidates: Vec<(&str, &str, f64)> = resp
+                        .results
+                        .iter()
+                        .take(top_n)
+                        .map(|h| (h.id.as_str(), h.content.as_str(), h.score))
+                        .collect();
+
+                    let (updated_scores, summary) = reranker::rerank_and_summarize(
+                        provider,
+                        &resp.query,
+                        &candidates,
+                        timeout_ms,
+                    )
+                    .await;
+
+                    // Apply updated scores from LLM reranker.
+                    // Sort on full-precision blended score before rounding,
+                    // matching TS daemon ordering behavior.
+                    if let Some(scores) = updated_scores {
+                        let score_map: std::collections::HashMap<&str, f64> =
+                            scores.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+                        // Update with full-precision scores and sort first.
+                        let mut full_scores: Vec<(usize, f64)> = resp
+                            .results
+                            .iter()
+                            .enumerate()
+                            .map(|(i, h)| {
+                                let s = score_map.get(h.id.as_str()).copied().unwrap_or(h.score);
+                                (i, s)
+                            })
+                            .collect();
+                        full_scores.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let mut reordered: Vec<RecallHit> = full_scores
+                            .iter()
+                            .map(|(i, s)| {
+                                let mut hit = resp.results[*i].clone();
+                                hit.score = (s * 100.0).round() / 100.0;
+                                hit
+                            })
+                            .collect();
+                        std::mem::swap(&mut resp.results, &mut reordered);
+                    }
+
+                    // Inject summary card only when limit >= 2: one slot for
+                    // the summary, at least one slot for a real memory to
+                    // verify against. Matches TS daemon parity contract.
+                    if limit >= 2 {
+                        if let Some(text) = summary {
+                            let content = format!(
+                                "[model summary, verify against source memories] {text}"
+                            );
+                            let top_score =
+                                resp.results.first().map(|h| h.score).unwrap_or(0.5);
+                            let score = top_score.clamp(0.01, 1.0);
+
+                            // SHA-1 digest of query for stable id, matching TS daemon.
+                            use sha1::Digest;
+                            let hash = sha1::Sha1::digest(resp.query.as_bytes());
+                            let digest = format!("{hash:x}");
+                            let digest = &digest[..12];
+
+                            if resp.results.len() >= limit {
+                                resp.results.pop();
+                            }
+                            resp.results.insert(
+                                0,
+                                RecallHit {
+                                    id: format!("summary:{digest}"),
+                                    content: content.clone(),
+                                    content_length: content.len(),
+                                    truncated: false,
+                                    score,
+                                    source: "llm_summary".to_string(),
+                                    memory_type: "semantic".to_string(),
+                                    tags: None,
+                                    pinned: false,
+                                    importance: 0.9,
+                                    who: None,
+                                    project: None,
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                    supplementary: Some(true),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(resp)
+        }
+        other => other,
+    };
+
     match result {
         Ok(resp) => {
             // Update access tracking on a writable connection (fire-and-forget).
+            // Exclude supplementary cards (e.g. llm_summary) — they are not
+            // stored in the database and have no access-time row to update.
             if !resp.results.is_empty() {
-                let ids: Vec<String> = resp.results.iter().map(|h| h.id.clone()).collect();
+                let ids: Vec<String> = resp
+                    .results
+                    .iter()
+                    .filter(|h| h.supplementary != Some(true))
+                    .map(|h| h.id.clone())
+                    .collect();
                 let pool = state.pool.clone();
                 tokio::spawn(async move {
                     let _ = pool
@@ -330,6 +511,8 @@ pub struct SearchParams {
 
 pub async fn search_get(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> axum::response::Response {
     let q = params.q.unwrap_or_default().trim().to_string();
@@ -357,7 +540,9 @@ pub async fn search_get(
         until: None,
     };
 
-    recall(State(state), Json(body)).await.into_response()
+    recall(State(state), ConnectInfo(peer), headers, Json(body))
+        .await
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +557,8 @@ pub struct LegacySearchParams {
 
 pub async fn legacy_search(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(params): Query<LegacySearchParams>,
 ) -> axum::response::Response {
     let q = params.q.unwrap_or_default().trim().to_string();
@@ -397,7 +584,9 @@ pub async fn legacy_search(
         until: None,
     };
 
-    recall(State(state), Json(body)).await.into_response()
+    recall(State(state), ConnectInfo(peer), headers, Json(body))
+        .await
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

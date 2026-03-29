@@ -6,8 +6,10 @@
  * daemon.ts is now a thin HTTP wrapper that delegates here.
  */
 
+import { createHash } from "node:crypto";
 import { vectorSearch } from "@signet/core";
 import { getDbAccessor } from "./db-accessor";
+import { getLlmProvider } from "./llm";
 import { logger } from "./logger";
 import type { EmbeddingConfig, MemorySearchConfig, ResolvedMemoryConfig } from "./memory-config";
 import { constructContextBlocks } from "./pipeline/context-construction";
@@ -16,6 +18,7 @@ import { getGraphBoostIds, tokenizeGraphQuery } from "./pipeline/graph-search";
 import { resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
 import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
+import { createLlmReranker, summarizeRecallWithLlm } from "./pipeline/reranker-llm";
 import { FTS_STOP } from "./pipeline/stop-words";
 
 // ---------------------------------------------------------------------------
@@ -664,8 +667,13 @@ export async function hybridRecall(
 	}
 
 	// --- Optional reranker hook ---
+	let recallSummary: string | undefined;
+	// Remaining timeout budget to use for LLM summary after reranking.
+	// Set inside the reranker block; consumed after final results are assembled.
+	let summarizeLeft = 0;
 	if (cfg.pipelineV2.reranker.enabled) {
 		try {
+			const rerankStart = Date.now();
 			const topForRerank = scored.slice(0, cfg.pipelineV2.reranker.topN);
 			const rerankIds = topForRerank.map((s) => s.id);
 			const rerankPlaceholders = rerankIds.map(() => "?").join(", ");
@@ -690,8 +698,11 @@ export async function hybridRecall(
 				content: contentMap.get(s.id) ?? "",
 				score: s.score,
 			}));
-			// Use embedding reranker when query vector is available, else noop
-			const provider = queryVecF32 ? createEmbeddingReranker(getDbAccessor(), queryVecF32) : noopReranker;
+			const provider = cfg.pipelineV2.reranker.useExtractionModel
+				? createLlmReranker(getLlmProvider())
+				: queryVecF32
+					? createEmbeddingReranker(getDbAccessor(), queryVecF32)
+					: noopReranker;
 			const reranked = await rerank(query, candidates, provider, {
 				topN: cfg.pipelineV2.reranker.topN,
 				timeoutMs: cfg.pipelineV2.reranker.timeoutMs,
@@ -704,6 +715,20 @@ export async function hybridRecall(
 				const score = rerankedMap.get(s.id);
 				if (typeof score === "number" && Number.isFinite(score)) {
 					s.score = score;
+				}
+			}
+			if (cfg.pipelineV2.reranker.useExtractionModel) {
+				const elapsed = Date.now() - rerankStart;
+				const left = cfg.pipelineV2.reranker.timeoutMs - elapsed;
+				if (left <= 0) {
+					logger.warn("memory", "LLM summary skipped (reranker timeout budget exhausted)", {
+						timeoutMs: cfg.pipelineV2.reranker.timeoutMs,
+						elapsedMs: elapsed,
+					});
+				} else {
+					// Store remaining budget; summary is generated after final
+					// results are assembled so it is grounded in the recalled set.
+					summarizeLeft = left;
 				}
 			}
 			scored.sort((a, b) => b.score - a.score);
@@ -877,7 +902,10 @@ export async function hybridRecall(
 			}>,
 	);
 
-	// Update access tracking (don't fail if this fails)
+	// Update access tracking (don't fail if this fails).
+	// Uses topIds (real DB memory IDs from scored), not the final results
+	// array — so the synthetic llm_summary card injected later is never
+	// included here and never touches the memories table.
 	try {
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(
@@ -892,6 +920,8 @@ export async function hybridRecall(
 
 	const rowMap = new Map(rows.map((r) => [r.id, r]));
 	const recallTruncate = cfg.pipelineV2.guardrails.recallTruncateChars;
+	// No pre-decrement: always fetch `limit` memories. The summary card is
+	// injected after assembly and the array is capped to `limit` at that point.
 	const results: RecallResult[] = scored
 		.slice(0, limit)
 		.filter((s) => rowMap.has(s.id))
@@ -914,6 +944,46 @@ export async function hybridRecall(
 				created_at: r.created_at,
 			};
 		});
+
+	// Generate LLM summary from the final recalled set (not pre-filter candidates).
+	// Skip when limit < 2: can't fit a summary card without evicting the only
+	// real memory, which would leave the caller with nothing to verify against.
+	if (summarizeLeft > 0 && results.length > 0 && limit >= 2) {
+		try {
+			const summCandidates = results
+				.slice(0, 12)
+				.map((r) => ({ id: r.id, content: r.content, score: r.score }));
+			const s = await summarizeRecallWithLlm(getLlmProvider(), query, summCandidates, summarizeLeft);
+			if (s) recallSummary = s;
+		} catch (e) {
+			logger.warn("memory", "LLM summary failed (non-fatal)", {
+				error: e instanceof Error ? e.message : String(e),
+			});
+		}
+	}
+
+	if (recallSummary && limit >= 2) {
+		const digest = createHash("sha1").update(query).digest("hex").slice(0, 12);
+		const content = `[model summary, verify against source memories] ${recallSummary}`;
+		const score = results.length > 0 ? Math.max(0.01, Math.min(1, results[0].score)) : 0.5;
+		if (results.length >= limit) results.length = limit - 1;
+		results.unshift({
+			id: `summary:${digest}`,
+			content,
+			content_length: content.length,
+			truncated: false,
+			score,
+			source: "llm_summary",
+			type: "semantic",
+			tags: null,
+			pinned: false,
+			importance: 0.9,
+			who: "",
+			project: null,
+			created_at: new Date().toISOString(),
+			supplementary: true,
+		});
+	}
 
 	// --- Decision-rationale linking: auto-fetch linked rationale memories ---
 	const decisionIds = results.filter((r) => r.type === "decision").map((r) => r.id);
