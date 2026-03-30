@@ -149,9 +149,10 @@ async function daemonFetch<T>(
 		readonly method?: string;
 		readonly body?: unknown;
 		readonly timeout?: number;
+		readonly extraHeaders?: Readonly<Record<string, string>>;
 	} = {},
 ): Promise<FetchResult<T>> {
-	const { method = "GET", body, timeout = 10_000 } = options;
+	const { method = "GET", body, timeout = 10_000, extraHeaders } = options;
 
 	const init: RequestInit = {
 		method,
@@ -160,6 +161,7 @@ async function daemonFetch<T>(
 			"x-signet-runtime-path": "plugin",
 			"x-signet-actor": "mcp-server",
 			"x-signet-actor-type": "harness",
+			...extraHeaders,
 		},
 		signal: AbortSignal.timeout(timeout),
 	};
@@ -1314,6 +1316,10 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 					args: args ?? {},
 				},
 				timeout: 60_000,
+				// x-signet-agent-id intentionally omitted — the MCP server is
+				// workspace-level and lacks per-agent context. The marketplace
+				// route derives agent_id from auth claims (Phase 2: per-agent MCP sessions).
+				extraHeaders: { "x-signet-mcp-source": "agent" },
 			});
 
 			if (!result.ok) {
