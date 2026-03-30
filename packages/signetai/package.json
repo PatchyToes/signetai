@@ -1,6 +1,6 @@
 {
   "name": "signetai",
-  "version": "0.75.0",
+  "version": "0.87.1",
   "description": "Portable AI agent identity - own your agent, bring it anywhere",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "build": "bun run build:cli && bun run build:daemon && bun run build:dashboard",
     "build:cli": "bun build ../cli/src/cli.ts --outfile ./dist/cli.js --target node --external better-sqlite3",
     "build:daemon": "bun run build-daemon.ts",
-    "build:dashboard": "rm -rf ./dashboard && cp -r ../cli/dashboard/build ./dashboard 2>/dev/null || echo 'Dashboard not built yet'",
+    "build:dashboard": "bun ../../scripts/prepare-dashboard-bundle.ts .",
     "prepublishOnly": "bun run build"
   },
   "keywords": [

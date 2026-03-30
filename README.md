@@ -4,7 +4,7 @@
 
 # S I G N E T   A I
 
-**Stateful Runtime & Cognition for AI Agents**
+**Local-first persistent memory for AI agents**
 
 <a href="https://github.com/Signet-AI/signetai/actions"><img src="https://img.shields.io/github/actions/workflow/status/Signet-AI/signetai/release.yml?branch=main&style=for-the-badge" alt="CI status"></a>
 <a href="https://github.com/Signet-AI/signetai/releases"><img src="https://img.shields.io/github/v/release/Signet-AI/signetai?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
@@ -20,50 +20,151 @@
 
 ---
 
-**87.5% LoCoMo accuracy. 100% retrieval. Zero LLM calls at search time. [See how.](#locomo-benchmark)**
+**Persistent memory for AI agents, across sessions, tools, and environments.**
 
-Signet is a persistent cognition and local-first stateful runtime layer
-for AI agents. It gives your agent memory that works the way memory
-actually works: ambient, automatic, and not dependent on the agent
-deciding to remember.
+**TL;DR**
+- Installs under your existing harness, not instead of it
+- Captures and injects relevant memory automatically between sessions
+- Runs local-first, with inspectable storage and no vendor lock-in
 
-Your agent shouldn't have to call a "save memory" tool. It shouldn't
-search a database when it needs context. Signet extracts knowledge after
-sessions, builds a knowledge graph, and injects the right context before
-every prompt. The agent just has its memory. Like you have yours.
+Most agents only remember when explicitly told to.
 
-Everything runs locally. You own the data. The agent is yours.
+That is not memory, that's a filing cabinet.
 
-<table>
-<tr>
-<td><img src="public/signetposter-01.jpg" alt="Signet — your AI has a memory, you don't own it" height="280" /></td>
-<td><img src="public/memory-loop-v2.jpg" alt="Signet memory loop — extraction, decision, and retention flow" height="280" /></td>
-</tr>
-</table>
+Signet makes memory ambient. It extracts and injects context
+automatically, between sessions, before the next prompt starts.
+Your agent just has memory.
 
-| Feature | What it does |
+Structured memory, graph traversal, and hybrid retrieval matter, but
+they are not the point. They are substrate for the larger job Signet is
+building toward: deciding what should enter the model's context window
+right now, with enough precision to help instead of distract.
+
+Why teams adopt it:
+- less prompt re-explaining between sessions
+- one memory layer across Claude Code, OpenCode, OpenClaw, and Codex
+- clear visibility into what was recalled, why, and from which scope
+
+**Benchmark note:** early LoCoMo results show **87.5% answer accuracy**
+and **100% Hit@10 retrieval** on an **8-question full-stack sample**.
+Larger evaluation runs are in progress. [Details](#locomo-benchmark)
+
+## Quick start (about 5 minutes)
+
+```bash
+bun add -g signetai        # or: npm install -g signetai
+signet setup               # interactive setup wizard
+signet status              # confirm daemon + pipeline health
+signet dashboard           # open memory + retrieval inspector
+```
+
+If you already use Claude Code, OpenCode, OpenClaw, or Codex, keep your
+existing harness. Signet installs under it.
+
+### Docker self-hosting
+
+Run Signet as a containerized daemon with first-party Compose assets:
+
+```bash
+cd deploy/docker
+cp .env.example .env
+docker compose up -d --build
+```
+
+See [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) for token bootstrap,
+backup, and upgrade runbook details.
+
+## First proof of value (2-session test)
+
+Run this once:
+
+```bash
+signet remember "my primary stack is bun + typescript + sqlite"
+```
+
+Then in your next session, ask your agent:
+
+```text
+what stack am i using for this project?
+```
+
+You should see continuity without manually reconstructing context.
+If not, inspect recall and provenance in the dashboard or run:
+
+```bash
+signet recall "primary stack"
+```
+
+Want the deeper architecture view? Jump to [How it works](#how-it-works) or [Architecture](#architecture).
+
+## Core capabilities
+
+These are the product surface areas Signet is optimized around:
+
+| Core | What it does |
 |---|---|
-| 🖥️ CLI + Dashboard | Manage everything from the terminal or the built-in web UI |
-| 🧠 Ambient memory extraction | Sessions distilled automatically — no tool calls, no agent involvement |
-| 🕸️ Knowledge graph | Entities and relationships built at write time, traversed at recall |
-| 🔬 Post-fusion dampening | Gravity, hub, and resolution filters separate signal from noise at recall |
-| 📜 Lossless transcripts | Raw conversations preserved alongside extracted facts, nothing is lost |
-| 🎯 Predictive scorer | A model trained on your patterns decides what context to inject |
-| 🏠 Local-first | Extraction, embeddings, and storage run entirely on your machine |
-| 🔐 Secrets vault | API keys and tokens stored encrypted — the agent never sees them |
-| 🛠️ Skills | Installable, version-controlled capabilities your agent carries everywhere |
-| 🪪 Identity persistence | Same agent across sessions, platforms, and parallel runs |
-| 💾 Session continuity | Checkpoint-based recovery — the agent wakes up knowing what happened |
-| 👯 Multi-agent | Multiple agents sharing one install, fully isolated by agent scope *(in progress)* |
-| 📄 Document ingestion | Feed PDFs, markdown, and URLs directly into the memory pipeline |
-| 🔄 Git sync | Identity and memory auto-committed to your own repo — no vendor lock-in |
-| 🗄️ Open storage | All memory lives in SQLite and plain markdown — inspect, migrate, or script it yourself |
-| ⚖️ Apache 2.0 | Fully open source — use it, fork it, build on it |
-| 📦 SDK | Typed client, React hooks, and Vercel AI SDK middleware for building on top of Signet |
-| 🤝 Works with any harness | Claude Code, OpenClaw, OpenCode, Codex — bring what you use, Signet runs underneath |
-| 🔌 MCP server aggregation | Configure your MCP servers once — every connected harness gets them automatically |
-| 🏪 Marketplace | Browse and install community skills and MCP servers from [skills.sh](https://skills.sh) and [ClawHub](https://clawhub.ai) |
-| 👥 Team auth | RBAC, token-based access, and rate limiting for shared deployments |
+| 🧠 Ambient memory extraction | Sessions are distilled automatically, no memory tool calls required |
+| 🎯 Predictive context selection | Structured memory and session feedback build toward a scorer that learns what context is actually useful |
+| 💾 Session continuity | Checkpoint and transcript-backed context carried across sessions |
+| 🏠 Local-first storage | Data lives on your machine in SQLite and markdown, portable by default |
+| 🤝 Cross-harness runtime | Claude Code, OpenCode, OpenClaw, Codex, one shared memory substrate |
+
+## Is Signet right for you?
+
+Use Signet if you want:
+- memory continuity across sessions without manual prompt bootstrapping
+- local ownership of agent state and history
+- one memory layer across multiple agent harnesses
+
+Signet may be overkill if you only need short-lived chat memory inside a
+single hosted assistant.
+
+## Why you can trust this
+
+- runs local-first by default
+- memory is stored in SQLite + markdown
+- recall is inspectable with provenance and scopes
+- memory can be repaired (edit, supersede, delete, reclassify)
+- no vendor lock-in, your data stays portable
+
+## What keeps it reliable
+
+These systems improve quality and reliability of the core memory loop:
+
+| Supporting | What it does |
+|---|---|
+| 📜 Lossless transcripts | Raw session history preserved alongside extracted memories |
+| 🕸️ Structured retrieval substrate | Graph traversal + FTS5 + vector search produce bounded candidate context |
+| 🎯 Predictive scorer | Wired into the system as a maturing path toward learned reranking from session outcomes, including regret signals |
+| 🔬 Noise filtering | Hub and similarity controls reduce low-signal memory surfacing |
+| 📄 Document ingestion | Pull PDFs, markdown, and URLs into the same retrieval pipeline |
+| 🖥️ CLI + Dashboard | Operate and inspect the system from terminal or web UI |
+
+## Advanced capabilities (optional)
+
+These extend Signet for larger deployments and custom integrations:
+
+| Advanced | What it does |
+|---|---|
+| 🔐 Agent-blind secrets | Encrypted secret storage, injected at execution time, not exposed to agent text |
+| 👯 Multi-agent policies | Isolated/shared/group memory visibility for multiple named agents |
+| 🔄 Git sync | Identity and memory can be versioned in your own remote |
+| 📦 SDK + middleware | Typed client, React hooks, and Vercel AI SDK middleware |
+| 🔌 MCP aggregation | Register MCP servers once, expose across connected harnesses |
+| 👥 Team controls | RBAC, token policy, and rate limits for shared deployments |
+| 🏪 Ecosystem installs | Install skills and MCP servers from [skills.sh](https://skills.sh) and [ClawHub](https://clawhub.ai) |
+| ⚖️ Apache 2.0 | Fully open source, forkable, and self-hostable |
+
+## When memory is wrong
+
+Memory quality is not just recall quality. It is governance quality.
+
+Signet is built to support:
+- provenance inspection (where a memory came from)
+- scoped visibility controls (who can see what)
+- memory repair (edit, supersede, delete, or reclassify)
+- transcript fallback (verify extracted memory against raw source)
+- lifecycle controls (retention, decay, and conflict handling)
 
 ## Harness support
 
@@ -74,6 +175,7 @@ you already use. Signet handles the memory layer underneath it.
 | Harness | Status | Integration |
 |---|---|---|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Supported** | Hooks |
+| Forge | **First-party** | Native runtime / reference harness |
 | [OpenCode](https://github.com/sst/opencode) | **Supported** | Plugin + Hooks |
 | [OpenClaw](https://github.com/openclaw/openclaw) | **Supported** | Runtime plugin + NemoClaw compatible |
 | [Codex](https://github.com/openai/codex) | **Supported** | Hooks + MCP server |
@@ -106,29 +208,20 @@ prompts. These numbers are collected from published papers and repos.
 | 13 | [SLM Zero-LLM](https://arxiv.org/abs/2603.14588) | 60.4% | Judge | Yes (MIT) | Yes | No |
 | 14 | [Mem0](https://mem0.ai) (independent) | ~58% | Judge | Partial | No | Yes |
 
-**87.5% accuracy on an 8-question full-stack sample. 100% retrieval. Zero inference at search time.**
+**Current Signet run: 87.5% answer accuracy, 100% Hit@10 retrieval, MRR 0.615 on an 8-question sample.**
 
-100% Hit@10 means Signet found relevant context for every single question.
-Not one miss. The retrieval layer never came up empty. Every query walked
-the graph or searched and came back with something useful.
+We treat this as an encouraging early signal, not a final claim. The sample
+size is small and larger-scale runs are in progress.
 
-The 13% gap between "found the right memories" and "answered correctly" is
-prompt engineering and judge semantics, not retrieval failure. The single
-incorrect answer had the right memory at rank 3.
-
-MRR of 0.615 means the correct memory lands in the top 2 results on
-average. That's graph traversal doing its job, putting structurally
-relevant context at the top instead of hoping embeddings sort it out.
-
-This is a local-first, single-query system running on SQLite. No fleet of
-reader agents, no million-token context windows, no cloud dependency. Every
-system above Signet on this table requires cloud infrastructure, LLM calls
-at search time, or both.
+What this result does show today:
+- retrieval hit rate was 100% for this run (no empty recalls)
+- the correct supporting memory typically surfaced near the top (MRR 0.615)
+- search-time recall operated without extra LLM inference calls
 
 See [Benchmarks](./docs/BENCHMARKS.md) for methodology, progression, and
 how to run your own evaluation.
 
-## Install
+## Install (detailed)
 
 ```bash
 bun add -g signetai        # or: npm install -g signetai
@@ -149,7 +242,7 @@ Paste this to your AI agent:
 Install and fully configure Signet AI by following this guide exactly: https://signetai.sh/skill.md
 ```
 
-### Use it
+### CLI use
 
 ```bash
 signet status              # check daemon health
@@ -158,6 +251,27 @@ signet dashboard           # open the web UI
 signet remember "prefers bun over npm"
 signet recall "coding preferences"
 ```
+
+### Multi-agent
+
+Multiple named agents share one daemon and database. Each agent gets its
+own identity directory (`~/.agents/agents/<name>/`) and configurable
+memory visibility:
+
+```bash
+signet agent add alice --memory isolated   # alice sees only her own memories
+signet agent add bob --memory shared       # bob sees all global memories
+signet agent add ci --memory group --group eng  # ci sees memories from the eng group
+
+signet agent list                          # roster + policies
+signet remember "deploy key" --agent alice --private  # alice-only secret
+signet recall "deploy" --agent alice       # scoped to alice's visible memories
+signet agent info alice                    # identity files, policy, memory count
+```
+
+OpenClaw users get zero-config routing — session keys like
+`agent:alice:discord:direct:u123` are parsed automatically; no
+`agentId` header needed.
 
 In connected harnesses, skills work directly:
 
@@ -170,11 +284,11 @@ In connected harnesses, skills work directly:
 
 ```
 session ends
-  → distillation engine extracts entities, facts, and relationships
-  → knowledge graph links them to existing memory
-  → decisions auto-detected and promoted to always-surface constraints
-  → raw transcript preserved alongside extracted facts (lossless retention)
-  → predictive scorer ranks candidates against your interaction patterns
+  → raw transcript is preserved and distilled into structured memory
+  → entities, constraints, and relations are linked into a navigable graph
+  → traversal + flat search build a bounded candidate pool
+  → predictive scorer reranks candidates against your interaction patterns
+  → fail-open guards keep baseline ordering if the model is cold or unavailable
   → post-fusion dampening separates signal from noise
   → right context injected before the next prompt starts
 ```
@@ -191,11 +305,11 @@ CLI (signet)
   setup, knowledge, secrets, skills, hooks, git sync, service mgmt
 
 Daemon (@signet/daemon, localhost:3850)
-  |-- HTTP API (90+ endpoints across 18 domains)
+  |-- HTTP API (modular endpoints for memory, retrieval, auth, and tooling)
   |-- Distillation Layer
   |     extraction -> decision -> graph -> retention
   |-- Retrieval
-  |     traversal-primary -> cosine re-scoring -> dampening -> hybrid fallback
+  |     traversal + flat search -> fusion -> dampening
   |-- Lossless Transcripts
   |     raw session storage -> expand-on-recall join
   |-- Hints Worker
@@ -203,7 +317,7 @@ Daemon (@signet/daemon, localhost:3850)
   |-- Inline Entity Linker
   |     write-time entity extraction (no LLM), decision auto-protection
   |-- Predictive Scorer
-  |     entity-weight traversal, per-user trained model
+  |     learned relevance model over structured candidates
   |-- Document Worker
   |     ingest -> chunk -> embed -> index
   |-- MCP Server
@@ -211,7 +325,9 @@ Daemon (@signet/daemon, localhost:3850)
   |-- Auth Middleware
   |     local / team / hybrid, RBAC, rate limiting
   |-- File Watcher
-        identity sync, git auto-commit
+        identity sync, per-agent workspace sync, git auto-commit
+  |-- Multi-Agent
+        roster sync, agent_id scoping, read-policy SQL enforcement
 
 Core (@signet/core)
   types, identity, SQLite, hybrid search, graph traversal
@@ -220,7 +336,7 @@ SDK (@signet/sdk)
   typed client, React hooks, Vercel AI SDK middleware
 
 Connectors
-  claude-code, opencode, openclaw, codex
+  claude-code, opencode, openclaw, codex, oh-my-pi, forge
 ```
 
 ## Packages
@@ -231,11 +347,14 @@ Connectors
 | [`@signet/cli`](./packages/cli) | CLI, setup wizard, dashboard |
 | [`@signet/daemon`](./packages/daemon) | API server, distillation layer, auth, analytics, diagnostics |
 | [`@signet/sdk`](./packages/sdk) | Typed client, React hooks, Vercel AI SDK middleware |
+| [`packages/forge`](./packages/forge) | Forge native terminal harness and reference runtime implementation |
 | [`@signet/connector-base`](./packages/connector-base) | Shared connector primitives and utilities |
 | [`@signet/connector-claude-code`](./packages/connector-claude-code) | Claude Code integration |
 | [`@signet/connector-opencode`](./packages/connector-opencode) | OpenCode integration |
 | [`@signet/connector-openclaw`](./packages/connector-openclaw) | OpenClaw integration |
 | [`@signet/connector-codex`](./packages/connector-codex) | Codex CLI integration |
+| [`@signet/connector-oh-my-pi`](./packages/connector-oh-my-pi) | Oh My Pi integration |
+| [`@signet/oh-my-pi-extension`](./packages/oh-my-pi-extension) | Oh My Pi extension bridge |
 | [`@signet/opencode-plugin`](./packages/opencode-plugin) | OpenCode runtime plugin — memory tools and session hooks |
 | [`@signetai/signet-memory-openclaw`](./packages/adapters/openclaw) | OpenClaw runtime plugin |
 | [`@signet/extension`](./packages/extension) | Browser extension for Chrome and Firefox |
@@ -292,19 +411,33 @@ cd packages/daemon && bun run dev        # Daemon dev (watch mode)
 cd packages/cli/dashboard && bun run dev # Dashboard dev
 ```
 
-Requirements: Node.js 18+, Bun, Ollama (recommended) or OpenAI API key. macOS or Linux.
+Requirements:
+
+- Node.js 18+ or Bun
+- macOS or Linux
+- Optional for harness integrations: Claude Code, Codex, OpenCode, or OpenClaw
+
+Embeddings (choose one):
+
+- **Built-in** (recommended) — no extra setup, runs locally via ONNX (`nomic-embed-text-v1.5`)
+- **Ollama** — alternative local option, requires `nomic-embed-text` model
+- **OpenAI** — cloud option, requires `OPENAI_API_KEY`
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](./docs/CONTRIBUTING.md). Build on existing patterns.
-Open an issue before contributing significant features. Read the
+New to open source? Start with [Your First PR](./docs/FIRST-PR.md).
+For code conventions and project structure, see
+[CONTRIBUTING.md](./docs/CONTRIBUTING.md). Open an issue before
+contributing significant features. Read the
 [AI Policy](./AI_POLICY.md) before submitting AI-assisted work.
 
 ## Contributors
 
 <p align="left">
-  <a href="https://github.com/NicholaiVogel"><img src="https://avatars.githubusercontent.com/u/217880623?v=4&s=48" width="48" height="48" alt="NicholaiVogel" title="NicholaiVogel"/></a> <a href="https://github.com/BusyBee3333"><img src="https://avatars.githubusercontent.com/u/241850310?v=4&s=48" width="48" height="48" alt="BusyBee3333" title="BusyBee3333"/></a> <a href="https://github.com/stephenwoska2-cpu"><img src="https://avatars.githubusercontent.com/u/258141506?v=4&s=48" width="48" height="48" alt="stephenwoska2-cpu" title="stephenwoska2-cpu"/></a> <a href="https://github.com/PatchyToes"><img src="https://avatars.githubusercontent.com/u/256889430?v=4&s=48" width="48" height="48" alt="PatchyToes" title="PatchyToes"/></a> <a href="https://github.com/aaf2tbz"><img src="https://avatars.githubusercontent.com/u/260091788?v=4&s=48" width="48" height="48" alt="aaf2tbz" title="aaf2tbz"/></a>
+  <a href="https://github.com/NicholaiVogel"><img src="https://avatars.githubusercontent.com/u/217880623?v=4&s=48" width="48" height="48" alt="NicholaiVogel" title="NicholaiVogel"/></a> <a href="https://github.com/BusyBee3333"><img src="https://avatars.githubusercontent.com/u/241850310?v=4&s=48" width="48" height="48" alt="BusyBee3333" title="BusyBee3333"/></a> <a href="https://github.com/stephenwoska2-cpu"><img src="https://avatars.githubusercontent.com/u/258141506?v=4&s=48" width="48" height="48" alt="stephenwoska2-cpu" title="stephenwoska2-cpu"/></a> <a href="https://github.com/PatchyToes"><img src="https://avatars.githubusercontent.com/u/256889430?v=4&s=48" width="48" height="48" alt="PatchyToes" title="PatchyToes"/></a> <a href="https://github.com/aaf2tbz"><img src="https://avatars.githubusercontent.com/u/260091788?v=4&s=48" width="48" height="48" alt="aaf2tbz" title="aaf2tbz"/></a> <a href="https://github.com/ddasgupta4"><img src="https://avatars.githubusercontent.com/ddasgupta4?v=4&s=48" width="48" height="48" alt="ddasgupta4" title="ddasgupta4"/></a> <a href="https://github.com/alcar2364"><img src="https://avatars.githubusercontent.com/alcar2364?v=4&s=48" width="48" height="48" alt="alcar2364" title="alcar2364"/></a> <a href="https://github.com/maximhar"><img src="https://avatars.githubusercontent.com/maximhar?v=4&s=48" width="48" height="48" alt="maximhar" title="maximhar"/></a>
 </p>
+
+Made with love by members of Dashore Incubator & friends of Jake Shore and Nicholai Vogel.
 
 ## License
 

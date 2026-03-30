@@ -7,7 +7,10 @@ section: "Reference"
 
 # Harnesses
 
-Harnesses are the AI platforms and tools that Signet integrates with. Signet syncs your agent identity and [[memory]] to each one via the [[connectors|connector framework]].
+Harnesses are the AI platforms and tools that Signet integrates with.
+Some are external platforms reached through connectors. Forge is the
+first-party native harness and the reference runtime implementation for
+the Signet runtime contract.
 
 > **Path note:** `$SIGNET_WORKSPACE` means your active Signet workspace path.
 > Default is `~/.agents`, configurable via `signet workspace set <path>`.
@@ -47,6 +50,77 @@ You can also trigger a manual re-sync:
 ```bash
 curl -X POST http://localhost:3850/api/harnesses/regenerate
 ```
+
+---
+
+## Forge
+
+Forge is Signet's native terminal harness. Unlike external harness
+integrations, it does not need hook/config patching because it speaks to
+the daemon directly as the host runtime.
+
+### Management surface
+
+Forge remains a separate product command:
+
+```bash
+forge
+```
+
+Signet can also manage Forge installs directly:
+
+```bash
+signet forge install
+signet forge update
+signet forge status
+signet forge doctor
+```
+
+Managed installs place the binary in `~/.config/signet/bin`. Add that directory to your `PATH` if you want `forge` available in a normal shell.
+
+Managed binary downloads currently support macOS arm64, macOS x64, Linux x64, and Linux arm64.
+On other platforms, install Forge from source or use a local standalone build.
+
+Install/update commands prompt for an explicit development warning
+acknowledgement. For automation:
+
+```bash
+signet forge install --yes
+signet forge update --yes
+```
+
+### Runtime role
+
+- first-party native harness
+- reference implementation of the Signet runtime contract
+- direct daemon client for memory, hooks, skills, secrets, and MCP
+
+Forge is still represented as a harness id (`forge`) in Signet config,
+setup detection, and dashboard surfaces.
+
+
+## Lossless Working Memory Fidelity (Closure Wave)
+
+This matrix is the source of truth for closure-wave fidelity and degraded
+mode expectations across harness paths.
+
+| Harness path | Prompt retrieval order | Thread-head continuity | Compaction artifact persistence | Forced post-event MEMORY refresh |
+|---|---|---|---|---|
+| TS daemon (primary) | hybrid -> temporal-fallback -> transcript-fallback | yes | yes | yes (session-summary + compaction-complete) |
+| daemon-rs shadow | hybrid-style scoped recall with temporal/transcript fallback | yes (agent-scoped retrieval path) | partial (hook route persistence only) | degraded (full event-driven refresh parity follows rust cutover wave) |
+
+Degraded mode rules:
+
+- When a harness/runtime path cannot emit every lifecycle event, Signet must
+  document the missing surface explicitly instead of implying full parity.
+- Compaction/session-summary forced-refresh guarantees are currently full in
+  TS daemon and degraded in daemon-rs shadow path.
+- Watcher-driven harness identity sync (batched `AGENTS.md` / `USER.md` /
+  `MEMORY.md` propagation, queued reruns during active sync, and generated
+  `SIGNET-ARCHITECTURE.md` refresh) is currently full in the TS daemon and
+  degraded in the daemon-rs shadow path, which does not yet own that watcher
+  pipeline.
+- Prompt-time anti-bleed scoping remains mandatory across all paths.
 
 ---
 
@@ -161,8 +235,9 @@ registers as an MCP server so Codex can call `signet_remember` and
 4. On session end, Codex fires `Stop` → calls `signet hook session-end -H codex` → Signet extracts memories from the transcript.
 5. The MCP server exposes `memory_store`, `memory_search`, and other memory tools that Codex can invoke directly during sessions.
 
-This gives Codex full parity with Claude Code — same hook pattern, same
-daemon endpoints, same memory injection quality.
+Codex matches the session-start, prompt-submit, and session-end path, but
+it does **not** currently expose the same compaction lifecycle fidelity as
+Claude Code or OpenCode.
 
 ### Supported hooks
 
@@ -258,6 +333,16 @@ in the config file during install:
 
 The plugin handles lifecycle hooks; MCP provides on-demand memory tools.
 
+### Supported hooks
+
+| Hook | Supported |
+|------|-----------|
+| session-start | yes |
+| user-prompt-submit | yes |
+| pre-compaction | yes |
+| compaction-complete | yes |
+| session-end | yes |
+
 ### Prerequisites
 
 - OpenCode installed
@@ -265,9 +350,57 @@ The plugin handles lifecycle hooks; MCP provides on-demand memory tools.
 
 ---
 
+## Oh My Pi (`oh-my-pi`)
+
+Oh My Pi uses a managed Signet runtime extension installed by
+`@signet/connector-oh-my-pi`. The extension forwards lifecycle events
+to the daemon and injects hidden Signet context into the session when
+needed.
+
+### Files managed by Signet
+
+| File | Description |
+|------|-------------|
+| `PI_CODING_AGENT_DIR/extensions/signet-oh-my-pi.js` | Managed extension bundle when `PI_CODING_AGENT_DIR` is set |
+| `~/.omp/agent/extensions/signet-oh-my-pi.js` | Managed extension bundle in the default Oh My Pi agent directory |
+
+### Managed extension
+
+During setup or connect, the connector writes a bundled
+`signet-oh-my-pi.js` file into the Oh My Pi extensions directory. If
+`PI_CODING_AGENT_DIR` is set, Signet uses that agent directory.
+Otherwise it writes to `~/.omp/agent/extensions/`.
+
+The install path is idempotent and only manages `signet-oh-my-pi.js`.
+Older Signet-managed `.mjs` installs are removed automatically on the
+next setup or sync run.
+
+### Runtime behavior
+
+- Existing unrelated Oh My Pi extensions are left untouched.
+- Signet refuses to overwrite a colliding unmanaged `signet-oh-my-pi.js`.
+- Daemon or network failures are fail-open, so prompt handling, compaction, session switches, and shutdown continue even if Signet is unavailable.
+- The extension persists hidden session-context and recall injections through `before_agent_start`, marks them with `attribution: "agent"`, and keeps them out of transcript reconstruction so memory-backed answers remain attributable without consuming user-attributed Copilot requests.
+- It does not currently add `/remember` or `/recall` tools, and it does not sync `AGENTS.md` into Oh My Pi.
+
+### Supported hooks
+
+| Hook | Supported |
+|------|-----------|
+| session-start | yes |
+| user-prompt-submit | yes |
+| pre-compaction | yes |
+| compaction-complete | yes |
+| session-end | yes |
+
+---
+
+
 ## OpenClaw
 
-OpenClaw is a desktop AI agent harness. Signet has the deepest integration here via the `@signetai/adapter-openclaw` package and the full hooks system.
+OpenClaw is the flagship harness for the lossless working-memory model.
+The plugin path gives the closest match to the full LCM runtime, while the
+legacy hook path remains compatibility-only.
 
 ### Files managed by Signet
 
@@ -350,6 +483,11 @@ await signet.onCompactionComplete({
 });
 ```
 
+When OpenClaw only exposes compaction metadata to the plugin hook, the
+runtime may read the latest compaction summary back from `sessionFile`
+before calling the daemon so the temporal DAG still receives the real
+artifact.
+
 **Manual memory operations:**
 ```javascript
 await signet.remember('nicholai prefers bun', { who: 'openclaw' });
@@ -358,14 +496,17 @@ const results = await signet.recall('coding preferences');
 
 ### MEMORY.md synthesis
 
-OpenClaw is the default harness for MEMORY.md synthesis. On the configured schedule, OpenClaw:
+The daemon synthesis worker is the primary runtime path for keeping
+`MEMORY.md` current. OpenClaw may still drive synthesis on a schedule by:
 
 1. Calls `GET /api/hooks/synthesis/config` to check if synthesis should run
 2. Calls `POST /api/hooks/synthesis` to get the synthesis prompt
 3. Runs the prompt through the configured model
 4. Posts the result to `POST /api/hooks/synthesis/complete`
 
-This keeps MEMORY.md up to date with a coherent summary of your memory database.
+Both paths write through the same merge-safe head record, so the rendered
+`MEMORY.md` stays shared across harnesses instead of becoming
+OpenClaw-specific.
 
 ### Hooks directory
 
@@ -422,6 +563,33 @@ To integrate Signet with a harness not listed here:
 4. **Check daemon health** — always verify `GET /health` returns 200 before making other calls.
 
 See [API.md](./API.md) for full endpoint documentation and [HOOKS.md](./HOOKS.md) for hook integration details.
+
+---
+
+## Working-Memory Fidelity Matrix
+
+All harnesses target the same model:
+
+- one agent
+- many sessions / branches
+- one shared `MEMORY.md` head
+- structured retrieval first
+- transcripts as fallback / deep history
+- compaction artifacts feeding the same temporal DAG
+
+Where they differ is lifecycle fidelity:
+
+| Harness | session-start | prompt-submit | pre-compaction | post-compaction | session-end | Notes |
+|---------|---------------|---------------|----------------|-----------------|-------------|-------|
+| OpenCode plugin | yes | yes | yes | yes | yes | Reference full-fidelity path |
+| OpenClaw plugin | yes | yes | yes | yes | yes | Flagship path; post-compaction may read summary back from `sessionFile` when the hook only exposes metadata |
+| Oh My Pi extension (v1) | yes | yes | yes | yes | yes | Lifecycle events only; no Signet memory tools or AGENTS.md sync yet |
+| Claude Code | yes | yes | yes | no | yes | Good continuity, degraded after-compaction fidelity |
+| Codex | yes | yes | no | no | yes | Solid baseline, degraded compaction fidelity |
+| OpenClaw legacy hooks | manual `/context` | no | no | no | no | Compatibility-only, not full parity |
+
+The docs should be read literally. If a hook surface is absent here, that
+mode is degraded rather than silently assumed.
 
 ---
 

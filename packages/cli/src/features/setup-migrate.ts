@@ -8,6 +8,7 @@ import {
 	type SetupDetection,
 	type SkillsResult,
 	ensureUnifiedSchema,
+	findSignetForgeBinary,
 	formatYaml,
 	importMemoryLogs,
 	resolvePrimaryPackageManager,
@@ -20,11 +21,15 @@ import open from "open";
 import ora from "ora";
 import { daemonAccessLines } from "../lib/network.js";
 import Database from "../sqlite.js";
+import { installForge, managedForgeInstallSupportedOnCurrentPlatform } from "./forge.js";
+import { buildSetupPipeline, defaultExtractionModel } from "./setup-pipeline.js";
+import { enforceSetupProtection, printSetupProtectionSummary, refreshSnapshotProtection } from "./setup-protection.js";
 import {
 	type EmbeddingProviderChoice,
 	type ExtractionProviderChoice,
 	getEmbeddingDimensions,
 	readErr,
+	readHarnesses,
 	readRecord,
 	readString,
 } from "./setup-shared.js";
@@ -39,6 +44,8 @@ export async function runExistingSetupWizard(
 		nonInteractive?: boolean;
 		openDashboard?: boolean;
 		skipGit?: boolean;
+		allowUnprotectedWorkspace?: boolean;
+		createLocalBackup?: boolean;
 		embeddingProvider?: EmbeddingProviderChoice;
 		embeddingModel?: string;
 		extractionProvider?: ExtractionProviderChoice;
@@ -49,6 +56,18 @@ export async function runExistingSetupWizard(
 
 	try {
 		const templatesDir = deps.getTemplatesDir();
+		if (
+			options?.nonInteractive === true &&
+			options.allowUnprotectedWorkspace !== true &&
+			options.createLocalBackup !== true
+		) {
+			await enforceSetupProtection({
+				basePath,
+				nonInteractive: true,
+				allowUnprotectedWorkspace: false,
+				createLocalBackup: false,
+			});
+		}
 
 		if (!existsSync(basePath)) {
 			mkdirSync(basePath, { recursive: true });
@@ -95,6 +114,30 @@ export async function runExistingSetupWizard(
 		if (detection.harnesses.openclaw) detectedHarnesses.push("openclaw");
 		if (detection.harnesses.opencode) detectedHarnesses.push("opencode");
 		if (detection.harnesses.codex) detectedHarnesses.push("codex");
+		const configuredHarnessList = readHarnesses(existingConfig.harnesses);
+		if (detection.harnesses.ohMyPi || configuredHarnessList.includes("oh-my-pi")) detectedHarnesses.push("oh-my-pi");
+		const wantsForge = detection.harnesses.forge || configuredHarnessList.includes("forge");
+		const installedForgePath = findSignetForgeBinary(basePath);
+		if (wantsForge && installedForgePath) {
+			detectedHarnesses.push("forge");
+		} else if (wantsForge) {
+			if (!managedForgeInstallSupportedOnCurrentPlatform()) {
+				throw new Error(
+					`Forge is configured, but Signet-managed Forge binaries are only available on macOS/Linux arm64/x64. Install Forge separately on ${process.platform} ${process.arch}, then rerun ${chalk.cyan("signet setup")}.`,
+				);
+			}
+			spinner.text = "Installing Forge...";
+			await installForge(
+				{},
+				{
+					agentsDir: basePath,
+					defaultPort: deps.DEFAULT_PORT,
+					getTemplatesDir: deps.getTemplatesDir,
+					isDaemonRunning: deps.isDaemonRunning,
+				},
+			);
+			detectedHarnesses.push("forge");
+		}
 		const packageManager = resolvePrimaryPackageManager({ agentsDir: basePath, env: process.env });
 		const existingAgent = readRecord(existingConfig.agent);
 
@@ -148,36 +191,51 @@ export async function runExistingSetupWizard(
 			};
 		}
 
-		if (options?.extractionProvider && options.extractionProvider !== "none") {
+		if (options?.extractionProvider) {
 			const memory = readRecord(config.memory);
-			memory.pipelineV2 = {
-				enabled: true,
-				extraction: {
-					provider: options.extractionProvider,
-					model:
-						options.extractionModel ||
-						(options.extractionProvider === "claude-code"
-							? "haiku"
-							: options.extractionProvider === "codex"
-								? "gpt-5.3-codex"
-								: options.extractionProvider === "opencode"
-									? "anthropic/claude-haiku-4-5-20251001"
-									: options.extractionProvider === "openrouter"
-										? "openai/gpt-4o-mini"
-										: "glm-4.7-flash"),
-				},
-				semanticContradictionEnabled: true,
-				graph: { enabled: true },
-				reranker: { enabled: true },
-				autonomous: { enabled: true, allowUpdateDelete: true },
-				predictor: { enabled: true },
-				predictorPipeline: { agentFeedback: true, trainingTelemetry: false },
-			};
+			memory.pipelineV2 = buildSetupPipeline(
+				options.extractionProvider,
+				options.extractionModel || defaultExtractionModel(options.extractionProvider),
+			);
 			config.memory = memory;
 		}
 
 		if (!existsSync(join(basePath, "agent.yaml"))) {
 			writeFileSync(join(basePath, "agent.yaml"), formatYaml(config));
+		}
+
+		const agentsPath = join(basePath, "AGENTS.md");
+		if (!existsSync(agentsPath)) {
+			const agentsTemplate = join(templatesDir, "AGENTS.md.template");
+			if (existsSync(agentsTemplate)) {
+				const content = readFileSync(agentsTemplate, "utf-8").replace(/\{\{AGENT_NAME\}\}/g, agentName);
+				writeFileSync(agentsPath, content);
+			} else {
+				writeFileSync(
+					agentsPath,
+					`# ${agentName}\n\nThis is your agent identity file. Define your agent's personality, capabilities,\nand behaviors here. This file is shared across all your AI tools.\n`,
+				);
+			}
+		}
+
+		const docs = [
+			{ name: "MEMORY.md", template: "MEMORY.md.template" },
+			{ name: "SOUL.md", template: "SOUL.md.template" },
+			{ name: "IDENTITY.md", template: "IDENTITY.md.template" },
+			{ name: "USER.md", template: "USER.md.template" },
+		];
+
+		for (const doc of docs) {
+			const path = join(basePath, doc.name);
+			if (existsSync(path)) {
+				continue;
+			}
+			const template = join(templatesDir, doc.template);
+			if (!existsSync(template)) {
+				continue;
+			}
+			const content = readFileSync(template, "utf-8").replace(/\{\{AGENT_NAME\}\}/g, agentName);
+			writeFileSync(path, content);
 		}
 
 		spinner.text = "Initializing database...";
@@ -189,6 +247,13 @@ export async function runExistingSetupWizard(
 		}
 		runMigrations(db);
 		db.close();
+
+		let protection = await enforceSetupProtection({
+			basePath,
+			nonInteractive: options?.nonInteractive === true,
+			allowUnprotectedWorkspace: options?.allowUnprotectedWorkspace === true,
+			createLocalBackup: options?.createLocalBackup === true,
+		});
 
 		let importResult: ImportResult | null = null;
 		if (detection.hasMemoryDir && detection.memoryLogCount > 0) {
@@ -245,6 +310,17 @@ export async function runExistingSetupWizard(
 			}
 		}
 
+		if (protection.state === "snapshot") {
+			spinner.text = "Refreshing workspace snapshot...";
+			protection = refreshSnapshotProtection(basePath, protection);
+		}
+
+		let committed = false;
+		if (options?.skipGit !== true && gitEnabled) {
+			const date = new Date().toISOString().split("T")[0];
+			committed = await deps.gitAddAndCommit(basePath, `${date}_signet-setup`);
+		}
+
 		spinner.text = "Starting daemon...";
 		const daemonStarted = await deps.startDaemon(basePath);
 
@@ -283,14 +359,12 @@ export async function runExistingSetupWizard(
 			}
 		}
 
-		if (options?.skipGit !== true && gitEnabled) {
-			const date = new Date().toISOString().split("T")[0];
-			const committed = await deps.gitAddAndCommit(basePath, `${date}_signet-setup`);
-			if (committed) {
-				console.log(chalk.dim("  ✓ Changes committed to git"));
-			}
+		if (committed) {
+			console.log(chalk.dim("  ✓ Changes committed to git"));
 		}
 
+		console.log();
+		printSetupProtectionSummary(protection);
 		console.log();
 		if (options?.nonInteractive === true) {
 			if (options.openDashboard === true) {
@@ -307,6 +381,9 @@ export async function runExistingSetupWizard(
 		console.log(chalk.cyan("  → Next step: Say '/onboarding' to personalize your agent"));
 		console.log(chalk.dim("    This will walk you through setting up your agent's personality,"));
 		console.log(chalk.dim("    communication style, and your preferences."));
+		if (protection.state === "bypass") {
+			console.log(chalk.red("    Backup warning: this workspace is still unprotected."));
+		}
 	} catch (err) {
 		spinner.fail(chalk.red("Setup failed"));
 		console.error(err);

@@ -313,6 +313,7 @@ function main(): void {
 		}
 
 		for (const ref of spec.informedBy) {
+			if (/^(arxiv:|https?:|doi:)/.test(ref)) continue;
 			if (!existsSync(resolve(ROOT, ref))) {
 				failures.push(`informed_by path does not exist for ${spec.id}: ${ref}`);
 			}

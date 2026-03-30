@@ -24,11 +24,11 @@ All files live in your active Signet workspace.
 | File | Purpose |
 |------|---------|
 | `agent.yaml` | Main configuration and manifest |
-| `AGENTS.md` | Agent identity and instructions (synced to harnesses) |
-| `SOUL.md` | Personality and tone |
-| `MEMORY.md` | Working memory summary (auto-generated) |
-| `IDENTITY.md` | Optional identity metadata (name, creature, vibe) |
-| `USER.md` | Optional user preferences and profile |
+| `AGENTS.md` | Agent-managed operating rules and instructions (synced to harnesses) |
+| `SOUL.md` | Agent-managed personality, tone, values, and temperament |
+| `MEMORY.md` | System-managed working memory summary (auto-generated, do not edit manually) |
+| `IDENTITY.md` | Agent-managed identity metadata |
+| `USER.md` | Agent-managed user profile and relationship context |
 
 The loader checks `agent.yaml`, `AGENT.yaml`, and `config.yaml` in that
 order, using the first file it finds. All sections are optional; omitting
@@ -80,6 +80,7 @@ owner:
   name: "User Name"
 
 harnesses:
+  - forge
   - claude-code
   - openclaw
   - opencode
@@ -108,8 +109,12 @@ memory:
     enabled: true
     shadowMode: false
     extraction:
-      provider: claude-code
-      model: haiku
+      provider: ollama
+      model: qwen3:4b
+    synthesis:
+      enabled: true
+      provider: ollama
+      model: qwen3:4b
     graph:
       enabled: true
     autonomous:
@@ -122,6 +127,11 @@ hooks:
     includeIdentity: true
     includeRecentContext: true
     recencyBias: 0.7
+  userPromptSubmit:
+    enabled: true
+    recallLimit: 10
+    maxInjectChars: 500
+    minScore: 0.8
   preCompaction:
     includeRecentMemories: true
     memoryLimit: 5
@@ -150,21 +160,22 @@ Core agent identity metadata.
 
 ### owner
 
-Optional owner identification. Reserved for future ERC-8128 verification.
+Optional owner identification. Reserved for future cryptographic identity
+verification.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `address` | string | Ethereum wallet address |
+| `address` | string | Cryptographic identity address or external identity ID, reserved for future use |
 | `localId` | string | Local user identifier |
-| `ens` | string | ENS domain name |
+| `ens` | string | Optional ENS or human-friendly identity alias |
 | `name` | string | Human-readable name |
 
 
 ### harnesses
 
-List of AI platforms to integrate with. Valid values: `claude-code`,
-`opencode`, `openclaw`. Support for `cursor`, `windsurf`, `chatgpt`, and
-`gemini` is planned.
+List of AI platforms to integrate with. Valid values: `forge`,
+`claude-code`, `opencode`, `openclaw`, and `codex`. Support for
+`cursor`, `windsurf`, `chatgpt`, and `gemini` is planned.
 
 
 ### embedding
@@ -244,7 +255,7 @@ process reads all memories and asks a model to write a coherent summary.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `harness` | string | `"openclaw"` | Which harness runs synthesis |
+| `harness` | string | `"openclaw"` | Which harness runs synthesis (`forge`, `openclaw`, `claude-code`, `codex`, `opencode`) |
 | `model` | string | `"sonnet"` | Model identifier |
 | `schedule` | string | `"daily"` | `"daily"`, `"weekly"`, or `"on-demand"` |
 | `max_tokens` | number | `4000` | Max output tokens |
@@ -300,17 +311,99 @@ Controls the LLM-based extraction stage. Supports multiple providers.
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `provider` | `"claude-code"` | — | `"ollama"`, `"openai"`, `"claude-code"`, `"opencode"`, `"codex"`, or `"native"` |
-| `model` | `"haiku"` | — | Model name for the configured provider |
-| `timeout` | `45000` | 5000-300000 ms | Extraction call timeout |
+| `provider` | `"ollama"` | — | `"none"`, `"ollama"`, `"claude-code"`, `"opencode"`, `"codex"`, `"anthropic"`, `"openrouter"`, or `"command"` |
+| `model` | `"qwen3:4b"` | — | Model name for the configured provider |
+| `timeout` | `90000` | 5000-300000 ms | Extraction call timeout |
 | `minConfidence` | `0.7` | 0.0-1.0 | Confidence threshold; facts below this are dropped |
+| `command` | — | — | Command provider config (`bin`, `args[]`, optional `cwd`, optional `env`) — required when `provider: "command"` |
+
+For safety, the intended extraction setups are:
+
+- `claude-code` on a Haiku model
+- `codex` on a GPT Mini model
+- local `ollama` with `nemotron-3-nano:4b` (preferred) or `qwen3:4b` (deprecated — Nemotron's superior reasoning makes Qwen3 the weaker choice going forward; expect degraded extraction quality in future updates)
+
+Set `provider: none` to disable extraction entirely, which is the
+recommended default for VPS installs that should not make background LLM
+calls.
+
+Remote API extraction can accumulate extreme fees quickly because the
+pipeline runs continuously in the background. Use `anthropic`,
+`openrouter`, or remote OpenCode routes only when you explicitly want
+that billing behavior.
 
 When using `ollama`, the model must be available locally. When using
 `claude-code`, the Claude Code CLI must be on PATH. `codex` uses the
-Codex harness as the extraction provider. `native` uses the
-`@signet/native` Rust/NAPI module for local vector operations. Lower
-`minConfidence` to capture more facts at the cost of noise; raise it
-to write only high-confidence facts.
+Codex CLI as the extraction provider. Lower `minConfidence` to capture
+more facts at the cost of noise; raise it to write only high-confidence
+facts.
+
+For `provider: command`, the summary worker executes
+`memory.pipelineV2.extraction.command` in the summary job queue
+control-plane path. The transcript is written to a temporary file and
+its path is substituted into command arguments:
+
+- `$TRANSCRIPT` (alias `$TRANSCRIPT_PATH`) — temp transcript file path
+- `$SESSION_KEY` — session key (or empty string)
+- `$PROJECT` — project path (or empty string)
+- `$AGENT_ID` — agent id for the queued job
+- `$SIGNET_PATH` — active Signet workspace path
+
+For safety, user-derived tokens (`$SESSION_KEY`, `$PROJECT`,
+`$TRANSCRIPT`) are intended for args/env substitution. Keep `bin` and
+`cwd` fixed (or use trusted `$SIGNET_PATH` / `$AGENT_ID`), so command
+path resolution is not driven by transcript/session metadata.
+
+The command's stdout/stderr are not used as extraction output. The
+external command is responsible for writing memories to Signet state
+(for example, writing rows to `memories.db`).
+
+After command extraction succeeds, synthesis-provider hooks can still run
+(summary generation for continuity/predictor + DAG + synthesis trigger),
+but summary markdown writes and `insertSummaryFacts` are skipped in
+command mode to avoid duplicate memory writes. The external command
+remains the source of truth for fact persistence.
+
+Example:
+
+```yaml
+memory:
+  pipelineV2:
+    extraction:
+      provider: command
+      command:
+        bin: node
+        args:
+          - ./scripts/custom-extractor.mjs
+          - --transcript
+          - $TRANSCRIPT
+          - --session
+          - $SESSION_KEY
+```
+
+
+### Session synthesis (`synthesis`)
+
+Controls the provider used by the `summary-worker` for session summaries.
+This is separate from fact extraction once explicitly configured.
+
+If the `synthesis` block is omitted entirely, Signet falls back to the
+resolved extraction provider, model, endpoint, and timeout. Exception:
+when `extraction.provider: command`, synthesis falls back to synthesis
+defaults (`ollama` + default synthesis model/timeout) instead.
+
+| Field | Default | Range | Description |
+|-------|---------|-------|-------------|
+| `enabled` | `true` | — | Enable background session summary generation |
+| `provider` | inherited from extraction when omitted | — | `"none"`, `"ollama"`, `"claude-code"`, `"codex"`, `"opencode"`, `"anthropic"`, or `"openrouter"` |
+| `model` | inherited from extraction when omitted | — | Model name for the configured provider |
+| `endpoint` | inherited from extraction when omitted | — | Optional base URL override for Ollama, OpenCode, or OpenRouter |
+| `timeout` | inherited from extraction when omitted | 5000-300000 ms | Summary generation timeout |
+
+Set `provider: none` or `enabled: false` to disable background session
+summary synthesis entirely.
+
+`synthesis.provider: command` is invalid and rejected during config load.
 
 
 ### Worker (`worker`)
@@ -323,9 +416,13 @@ control.
 | `pollMs` | `2000` | 100-60000 ms | How often the worker polls for pending jobs |
 | `maxRetries` | `3` | 1-10 | Max retry attempts before a job goes to dead-letter |
 | `leaseTimeoutMs` | `300000` | 10000-600000 ms | Time before an uncompleted job lease expires |
+| `maxLoadPerCpu` | `0.8` | 0.1-8.0 | Load-per-CPU threshold above which extraction polling is deferred |
+| `overloadBackoffMs` | `30000` | 1000-300000 ms | Delay between poll attempts while host load stays above threshold |
 
 A job that exceeds `maxRetries` moves to dead-letter status and is
 eventually purged by the retention worker.
+Legacy flat keys `workerMaxLoadPerCpu` and `workerOverloadBackoffMs` are
+still accepted for backward compatibility.
 
 
 ### Knowledge Graph (`graph`)
@@ -423,12 +520,14 @@ supplementary mode is more conservative and better for freeform text.
 
 An optional reranking pass that runs after initial retrieval. An
 embedding-based reranker is built in (uses cached vectors, no extra
-LLM calls). Custom cross-encoder providers can also be used.
+LLM calls). Optionally, reranking can call the active extraction
+provider model.
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `enabled` | `true` | — | Enable the reranking pass |
 | `model` | `""` | — | Model name for the reranker (empty uses embedding-based) |
+| `useExtractionModel` | `false` | — | When `true`, use the extraction provider LLM for reranking and emit a synthesized summary card |
 | `topN` | `20` | 1-100 | Number of candidates to pass to the reranker |
 | `timeoutMs` | `2000` | 100-30000 ms | Timeout for the reranking call |
 
@@ -578,8 +677,8 @@ auth:
 
 In `"local"` mode the token secret is generated automatically and stored
 at `$SIGNET_WORKSPACE/.daemon/auth-secret`. In `"team"` and `"hybrid"` modes,
-wallet-based ERC-8128 signatures are used alongside or instead of local
-tokens.
+the daemon validates HMAC-signed bearer tokens with role and scope
+claims.
 
 
 ### Rate limits
@@ -645,6 +744,11 @@ hooks:
     includeIdentity: true
     includeRecentContext: true
     recencyBias: 0.7
+  userPromptSubmit:
+    enabled: true
+    recallLimit: 10
+    maxInjectChars: 500
+    minScore: 0.8
   preCompaction:
     includeRecentMemories: true
     memoryLimit: 5
@@ -670,6 +774,15 @@ a pre-compaction summary:
 | `memoryLimit` | `5` | How many recent memories to include |
 | `summaryGuidelines` | built-in | Custom instructions for session summary |
 
+`hooks.userPromptSubmit` controls per-prompt memory injection:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable per-prompt recall injection |
+| `recallLimit` | `10` | Max recall candidates considered |
+| `maxInjectChars` | `500` | Prompt-time injection character budget |
+| `minScore` | `0.8` | Minimum top recall score required before injecting memories |
+
 
 Environment Variables
 ---------------------
@@ -686,11 +799,29 @@ editing the config file is impractical.
 | `SIGNET_BIND` | `SIGNET_HOST` | Explicit bind address override (`0.0.0.0`, etc.) |
 | `SIGNET_LOG_FILE` | — | Optional explicit daemon log file path |
 | `SIGNET_LOG_DIR` | `$SIGNET_WORKSPACE/.daemon/logs` | Optional daemon log directory override |
+| `SIGNET_SQLITE_PATH` | — | macOS explicit SQLite dylib override used before Bun opens the database |
+| `SIGNET_SESSION_START_TIMEOUT` | `15000` | Session-start hook timeout in ms for Signet-managed clients and generated Claude Code hook configs |
+| `SIGNET_FETCH_TIMEOUT` | `15000` | Legacy fallback for session-start timeout in ms when `SIGNET_SESSION_START_TIMEOUT` is unset |
+| `SIGNET_TRUSTED_PROVIDER_ENDPOINT_HOSTS` | — | Comma-separated host allowlist for Anthropic endpoint overrides used during credentialed startup preflight (supports entries like `proxy.example.com` and `*.example.com`) |
 | `OPENAI_API_KEY` | — | OpenAI key when embedding provider is `openai` |
 
 `SIGNET_PATH` changes where Signet reads and writes all agent data for
 that process, including the config file itself. Use this for temporary
 overrides in CI or isolated local testing.
+
+On macOS, `SIGNET_SQLITE_PATH` can point at a `libsqlite3.dylib` build
+that supports `loadExtension()`. If it is set, Signet treats it as an
+authoritative override and refuses fallback if the file is missing. If
+it is unset, Signet checks `$SIGNET_WORKSPACE/libsqlite3.dylib`, where
+`$SIGNET_WORKSPACE` resolves from `SIGNET_PATH`, then
+`~/.config/signet/workspace.json`, then the default `~/.agents`, before
+trying standard Homebrew SQLite locations and finally falling back to
+Apple's system SQLite.
+
+For non-loopback Anthropic endpoint overrides, daemon-rs
+only sends provider credentials during startup preflight when the host
+is trusted. Official provider hosts are trusted by default. Add trusted
+proxy/gateway hosts through `SIGNET_TRUSTED_PROVIDER_ENDPOINT_HOSTS`.
 
 
 AGENTS.md

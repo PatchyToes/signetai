@@ -9,16 +9,57 @@
  * path for dedup safety.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readStaticIdentity } from "@signet/core";
+import {
+	readStaticIdentity,
+	resolveSessionStartTimeoutMs,
+	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
+} from "@signet/core";
 import { Type } from "@sinclair/typebox";
-import type { OpenClawPluginApi, OpenClawToolResult } from "./openclaw-types.js";
+import type {
+	OpenClawPluginApi,
+	OpenClawToolResult,
+	PluginHookAfterCompactionEvent,
+	PluginHookAgentContext,
+	PluginHookAgentEndEvent,
+	PluginHookBeforeAgentStartEvent,
+	PluginHookBeforeCompactionEvent,
+	PluginHookBeforePromptBuildEvent,
+} from "./openclaw-types.js";
 
 const DEFAULT_DAEMON_URL = "http://localhost:3850";
 const RUNTIME_PATH = "plugin" as const;
 const READ_TIMEOUT = 5000;
 const WRITE_TIMEOUT = 10000;
+const COMPACTION_HOOK_DEDUPE_MS = 1000;
+const SESSION_START_TIMEOUT = resolveSessionStartTimeoutMs(
+	process.env.SIGNET_SESSION_START_TIMEOUT ?? process.env.SIGNET_FETCH_TIMEOUT,
+);
+
+type DaemonFetchFailure = "offline" | "timeout" | "http" | "invalid-json";
+
+type DaemonFetchResult<T> =
+	| { readonly ok: true; readonly data: T }
+	| {
+			readonly ok: false;
+			readonly reason: DaemonFetchFailure;
+			readonly status?: number;
+	  };
+
+function errorName(err: unknown): string {
+	if (typeof err !== "object" || err === null) return "";
+	const name = Reflect.get(err, "name");
+	return typeof name === "string" ? name : "";
+}
+
+function isTimeoutError(err: unknown): boolean {
+	const name = errorName(err);
+	if (name === "AbortError" || name === "TimeoutError") return true;
+	const code = typeof err === "object" && err !== null ? Reflect.get(err, "code") : undefined;
+	return code === "ABORT_ERR";
+}
 
 // ---------------------------------------------------------------------------
 // Prompt extraction — OpenClaw wraps user messages in metadata envelopes.
@@ -190,6 +231,28 @@ function extractLastAssistantMessage(event: Record<string, unknown>): string | u
 	return undefined;
 }
 
+function isUserMessage(message: Record<string, unknown>): boolean {
+	const role = typeof message.role === "string" ? message.role.toLowerCase() : "";
+	const sender = typeof message.sender === "string" ? message.sender.toLowerCase() : "";
+
+	return role === "user" || role === "human" || sender === "user" || sender === "human";
+}
+
+function extractLastUserMessage(messages: unknown): string | undefined {
+	if (!Array.isArray(messages)) return undefined;
+
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const raw = messages[i];
+		if (!isRecord(raw)) continue;
+		if (!isUserMessage(raw)) continue;
+
+		const text = getMessageText(raw);
+		if (text) return text;
+	}
+
+	return undefined;
+}
+
 export interface SessionEndResult {
 	memoriesSaved: number;
 }
@@ -251,7 +314,6 @@ interface MarketplaceExposurePolicy {
 	readonly updatedAt: string;
 }
 
-
 function sanitizeToolSegment(value: string): string {
 	const normalized = value
 		.trim()
@@ -299,6 +361,20 @@ async function daemonFetch<T>(
 		timeout?: number;
 	} = {},
 ): Promise<T | null> {
+	const res = await daemonFetchResult<T>(daemonUrl, path, options);
+	if (!res.ok) return null;
+	return res.data;
+}
+
+async function daemonFetchResult<T>(
+	daemonUrl: string,
+	path: string,
+	options: {
+		method?: string;
+		body?: unknown;
+		timeout?: number;
+	} = {},
+): Promise<DaemonFetchResult<T>> {
 	const { method = "GET", body, timeout = READ_TIMEOUT } = options;
 
 	try {
@@ -316,27 +392,32 @@ async function daemonFetch<T>(
 
 		if (!res.ok) {
 			console.warn(`[signet] ${method} ${path} failed:`, res.status);
-			return null;
+			return { ok: false, reason: "http", status: res.status };
 		}
 
-		return (await res.json()) as T;
+		try {
+			const data = (await res.json()) as T;
+			return { ok: true, data };
+		} catch {
+			console.warn(`[signet] ${method} ${path} returned invalid JSON`);
+			return { ok: false, reason: "invalid-json", status: res.status };
+		}
 	} catch (e) {
+		if (isTimeoutError(e)) {
+			console.warn(`[signet] ${method} ${path} timed out after ${timeout}ms`);
+			return { ok: false, reason: "timeout" };
+		}
 		// Native fetch wraps OS errors as TypeError.cause, but polyfill/proxy
 		// layers may rethrow the OS error directly — check both forms.
 		const cause: unknown = e instanceof TypeError ? e.cause : e;
 		const isConnRefused =
-			typeof cause === "object" &&
-			cause !== null &&
-			"code" in cause &&
-			cause.code === "ECONNREFUSED";
+			typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ECONNREFUSED";
 		if (isConnRefused) {
-			console.warn(
-				`[signet] daemon unreachable at ${daemonUrl} — is the Signet daemon running? (${method} ${path})`,
-			);
+			console.warn(`[signet] daemon unreachable at ${daemonUrl} — is the Signet daemon running? (${method} ${path})`);
 		} else {
 			console.warn(`[signet] ${method} ${path} error:`, e);
 		}
-		return null;
+		return { ok: false, reason: "offline" };
 	}
 }
 
@@ -374,9 +455,12 @@ async function getDaemonPid(daemonUrl: string): Promise<number | null> {
 // ============================================================================
 
 // Wraps @signet/core's readStaticIdentity to produce a SessionStartResult.
-function staticFallback(): SessionStartResult | null {
+function staticFallback(reason: "offline" | "timeout" = "offline"): SessionStartResult | null {
 	const dir = process.env.SIGNET_PATH ?? join(homedir(), ".agents");
-	const inject = readStaticIdentity(dir);
+	const inject =
+		reason === "timeout"
+			? readStaticIdentity(dir, STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS)
+			: readStaticIdentity(dir);
 	if (!inject) return null;
 	return { identity: { name: "signet" }, memories: [], inject };
 }
@@ -394,7 +478,7 @@ export async function onSessionStart(
 		sessionKey?: string;
 	} = {},
 ): Promise<SessionStartResult | null> {
-	const result = await daemonFetch<SessionStartResult>(
+	const result = await daemonFetchResult<SessionStartResult>(
 		options.daemonUrl || DEFAULT_DAEMON_URL,
 		"/api/hooks/session-start",
 		{
@@ -406,10 +490,11 @@ export async function onSessionStart(
 				sessionKey: options.sessionKey,
 				runtimePath: RUNTIME_PATH,
 			},
-			timeout: READ_TIMEOUT,
+			timeout: SESSION_START_TIMEOUT,
 		},
 	);
-	if (result) return result;
+	if (result.ok) return result.data;
+	if (result.reason === "timeout") return staticFallback("timeout");
 	return staticFallback();
 }
 
@@ -467,7 +552,9 @@ export async function onCompactionComplete(
 	summary: string,
 	options: {
 		daemonUrl?: string;
+		agentId?: string;
 		sessionKey?: string;
+		project?: string;
 	} = {},
 ): Promise<boolean> {
 	const result = await daemonFetch<{ success: boolean }>(
@@ -478,7 +565,9 @@ export async function onCompactionComplete(
 			body: {
 				harness,
 				summary,
+				agentId: options.agentId,
 				sessionKey: options.sessionKey,
+				project: options.project,
 				runtimePath: RUNTIME_PATH,
 			},
 			timeout: WRITE_TIMEOUT,
@@ -491,7 +580,9 @@ export async function onSessionEnd(
 	harness: string,
 	options: {
 		daemonUrl?: string;
+		agentId?: string;
 		transcriptPath?: string;
+		transcript?: string;
 		sessionKey?: string;
 		sessionId?: string;
 		cwd?: string;
@@ -502,7 +593,9 @@ export async function onSessionEnd(
 		method: "POST",
 		body: {
 			harness,
+			agentId: options.agentId,
 			transcriptPath: options.transcriptPath,
+			...(options.transcript && { transcript: options.transcript }),
 			sessionKey: options.sessionKey,
 			sessionId: options.sessionId,
 			cwd: options.cwd,
@@ -560,7 +653,10 @@ export async function memoryStore(
 			tags:
 				typeof options.tags === "string"
 					? options.tags
-					: options.tags?.map((tag) => tag.trim()).filter((tag) => tag.length > 0).join(","),
+					: options.tags
+							?.map((tag) => tag.trim())
+							.filter((tag) => tag.length > 0)
+							.join(","),
 			who: options.who || "openclaw",
 		},
 		timeout: WRITE_TIMEOUT,
@@ -757,9 +853,9 @@ function textResult(text: string, details?: Record<string, unknown>): OpenClawTo
 // have a stable messageCount to key on).
 const SESSIONLESS_DEDUPE_MS = 1_000;
 
-function cleanupTimedMap(map: Map<string, number>, now: number): void {
+function cleanupTimedMap(map: Map<string, number>, now: number, ttlMs = SESSIONLESS_DEDUPE_MS): void {
 	for (const [key, ts] of map) {
-		if (now - ts > SESSIONLESS_DEDUPE_MS) {
+		if (now - ts > ttlMs) {
 			map.delete(key);
 		}
 	}
@@ -781,6 +877,149 @@ function buildSessionlessTurnKey(event: Record<string, unknown>, agentId: string
 	const normalizedPrompt = rawPrompt.trim().replace(/\s+/g, " ").slice(0, 240);
 	const messageCount = Array.isArray(event.messages) ? event.messages.length : -1;
 	return `${agentId ?? "-"}|${messageCount}|${normalizedPrompt}`;
+}
+
+function buildScopedSessionKey(sessionKey: string | undefined, agentId: string | undefined): string | undefined {
+	if (!sessionKey) return undefined;
+	return `${agentId ?? "-"}|${sessionKey}`;
+}
+
+function readString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Dual-source context resolution. Typed ctx fields take priority; legacy
+// extra event fields are the fallback for older OpenClaw versions.
+// ---------------------------------------------------------------------------
+
+interface ResolvedCtx {
+	readonly sessionKey: string | undefined;
+	readonly agentId: string | undefined;
+	readonly project: string | undefined;
+	readonly sessionFile: string | undefined;
+	readonly sessionId: string | undefined;
+}
+
+function resolveCtx(event: Record<string, unknown>, ctx: unknown): ResolvedCtx {
+	const c = isRecord(ctx) ? ctx : {};
+	return {
+		sessionKey: readString(c.sessionKey) ?? readString(event.sessionKey) ?? readString(c.sessionId) ?? readString(event.sessionId),
+		agentId: readString(c.agentId) ?? readString(event.agentId),
+		project: firstNonEmptyString(
+			c.workspaceDir,
+			c.project,
+			c.cwd,
+			c.workspace,
+			event.cwd,
+			event.project,
+			event.workspace,
+		),
+		sessionFile: readString(c.sessionFile) ?? readString(event.sessionFile) ?? readString(event.transcriptPath),
+		sessionId: readString(c.sessionId) ?? readString(event.sessionId),
+	};
+}
+
+function resolveCompactionSessionFile(
+	event: Record<string, unknown>,
+	sessionFile: string | undefined,
+): string | undefined {
+	const compaction = isRecord(event.compaction) ? event.compaction : undefined;
+	return firstNonEmptyString(
+		event.sessionFile,
+		event.session_file,
+		compaction?.sessionFile,
+		compaction?.session_file,
+		sessionFile,
+	);
+}
+
+function readSessionFileProject(sessionFile: string | undefined): string | undefined {
+	if (!sessionFile || !existsSync(sessionFile)) return undefined;
+
+	try {
+		const lines = readFileSync(sessionFile, "utf-8")
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
+		for (const line of lines) {
+			try {
+				const row = JSON.parse(line) as unknown;
+				if (!isRecord(row) || row.type !== "session") continue;
+				return firstNonEmptyString(row.cwd, row.project, row.workspace);
+			} catch {
+				// ignore malformed transcript lines
+			}
+		}
+	} catch {
+		// best effort only
+	}
+
+	return undefined;
+}
+
+function extractCompactionSummary(event: Record<string, unknown>, sessionFile: string | undefined): string | undefined {
+	const direct = readString(event.summary);
+	if (direct) return direct;
+
+	const compaction = isRecord(event.compaction) ? event.compaction : undefined;
+	const nested = readString(compaction?.summary);
+	if (nested) return nested;
+	if (!sessionFile || !existsSync(sessionFile)) return undefined;
+
+	try {
+		const lines = readFileSync(sessionFile, "utf-8")
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
+		for (let i = lines.length - 1; i >= 0; i--) {
+			try {
+				const row = JSON.parse(lines[i]) as unknown;
+				if (!isRecord(row) || row.type !== "compaction") continue;
+				const summary = readString(row.summary);
+				if (summary) return summary;
+			} catch {
+				// ignore malformed transcript lines
+			}
+		}
+	} catch {
+		// best effort only
+	}
+
+	return undefined;
+}
+
+function buildCompactionEventKey(
+	event: Record<string, unknown>,
+	options: {
+		agentId?: string;
+		sessionKey?: string;
+		summary?: string;
+	},
+): string {
+	const compaction = isRecord(event.compaction) ? event.compaction : undefined;
+	const parts = [
+		options.agentId ?? "-",
+		options.sessionKey ?? "-",
+		readString(event.runId) ?? readString(compaction?.runId) ?? "-",
+		readString(event.id) ?? readString(compaction?.id) ?? "-",
+		String(
+			readNumber(event.messageCount) ??
+				readNumber(event.compactingCount) ??
+				readNumber(event.compactedCount) ??
+				readNumber(compaction?.messageCount) ??
+				readNumber(compaction?.compactingCount) ??
+				readNumber(compaction?.compactedCount) ??
+				-1,
+		),
+		String(readNumber(event.tokenCount) ?? readNumber(compaction?.tokenCount) ?? -1),
+		options.summary ?? "-",
+	];
+	return parts.join("|");
 }
 
 async function registerMarketplaceProxyTools(
@@ -1305,7 +1544,7 @@ const signetPlugin = {
 
 		const claimedSessions = new Set<string>();
 		const sessionlessSessionStarts = new Map<string, number>();
-		// Maps sessionKey → {count, at} for per-turn idempotency. Entries are
+		// Maps scoped agent/session keys → {count, at} for per-turn idempotency. Entries are
 		// evicted on agent_end or lazily after SESSION_TURN_TTL_MS so crash/
 		// SIGKILL sessions don't accumulate indefinitely.
 		const SESSION_TURN_TTL_MS = 4 * 60 * 60 * 1000;
@@ -1315,21 +1554,212 @@ const signetPlugin = {
 		// the same event-loop tick don't both pass the guard before either await
 		// completes (injectedTurns is only written after the daemon responds).
 		const inFlightTurns = new Set<string>();
+		const beforeCompactions = new Map<string, number>();
+		const afterCompactions = new Map<string, number>();
 
-		const resolveHookContext = (
-			ctx: unknown,
-		): {
-			sessionKey?: string;
-			agentId?: string;
-		} => {
-			if (!isRecord(ctx)) {
-				return {};
+		// Mid-session checkpoint extraction: track turns per session and
+		// fire a checkpoint extract after every N turns. Prevents long-lived
+		// sessions (Discord bots, persistent agents) from going invisible.
+		const CHECKPOINT_TURN_THRESHOLD = 20;
+		// State per scoped session key: turn count, last seen message count (for
+		// dedup), and timestamp (for TTL eviction when agent_end never fires).
+		const checkpointTurns = new Map<string, { count: number; lastMsgCount: number | undefined; at: number }>();
+		// Legacy dedup: when both before_prompt_build and before_agent_start fire
+		// on the same turn without the messages field (older OpenClaw), only one
+		// should count the turn. Generation counters: bpb increments bpbGen each
+		// call; bas tracks the last generation it consumed in basGen. If
+		// basGen < bpbGen, bas is covered and skips the count (then syncs basGen).
+		// Avoids the stale-flag problem where a missed bas leaves the flag set
+		// for the next turn.
+		const bpbGen = new Map<string, number>();
+		const basGen = new Map<string, number>();
+
+		const maybeFireCheckpoint = (
+			sessionKey: string | undefined,
+			agentId: string | undefined,
+			project: string | undefined,
+			sessionFile: string | undefined,
+			msgCount: number | undefined,
+			messages: readonly unknown[] | undefined,
+		): void => {
+			const scopedKey = buildScopedSessionKey(sessionKey, agentId);
+			if (!scopedKey || !sessionKey) return;
+
+			const now = Date.now();
+			const state = checkpointTurns.get(scopedKey);
+
+			// Lazy TTL: evict stale entries for sessions that ended without agent_end.
+			if (state && now - state.at > SESSION_TURN_TTL_MS) {
+				checkpointTurns.delete(scopedKey);
 			}
-			const sessionContext = ctx;
+
+			// Dedup: before_agent_start and before_prompt_build both fire on the
+			// same turn when both are registered. Use message count when available
+			// (modern OpenClaw). Legacy path relies on bpbFired flag — see below.
+			if (msgCount !== undefined && checkpointTurns.get(scopedKey)?.lastMsgCount === msgCount) return;
+
+			const newCount = (checkpointTurns.get(scopedKey)?.count ?? 0) + 1;
+			checkpointTurns.set(scopedKey, {
+				count: newCount >= CHECKPOINT_TURN_THRESHOLD ? 0 : newCount,
+				lastMsgCount: msgCount,
+				at: now,
+			});
+
+			if (newCount < CHECKPOINT_TURN_THRESHOLD) return;
+
+			// Inline transcript fallback: when sessionFile is absent (typed-only
+			// OpenClaw without extra event fields), serialize event.messages as JSONL
+			// so the daemon always has a transcript source for delta extraction.
+			const inlineTranscript =
+				!sessionFile && Array.isArray(messages) && messages.length > 0
+					? messages.map((m) => JSON.stringify(m)).join("\n")
+					: undefined;
+			// Fire-and-forget — don't block the hook response.
+			// Counter restore policy (CAS-guarded):
+			//   skipped:true  → restore to threshold-1 (nothing extracted, retry next turn)
+			//   queued:false  → treat as success (Rust Phase 5 stub: delta found, no job yet;
+			//                   counter stays at 0 to prevent per-turn retries against stub)
+			//   HTTP error    → restore to threshold-1 (retry next turn)
+			void daemonFetch(daemonUrl, "/api/hooks/session-checkpoint-extract", {
+				method: "POST",
+				body: {
+					harness: "openclaw",
+					sessionKey,
+					agentId,
+					project,
+					transcriptPath: sessionFile,
+					...(inlineTranscript && { transcript: inlineTranscript }),
+					runtimePath: RUNTIME_PATH,
+				},
+				timeout: WRITE_TIMEOUT,
+			})
+				.then((resp) => {
+					// Restore counter only on skipped:true (nothing extracted — delta
+					// too small, no transcript, or bypassed). queued:false is the Rust
+					// Phase 5 stub response meaning "valid delta seen, no job queued"
+					// — treat it as success (counter stays at 0) so the next trigger
+					// waits another N turns rather than firing on every subsequent turn.
+					if (isRecord(resp) && resp.skipped === true) {
+						// CAS guard: only restore if the counter hasn't advanced past
+						// threshold-1 by new turns arriving during the async round-trip.
+						// Prevents a stale callback from overwriting newer accumulated count.
+						const cur = checkpointTurns.get(scopedKey);
+						if (cur && cur.count < CHECKPOINT_TURN_THRESHOLD - 1)
+							checkpointTurns.set(scopedKey, { ...cur, count: CHECKPOINT_TURN_THRESHOLD - 1 });
+					}
+				})
+				.catch((err) => {
+					api.logger.warn(
+						`signet-memory: checkpoint extract failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+					// CAS guard: same protection as the .then() path.
+					const cur = checkpointTurns.get(scopedKey);
+					if (cur && cur.count < CHECKPOINT_TURN_THRESHOLD - 1)
+						checkpointTurns.set(scopedKey, { ...cur, count: CHECKPOINT_TURN_THRESHOLD - 1 });
+				});
+		};
+
+		const resolveCompactionProject = (event: Record<string, unknown>, resolved: ResolvedCtx): string | undefined => {
+			const compaction = isRecord(event.compaction) ? event.compaction : undefined;
+			const sessionFile = resolveCompactionSessionFile(event, resolved.sessionFile);
+			return firstNonEmptyString(
+				event.cwd,
+				event.project,
+				event.workspace,
+				compaction?.project,
+				compaction?.cwd,
+				compaction?.workspace,
+				resolved.project,
+				readSessionFileProject(sessionFile),
+			);
+		};
+
+		const dedupeCompaction = (map: Map<string, number>, key: string): boolean => {
+			const now = Date.now();
+			cleanupTimedMap(map, now, COMPACTION_HOOK_DEDUPE_MS);
+			const seenAt = map.get(key);
+			if (typeof seenAt === "number" && now - seenAt <= COMPACTION_HOOK_DEDUPE_MS) {
+				return true;
+			}
+			map.set(key, now);
+			return false;
+		};
+
+		const handleBeforeCompaction = async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+			if (!cfg.enabled || !daemonReachable) return undefined;
+			const resolved = resolveCtx(event, ctx);
+			const messageCount =
+				typeof event.messageCount === "number"
+					? event.messageCount
+					: typeof event.compactingCount === "number"
+						? event.compactingCount
+						: typeof event.compactedCount === "number"
+							? event.compactedCount
+							: isRecord(event.compaction) && typeof event.compaction.compactingCount === "number"
+								? event.compaction.compactingCount
+								: isRecord(event.compaction) && typeof event.compaction.compactedCount === "number"
+									? event.compaction.compactedCount
+									: undefined;
+			const dedupeKey = buildCompactionEventKey(event, {
+				agentId: resolved.agentId,
+				sessionKey: resolved.sessionKey,
+			});
+			if (dedupeCompaction(beforeCompactions, dedupeKey)) {
+				return undefined;
+			}
+
+			const result = await onPreCompaction("openclaw", {
+				...opts,
+				sessionKey: resolved.sessionKey,
+				messageCount,
+			});
+			const parts = [result?.summaryPrompt, result?.guidelines].filter(
+				(value) => typeof value === "string" && value.length > 0,
+			);
+			if (parts.length === 0) {
+				return undefined;
+			}
 			return {
-				sessionKey: typeof sessionContext?.sessionKey === "string" ? sessionContext.sessionKey : undefined,
-				agentId: typeof sessionContext?.agentId === "string" ? sessionContext.agentId : undefined,
+				prependContext: parts.join("\n\n"),
 			};
+		};
+
+		const handleAfterCompaction = async (event: Record<string, unknown>, ctx: unknown): Promise<void> => {
+			if (!cfg.enabled || !daemonReachable) return;
+			const resolved = resolveCtx(event, ctx);
+			const scopedKey = buildScopedSessionKey(resolved.sessionKey, resolved.agentId);
+			if (scopedKey) {
+				injectedTurns.delete(scopedKey);
+				// Compaction resets the message count, so the checkpoint turn-dedup
+				// (keyed on lastMsgCount) would falsely skip the first post-compaction
+				// turn if it happens to share the same count as a pre-compaction turn.
+				// Reset the checkpoint state so dedup starts fresh after compaction.
+				checkpointTurns.delete(scopedKey);
+			}
+			const sessionFile = resolveCompactionSessionFile(event, resolved.sessionFile);
+			const summary = extractCompactionSummary(event, sessionFile);
+			if (!summary) {
+				api.logger.warn(
+					`signet-memory: compaction summary unavailable, skipping save${sessionFile ? ` (${sessionFile})` : ""}`,
+				);
+				return;
+			}
+
+			const dedupeKey = buildCompactionEventKey(event, {
+				agentId: resolved.agentId,
+				sessionKey: resolved.sessionKey,
+				summary,
+			});
+			if (dedupeCompaction(afterCompactions, dedupeKey)) {
+				return;
+			}
+
+			await onCompactionComplete("openclaw", summary, {
+				...opts,
+				agentId: resolved.agentId,
+				project: resolveCompactionProject(event, resolved),
+				sessionKey: resolved.sessionKey,
+			});
 		};
 
 		const ensureSessionStarted = async (
@@ -1357,7 +1787,8 @@ const signetPlugin = {
 				return;
 			}
 
-			if (claimedSessions.has(sessionKey)) {
+			const scopedKey = buildScopedSessionKey(sessionKey, agentId);
+			if (scopedKey && claimedSessions.has(scopedKey)) {
 				return;
 			}
 
@@ -1366,8 +1797,8 @@ const signetPlugin = {
 				sessionKey,
 				agentId,
 			});
-			if (startResult) {
-				claimedSessions.add(sessionKey);
+			if (startResult && scopedKey) {
+				claimedSessions.add(scopedKey);
 			}
 		};
 
@@ -1380,8 +1811,11 @@ const signetPlugin = {
 			// ECONNREFUSED hang on every message turn when the daemon is down.
 			if (!daemonReachable) return undefined;
 
+			// Prefer the clean last user message from the structured messages
+			// array. The prompt field carries platform metadata wrappers
+			// (Discord JSON, untrusted-context blocks) that pollute recall.
 			const rawPrompt = typeof event.prompt === "string" ? event.prompt : undefined;
-			const prompt = rawPrompt ? extractUserMessage(rawPrompt) : undefined;
+			const prompt = extractLastUserMessage(event.messages) ?? (rawPrompt ? extractUserMessage(rawPrompt) : undefined);
 			if (!prompt || prompt.length <= 3) {
 				return undefined;
 			}
@@ -1392,9 +1826,10 @@ const signetPlugin = {
 			// reliably correlated and are allowed to fall through rather than
 			// risk cross-suppressing concurrent independent sessions.
 			const count = Array.isArray(event.messages) ? event.messages.length : undefined;
-			// sig is only defined when we have both a stable session identity and
-			// a message count — the two values that make dedup meaningful.
-			const sig = sessionKey && typeof count === "number" ? `${sessionKey}|${count}` : undefined;
+			const scopedKey = buildScopedSessionKey(sessionKey, agentId);
+			// sig is only defined when we have both a stable scoped session identity
+			// and a message count — the two values that make dedup meaningful.
+			const sig = scopedKey && typeof count === "number" ? `${scopedKey}|${count}` : undefined;
 			// Lazy TTL sweep: evict entries from sessions that ended without agent_end.
 			if (sig) {
 				const now = Date.now();
@@ -1402,7 +1837,10 @@ const signetPlugin = {
 					if (now - v.at > SESSION_TURN_TTL_MS) injectedTurns.delete(k);
 				}
 			}
-			if (sig && (inFlightTurns.has(sig) || (sessionKey !== undefined && injectedTurns.get(sessionKey)?.count === count))) {
+			if (
+				sig &&
+				(inFlightTurns.has(sig) || (scopedKey !== undefined && injectedTurns.get(scopedKey)?.count === count))
+			) {
 				return undefined;
 			}
 			// Mark in-flight synchronously before any await so concurrent
@@ -1425,8 +1863,8 @@ const signetPlugin = {
 				return undefined;
 			}
 			// Record the completed turn so the other hook sees it on arrival.
-			if (sessionKey && typeof count === "number") {
-				injectedTurns.set(sessionKey, { count, at: Date.now() });
+			if (scopedKey && typeof count === "number") {
+				injectedTurns.set(scopedKey, { count, at: Date.now() });
 			}
 			return buildInjectionResult(result);
 		};
@@ -1437,9 +1875,18 @@ const signetPlugin = {
 			async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
 				if (!cfg.enabled) return undefined;
 
-				const { sessionKey, agentId } = resolveHookContext(ctx);
-				await ensureSessionStarted(event, sessionKey, agentId);
-				return runPromptInjection(event, sessionKey, agentId);
+				const resolved = resolveCtx(event, ctx);
+				await ensureSessionStarted(event, resolved.sessionKey, resolved.agentId);
+				const result = await runPromptInjection(event, resolved.sessionKey, resolved.agentId);
+				// Count every turn unconditionally — checkpoint should fire based on
+				// conversation progress, not on whether recall injection succeeded.
+				const msgs = Array.isArray(event.messages) ? (event.messages as readonly unknown[]) : undefined;
+				const msgCount = msgs?.length;
+				// Legacy dedup: increment bpbGen so bas can detect if bpb ran this turn.
+				const bpbKey = buildScopedSessionKey(resolved.sessionKey, resolved.agentId);
+				if (bpbKey) bpbGen.set(bpbKey, (bpbGen.get(bpbKey) ?? 0) + 1);
+				maybeFireCheckpoint(resolved.sessionKey, resolved.agentId, resolved.project, resolved.sessionFile, msgCount, msgs);
+				return result;
 			},
 			{ priority: 20 },
 		);
@@ -1448,21 +1895,72 @@ const signetPlugin = {
 		api.on("before_agent_start", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
 			if (!cfg.enabled) return undefined;
 
-			const { sessionKey, agentId } = resolveHookContext(ctx);
-			await ensureSessionStarted(event, sessionKey, agentId);
-			return runPromptInjection(event, sessionKey, agentId);
+			const resolved = resolveCtx(event, ctx);
+			await ensureSessionStarted(event, resolved.sessionKey, resolved.agentId);
+			const result = await runPromptInjection(event, resolved.sessionKey, resolved.agentId);
+			const msgs = Array.isArray(event.messages) ? (event.messages as readonly unknown[]) : undefined;
+			const msgCount = msgs?.length;
+			// When messages absent, check generation counters to see if bpb already
+			// counted this turn. If basGen < bpbGen, bas is covered; sync basGen.
+			const basKey = buildScopedSessionKey(resolved.sessionKey, resolved.agentId);
+			const latestBpb = basKey ? (bpbGen.get(basKey) ?? 0) : 0;
+			const lastConsumed = basKey ? (basGen.get(basKey) ?? 0) : 0;
+			const coveredByBpb = latestBpb > lastConsumed;
+			if (basKey && coveredByBpb) basGen.set(basKey, latestBpb);
+			if (!coveredByBpb || msgCount !== undefined) {
+				maybeFireCheckpoint(resolved.sessionKey, resolved.agentId, resolved.project, resolved.sessionFile, msgCount, msgs);
+			}
+			return result;
 		});
 
-		api.on("agent_end", async (_event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+		api.on("agent_end", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
 			if (!cfg.enabled) return undefined;
 
-			const { sessionKey } = resolveHookContext(ctx);
+			const resolved = resolveCtx(event, ctx);
+			const scopedKey = buildScopedSessionKey(resolved.sessionKey, resolved.agentId);
 
-			await onSessionEnd("openclaw", { ...opts, sessionKey });
-			if (sessionKey) {
-				claimedSessions.delete(sessionKey);
-				injectedTurns.delete(sessionKey);
+			// Inline transcript fallback: same pattern as maybeFireCheckpoint —
+			// when sessionFile is absent (typed-only ctx), serialize event.messages
+			// so the daemon has a transcript source for session-end extraction.
+			const endMsgs = Array.isArray(event.messages) ? (event.messages as readonly unknown[]) : undefined;
+			const endTranscript =
+				!resolved.sessionFile && endMsgs && endMsgs.length > 0
+					? endMsgs.map((m) => JSON.stringify(m)).join("\n")
+					: undefined;
+			await onSessionEnd("openclaw", {
+				...opts,
+				agentId: resolved.agentId,
+				cwd: resolved.project,
+				sessionId: resolved.sessionId,
+				sessionKey: resolved.sessionKey,
+				transcriptPath: resolved.sessionFile,
+				...(endTranscript && { transcript: endTranscript }),
+			});
+			if (scopedKey) {
+				claimedSessions.delete(scopedKey);
+				injectedTurns.delete(scopedKey);
+				checkpointTurns.delete(scopedKey);
+				bpbGen.delete(scopedKey);
+				basGen.delete(scopedKey);
 			}
+			return undefined;
+		});
+
+		api.on("before_compaction", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+			return handleBeforeCompaction(event, ctx);
+		});
+
+		api.on("after_compaction", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+			await handleAfterCompaction(event, ctx);
+			return undefined;
+		});
+
+		api.on("session:compact:before", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+			return handleBeforeCompaction(event, ctx);
+		});
+
+		api.on("session:compact:after", async (event: Record<string, unknown>, ctx: unknown): Promise<unknown> => {
+			await handleAfterCompaction(event, ctx);
 			return undefined;
 		});
 

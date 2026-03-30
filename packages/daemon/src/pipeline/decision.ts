@@ -7,16 +7,11 @@
  * never mutating memory content.
  */
 
-import {
-	DECISION_ACTIONS,
-	vectorSearch,
-	type DecisionAction,
-	type ExtractedFact,
-} from "@signet/core";
-import type { DbAccessor } from "../db-accessor";
+import { DECISION_ACTIONS, type DecisionAction, type ExtractedFact } from "@signet/core";
+import { type DbAccessor, isVectorRuntimeUsable } from "../db-accessor";
+import { logger } from "../logger";
 import type { EmbeddingConfig, MemorySearchConfig } from "../memory-config";
 import type { LlmProvider } from "./provider";
-import { logger } from "../logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,14 +24,17 @@ interface CandidateMemory {
 	readonly importance: number;
 }
 
+interface DecisionScope {
+	readonly agentId: string;
+	readonly scope: string | null;
+	readonly visibility: "global" | "private" | "archived";
+}
+
 export interface DecisionConfig {
 	readonly embedding: EmbeddingConfig;
 	readonly search: MemorySearchConfig;
 	readonly timeoutMs?: number;
-	readonly fetchEmbedding: (
-		text: string,
-		cfg: EmbeddingConfig,
-	) => Promise<number[] | null>;
+	readonly fetchEmbedding: (text: string, cfg: EmbeddingConfig) => Promise<number[] | null>;
 }
 
 export interface FactDecisionProposal {
@@ -58,6 +56,7 @@ export interface FactDecisionResult {
 // ---------------------------------------------------------------------------
 
 const CANDIDATE_LIMIT = 5;
+const VECTOR_OVERFETCH_MULTIPLIER = 2;
 
 interface AllQuery<T> {
 	all(...args: readonly unknown[]): T;
@@ -67,19 +66,27 @@ function findCandidatesBm25(
 	accessor: DbAccessor,
 	query: string,
 	limit: number,
+	scope: DecisionScope,
 ): Map<string, number> {
 	const bm25Map = new Map<string, number>();
 	try {
 		accessor.withReadDb((db) => {
-			const stmt = db.prepare(`
+			const sql = `
 					SELECT m.id, bm25(memories_fts) AS raw_score
 					FROM memories_fts
 					JOIN memories m ON memories_fts.rowid = m.rowid
 					WHERE memories_fts MATCH ?
+					  AND m.agent_id = ?
+					  AND m.visibility = ?
+					  AND ${scope.scope !== null ? "m.scope = ?" : "m.scope IS NULL"}
 					ORDER BY raw_score
 					LIMIT ?
-				`) as unknown as AllQuery<Array<{ id: string; raw_score: number }>>;
-			const rows = stmt.all(query, limit);
+				`;
+			const stmt = db.prepare(sql) as unknown as AllQuery<Array<{ id: string; raw_score: number }>>;
+			const rows =
+				scope.scope !== null
+					? stmt.all(query, scope.agentId, scope.visibility, scope.scope, limit)
+					: stmt.all(query, scope.agentId, scope.visibility, limit);
 
 			for (const row of rows) {
 				bm25Map.set(row.id, 1 / (1 + Math.abs(row.raw_score)));
@@ -96,17 +103,39 @@ async function findCandidatesVector(
 	query: string,
 	cfg: DecisionConfig,
 	limit: number,
+	scope: DecisionScope,
 ): Promise<Map<string, number>> {
 	const vectorMap = new Map<string, number>();
+	if (!isVectorRuntimeUsable()) {
+		return vectorMap;
+	}
+	const vectorLimit =
+		scope.scope !== null || scope.visibility !== "global" ? limit * VECTOR_OVERFETCH_MULTIPLIER : limit;
 	try {
 		const queryVec = await cfg.fetchEmbedding(query, cfg.embedding);
 		if (queryVec) {
 			const qf32 = new Float32Array(queryVec);
 			accessor.withReadDb((db) => {
-				const vectorDb = db as unknown as Parameters<typeof vectorSearch>[0];
-				const results = vectorSearch(vectorDb, qf32, { limit });
+				const sql = `
+					SELECT e.source_id AS id, v.distance
+					FROM vec_embeddings v
+					JOIN embeddings e ON v.id = e.id
+					JOIN memories m ON e.source_id = m.id
+					WHERE v.embedding MATCH ? AND k = ?
+					  AND m.agent_id = ?
+					  AND m.visibility = ?
+					  AND ${scope.scope !== null ? "m.scope = ?" : "m.scope IS NULL"}
+					  AND m.is_deleted = 0
+					ORDER BY v.distance
+				`;
+				const stmt = db.prepare(sql) as unknown as AllQuery<Array<{ id: string; distance: number }>>;
+				const results =
+					scope.scope !== null
+						? stmt.all(qf32, vectorLimit, scope.agentId, scope.visibility, scope.scope)
+						: stmt.all(qf32, vectorLimit, scope.agentId, scope.visibility);
 				for (const r of results) {
-					vectorMap.set(r.id, r.score);
+					const score = Math.max(0, 1 - r.distance);
+					vectorMap.set(r.id, score);
 				}
 			});
 		}
@@ -117,21 +146,24 @@ async function findCandidatesVector(
 	return vectorMap;
 }
 
-function fetchMemoryRows(
-	accessor: DbAccessor,
-	ids: readonly string[],
-): CandidateMemory[] {
+function fetchMemoryRows(accessor: DbAccessor, ids: readonly string[], scope: DecisionScope): CandidateMemory[] {
 	if (ids.length === 0) return [];
 	const placeholders = ids.map(() => "?").join(", ");
+	const sql = `SELECT id, content, type, importance
+				 FROM memories
+				 WHERE id IN (${placeholders}) AND is_deleted = 0
+				   AND agent_id = ?
+				   AND visibility = ?
+				   AND ${scope.scope !== null ? "scope = ?" : "scope IS NULL"}`;
 	return accessor.withReadDb(
 		(db) =>
 			db
-				.prepare(
-					`SELECT id, content, type, importance
-				 FROM memories
-				 WHERE id IN (${placeholders}) AND is_deleted = 0`,
-				)
-				.all(...ids) as CandidateMemory[],
+				.prepare(sql)
+				.all(
+					...(scope.scope !== null
+						? [...ids, scope.agentId, scope.visibility, scope.scope]
+						: [...ids, scope.agentId, scope.visibility]),
+				) as CandidateMemory[],
 	);
 }
 
@@ -139,17 +171,13 @@ async function findCandidates(
 	accessor: DbAccessor,
 	query: string,
 	cfg: DecisionConfig,
+	scope: DecisionScope,
 ): Promise<CandidateMemory[]> {
 	const alpha = cfg.search.alpha;
 	const minScore = cfg.search.min_score;
 
-	const bm25Map = findCandidatesBm25(accessor, query, CANDIDATE_LIMIT * 2);
-	const vectorMap = await findCandidatesVector(
-		accessor,
-		query,
-		cfg,
-		CANDIDATE_LIMIT * 2,
-	);
+	const bm25Map = findCandidatesBm25(accessor, query, CANDIDATE_LIMIT * 2, scope);
+	const vectorMap = await findCandidatesVector(accessor, query, cfg, CANDIDATE_LIMIT * 2, scope);
 
 	const allIds = new Set([...bm25Map.keys(), ...vectorMap.keys()]);
 	const scored: Array<{ id: string; score: number }> = [];
@@ -171,22 +199,16 @@ async function findCandidates(
 	scored.sort((a, b) => b.score - a.score);
 	const topIds = scored.slice(0, CANDIDATE_LIMIT).map((s) => s.id);
 
-	return fetchMemoryRows(accessor, topIds);
+	return fetchMemoryRows(accessor, topIds, scope);
 }
 
 // ---------------------------------------------------------------------------
 // Decision prompt
 // ---------------------------------------------------------------------------
 
-function buildDecisionPrompt(
-	fact: ExtractedFact,
-	candidates: readonly CandidateMemory[],
-): string {
+function buildDecisionPrompt(fact: ExtractedFact, candidates: readonly CandidateMemory[]): string {
 	const candidateBlock = candidates
-		.map(
-			(c, i) =>
-				`[${i + 1}] ID: ${c.id}\n    Type: ${c.type}\n    Content: ${c.content}`,
-		)
+		.map((c, i) => `[${i + 1}] ID: ${c.id}\n    Type: ${c.type}\n    Content: ${c.content}`)
 		.join("\n\n");
 
 	return `You are a memory management system. Given a new fact and existing memory candidates, decide the best action.
@@ -288,12 +310,17 @@ export async function runShadowDecisions(
 	accessor: DbAccessor,
 	provider: LlmProvider,
 	cfg: DecisionConfig,
+	scope: DecisionScope = {
+		agentId: "default",
+		scope: null,
+		visibility: "global",
+	},
 ): Promise<FactDecisionResult> {
 	const proposals: FactDecisionProposal[] = [];
 	const warnings: string[] = [];
 
 	for (const fact of facts) {
-		const candidates = await findCandidates(accessor, fact.content, cfg);
+		const candidates = await findCandidates(accessor, fact.content, cfg, scope);
 
 		// No candidates → propose ADD
 		if (candidates.length === 0) {
@@ -318,9 +345,7 @@ export async function runShadowDecisions(
 				const targetContent =
 					proposal.targetMemoryId === undefined
 						? undefined
-						: candidates.find(
-								(candidate) => candidate.id === proposal.targetMemoryId,
-							)?.content;
+						: candidates.find((candidate) => candidate.id === proposal.targetMemoryId)?.content;
 				proposals.push({
 					...proposal,
 					fact,

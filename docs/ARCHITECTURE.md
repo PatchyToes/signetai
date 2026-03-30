@@ -13,6 +13,11 @@ This document covers the full system — from package boundaries through
 database schema — with enough detail to reason about correctness,
 performance, and failure modes.
 
+This is a substrate document. It explains how Signet stores, structures,
+and routes memory today. It should not be read as a claim that the graph
+or retrieval stack is the product by itself. Those layers exist to
+support bounded, high-quality context selection.
+
 ---
 
 Package Overview
@@ -96,7 +101,8 @@ Harness hook fires (session-start / user-prompt / session-end)
     → memory_history records every proposal (shadow or applied)
     → /api/memory/recall runs traversal-primary search:
       graph traversal produces the base candidate pool,
-      flat FTS5/vector search fills remaining slots
+      flat FTS5/vector search fills remaining slots,
+      predictor path can rerank if available
 ```
 
 The database is the source of truth. The daemon's file watcher is
@@ -270,8 +276,8 @@ mention counts incremented. Mention links are inserted into
 **Traversal-primary search** (`memory-search.ts`,
 `graph-traversal.ts`): when `traversal.primary` is enabled (the
 default when both `graph.enabled` and `traversal.enabled` are true),
-graph traversal is the PRIMARY retrieval path. It resolves focal
-entities from query tokens, traverses the knowledge graph through
+graph traversal is the primary candidate-building path. It resolves
+focal entities from query tokens, traverses the knowledge graph through
 aspects, attributes, and dependency hops, and produces a scored
 candidate pool blended with cosine similarity (70% cosine, 30%
 structural importance). Flat FTS5/vector search fills remaining
@@ -280,7 +286,9 @@ candidates so hub entities cannot exclude keyword/vector matches
 entirely. After merging, the combined pool is score-sorted. When
 traversal is disabled or the graph has no matching entities, the
 system falls back to the legacy path: flat BM25 + vector search
-with optional graph boost (`getGraphBoostIds`).
+with optional graph boost (`getGraphBoostIds`). This improves the
+quality of the pool the rest of the system ranks; it is not, by itself,
+the whole Signet thesis.
 
 **Post-fusion dampening** (`dampening.ts`): three corrections run
 after fusion scoring but before the final sort/return. (1) *Gravity*
@@ -625,10 +633,27 @@ state), `status` (`idle`, `syncing`, `error`), `last_sync_at`,
 
 **summary_jobs**
 
-Session summary queue. Fields: `session_id`, `harness`, `status`
-(`pending`, `processing`, `done`, `failed`), `result_path`, `error`,
-`created_at`. The summary worker polls this table and writes dated
-Markdown files to `$SIGNET_WORKSPACE/`.
+Session summary queue. Fields include `session_key`, `session_id`,
+`trigger`, `captured_at`, `started_at`, `ended_at`, `harness`,
+`status`, `error`, and `created_at`. The summary worker polls this
+table, writes canonical immutable `--summary.md` artifacts for normal
+session-end jobs, and keeps checkpoint extracts DB-native.
+
+**memory_artifacts**
+
+Derived DB index over canonical markdown history. Fields include
+`agent_id`, `source_path`, `source_sha256`, `source_kind`,
+`session_id`, `session_key`, `session_token`, `project`, `harness`,
+timing fields, `manifest_path`, `memory_sentence`,
+`memory_sentence_quality`, `content`, and `updated_at`. This table is
+rebuildable from markdown artifacts and powers rolling ledger reads.
+
+**memory_artifact_tombstones**
+
+Privacy-removal guardrail for canonical artifact sessions. Fields:
+`agent_id`, `session_token`, `removed_at`, `reason`, `removed_paths`.
+Re-index honors tombstones so deleted canonical history does not
+reappear.
 
 **session_transcripts** (migration 040)
 
@@ -994,3 +1019,52 @@ packages/daemon/src/
         graph-traversal.ts    Traversal-primary retrieval path
         community-detection.ts Entity community clustering (Louvain)
 ```
+
+---
+
+Multi-Agent Support
+-------------------
+
+Multiple agents can share a single Signet daemon and database. The database
+uses `agent_id` columns on all key tables to keep agent data separate.
+
+**Agent roster** is declared in `agent.yaml` under `agents.roster`. Each
+entry defines a named agent and its read policy. On daemon startup the
+roster is synced to the `agents` table in SQLite.
+
+**Memory ownership** — every memory row carries:
+- `agent_id TEXT DEFAULT 'default'` — which agent wrote this memory
+- `visibility TEXT DEFAULT 'global'` — who can read it:
+  - `global`: any agent whose read policy permits it
+  - `private`: only the owning agent
+  - `archived`: soft-deleted when the owning agent is removed
+
+**Read policies** control what a given agent sees on recall:
+
+| policy    | SQL filter |
+|-----------|------------|
+| `isolated` | `agent_id = self` |
+| `shared`  | `visibility = 'global' OR agent_id = self` |
+| `group`   | `(visibility = 'global' AND agent_id IN group) OR agent_id = self` |
+
+The default agent uses `shared` policy for backward compatibility — existing
+installs see all their memories unchanged.
+
+**Identity inheritance** — each agent can have its own identity files under
+`$SIGNET_WORKSPACE/agents/{name}/`. Only `SOUL.md` and `IDENTITY.md` are
+expected to be overridden; all other files (`AGENTS.md`, `USER.md`, etc.)
+inherit from the workspace root. The daemon's file watcher monitors
+`$SIGNET_WORKSPACE/agents/` and triggers a harness sync on change.
+
+**OpenClaw session keys** — OpenClaw encodes the agent ID in session keys as
+`agent:{id}:{rest}`. The daemon's `resolveAgentId()` helper auto-parses this
+format, so memories are routed to the correct agent without any extra config.
+
+**Per-agent workspace** — when syncing to OpenClaw, the daemon writes an
+assembled `AGENTS.md` to `$SIGNET_WORKSPACE/agents/{name}/workspace/` for
+each agent. OpenClaw is configured to use this directory as the agent's
+workspace, giving each agent its own context on session start.
+
+**Single-agent installs** — fully backward compatible. Omitting
+`agents.roster` from `agent.yaml` keeps the single-agent behavior. All new
+API parameters (`agentId`, `visibility`) are optional with sensible defaults.

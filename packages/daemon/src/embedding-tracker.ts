@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { PipelineEmbeddingTrackerConfig } from "@signet/core";
 import type { DbAccessor } from "./db-accessor";
 import { syncVecDeleteBySourceExceptHash, syncVecInsert, vectorToBlob } from "./db-helpers";
+import { listStaleEmbeddingRows } from "./embedding-coverage";
 import { logger } from "./logger";
 import type { EmbeddingConfig } from "./memory-config";
 
@@ -77,24 +78,7 @@ export function startEmbeddingTracker(
 
 			// 2. Query stale/missing embeddings (read-only)
 			const staleRows = accessor.withReadDb((db) => {
-				return db
-					.prepare(
-						`SELECT m.id, m.content, m.content_hash AS contentHash,
-						        m.embedding_model AS currentModel
-						 FROM memories m
-						 LEFT JOIN embeddings e
-						   ON e.source_type = 'memory' AND e.source_id = m.id
-						 WHERE m.is_deleted = 0
-						   AND (
-						     e.id IS NULL
-						     OR e.content_hash <> m.content_hash
-						     OR (m.embedding_model IS NOT NULL
-						         AND m.embedding_model <> ?)
-						   )
-						 ORDER BY m.updated_at DESC
-						 LIMIT ?`,
-					)
-					.all(embeddingCfg.model, trackerCfg.batchSize) as StaleRow[];
+				return listStaleEmbeddingRows(db, embeddingCfg.model, trackerCfg.batchSize) as StaleRow[];
 			});
 
 			lastQueueDepth = staleRows.length;

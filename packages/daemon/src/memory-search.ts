@@ -6,21 +6,20 @@
  * daemon.ts is now a thin HTTP wrapper that delegates here.
  */
 
+import { createHash } from "node:crypto";
 import { vectorSearch } from "@signet/core";
 import { getDbAccessor } from "./db-accessor";
+import { getLlmProvider } from "./llm";
 import { logger } from "./logger";
 import type { EmbeddingConfig, MemorySearchConfig, ResolvedMemoryConfig } from "./memory-config";
-import { getGraphBoostIds, tokenizeGraphQuery } from "./pipeline/graph-search";
-import { FTS_STOP } from "./pipeline/stop-words";
-import {
-	resolveFocalEntities,
-	setTraversalStatus,
-	traverseKnowledgeGraph,
-} from "./pipeline/graph-traversal";
 import { constructContextBlocks } from "./pipeline/context-construction";
+import { DEFAULT_DAMPENING, type ScoredRow, applyDampening } from "./pipeline/dampening";
+import { getGraphBoostIds, tokenizeGraphQuery } from "./pipeline/graph-search";
+import { resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
 import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
-import { applyDampening, DEFAULT_DAMPENING, type ScoredRow } from "./pipeline/dampening";
+import { createLlmReranker, summarizeRecallWithLlm } from "./pipeline/reranker-llm";
+import { FTS_STOP } from "./pipeline/stop-words";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -31,6 +30,10 @@ export interface RecallParams {
 	keywordQuery?: string;
 	limit?: number;
 	agentId?: string;
+	/** Agent read policy — 'isolated' | 'shared' | 'group'. When set with agentId, filters by visibility. */
+	readPolicy?: string;
+	/** Policy group name (required when readPolicy is 'group'). */
+	policyGroup?: string | null;
 	type?: string;
 	tags?: string;
 	who?: string;
@@ -77,6 +80,34 @@ export interface RecallResponse {
 }
 
 export type EmbedFn = (text: string, cfg: EmbeddingConfig) => Promise<number[] | null>;
+
+// ---------------------------------------------------------------------------
+// Agent scope clause (exported for testing)
+// ---------------------------------------------------------------------------
+
+export function buildAgentScopeClause(
+	agentId: string,
+	readPolicy: string,
+	policyGroup: string | null,
+): { sql: string; args: unknown[] } {
+	if (readPolicy === "shared") {
+		return {
+			sql: " AND (m.visibility = 'global' OR m.agent_id = ?) AND m.visibility != 'archived'",
+			args: [agentId],
+		};
+	}
+	if (readPolicy === "group") {
+		return {
+			sql: " AND ((m.visibility = 'global' AND m.agent_id IN (SELECT id FROM agents WHERE policy_group = ?)) OR m.agent_id = ?) AND m.visibility != 'archived'",
+			args: [policyGroup, agentId],
+		};
+	}
+	// 'isolated' or unknown — own memories only
+	return {
+		sql: " AND m.agent_id = ? AND m.visibility != 'archived'",
+		args: [agentId],
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Filter clause builder (private)
@@ -142,10 +173,18 @@ function buildFilterClause(params: RecallParams): FilterClause {
 		args.push(params.project);
 	}
 
-	return {
+	const base: FilterClause = {
 		sql: parts.length ? ` AND ${parts.join(" AND ")}` : "",
 		args,
 	};
+
+	// Agent visibility filtering — only applied when both agentId and readPolicy are provided.
+	if (params.agentId && params.readPolicy) {
+		const scope = buildAgentScopeClause(params.agentId, params.readPolicy, params.policyGroup ?? null);
+		return { sql: base.sql + scope.sql, args: [...base.args, ...scope.args] };
+	}
+
+	return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,12 +198,15 @@ function buildFilterClause(params: RecallParams): FilterClause {
  * token as a literal. Short queries (<=3 tokens) use implicit AND for
  * precision; longer queries use OR so BM25 IDF ranks by term importance.
  */
-function sanitizeFtsQuery(raw: string): string {
+export function sanitizeFtsQuery(raw: string): string {
 	const tokens = raw
 		.replace(/'/g, " ")
 		.split(/\s+/)
 		.map((token) => {
-			const cleaned = token.replace(/[":()^*?]/g, "").trim().toLowerCase();
+			const cleaned = token
+				.replace(/[":()^*?]/g, "")
+				.trim()
+				.toLowerCase();
 			if (!cleaned || cleaned.length < 2) return null;
 			if (FTS_STOP.has(cleaned)) return null;
 			return `"${cleaned}"`;
@@ -264,8 +306,7 @@ export async function hybridRecall(
 
 			// Min-max normalize BM25 scores to [0,1] within the batch
 			const rawScores = ftsRows.map((r) => Math.abs(r.raw_score));
-			const maxRaw =
-				rawScores.length > 0 ? Math.max(...rawScores) : 1;
+			const maxRaw = rawScores.length > 0 ? Math.max(...rawScores) : 1;
 			const normalizer = maxRaw > 0 ? maxRaw : 1;
 			for (const row of ftsRows) {
 				const normalised = Math.abs(row.raw_score) / normalizer;
@@ -318,9 +359,7 @@ export async function hybridRecall(
 					// Hint-only memories score on their own merit (0-1) — capping
 					// at 0.3 placed them exactly at the min_score cliff, filtering
 					// out the memories hints were designed to rescue.
-					const blended = content > 0
-						? content * 0.7 + hint * 0.3
-						: hint;
+					const blended = content > 0 ? content * 0.7 + hint * 0.3 : hint;
 					bm25Map.set(row.id, Math.max(content, blended));
 				}
 			});
@@ -393,9 +432,8 @@ export async function hybridRecall(
 	flatScored.sort((a, b) => b.score - a.score);
 
 	// --- Score pipeline: traversal-primary vs legacy boost ---
-	const traversalPrimary = cfg.pipelineV2.graph.enabled
-		&& cfg.pipelineV2.traversal?.enabled
-		&& cfg.pipelineV2.traversal?.primary !== false;
+	const traversalPrimary =
+		cfg.pipelineV2.graph.enabled && cfg.pipelineV2.traversal?.enabled && cfg.pipelineV2.traversal?.primary !== false;
 
 	let scored: Array<{ id: string; score: number; source: string }>;
 
@@ -409,9 +447,7 @@ export async function hybridRecall(
 				const queryTokens = tokenizeGraphQuery(query);
 				if (queryTokens.length > 0) {
 					const agentId = params.agentId ?? "default";
-					const focal = getDbAccessor().withReadDb((db) =>
-						resolveFocalEntities(db, agentId, { queryTokens }),
-					);
+					const focal = getDbAccessor().withReadDb((db) => resolveFocalEntities(db, agentId, { queryTokens }));
 
 					if (focal.entityIds.length > 0) {
 						const traversal = getDbAccessor().withReadDb((db) =>
@@ -437,24 +473,21 @@ export async function hybridRecall(
 						if (queryVecF32 && traversal.memoryScores.size > 0) {
 							const ids = [...traversal.memoryScores.keys()];
 							const ph = ids.map(() => "?").join(", ");
-							const embRows = getDbAccessor().withReadDb((db) =>
-								db
-									.prepare(
-										`SELECT source_id, vector FROM embeddings
+							const embRows = getDbAccessor().withReadDb(
+								(db) =>
+									db
+										.prepare(
+											`SELECT source_id, vector FROM embeddings
 										 WHERE source_id IN (${ph})`,
-									)
-									.all(...ids) as Array<{
-									source_id: string;
-									vector: Buffer;
-								}>,
+										)
+										.all(...ids) as Array<{
+										source_id: string;
+										vector: Buffer;
+									}>,
 							);
 							const qv = queryVecF32;
 							for (const row of embRows) {
-								const mv = new Float32Array(
-									row.vector.buffer,
-									row.vector.byteOffset,
-									row.vector.byteLength / 4,
-								);
+								const mv = new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / 4);
 								// Cosine similarity (vectors are normalized by embedding model)
 								let dot = 0;
 								const len = Math.min(qv.length, mv.length);
@@ -467,9 +500,7 @@ export async function hybridRecall(
 						for (const [memoryId, importance] of traversal.memoryScores) {
 							const cosine = cosineMap.get(memoryId) ?? 0;
 							const imp = Math.max(minScore, Math.min(1, importance));
-							const score = cosine > 0
-								? cosineWeight * cosine + (1 - cosineWeight) * imp
-								: imp;
+							const score = cosine > 0 ? cosineWeight * cosine + (1 - cosineWeight) * imp : imp;
 							traversalScored.push({
 								id: memoryId,
 								score,
@@ -549,9 +580,7 @@ export async function hybridRecall(
 				const queryTokens = tokenizeGraphQuery(query);
 				if (queryTokens.length > 0) {
 					const agentId = params.agentId ?? "default";
-					const focal = getDbAccessor().withReadDb((db) =>
-						resolveFocalEntities(db, agentId, { queryTokens }),
-					);
+					const focal = getDbAccessor().withReadDb((db) => resolveFocalEntities(db, agentId, { queryTokens }));
 
 					if (focal.entityIds.length > 0) {
 						const traversal = getDbAccessor().withReadDb((db) =>
@@ -638,8 +667,13 @@ export async function hybridRecall(
 	}
 
 	// --- Optional reranker hook ---
+	let recallSummary: string | undefined;
+	// Remaining timeout budget to use for LLM summary after reranking.
+	// Set inside the reranker block; consumed after final results are assembled.
+	let summarizeLeft = 0;
 	if (cfg.pipelineV2.reranker.enabled) {
 		try {
+			const rerankStart = Date.now();
 			const topForRerank = scored.slice(0, cfg.pipelineV2.reranker.topN);
 			const rerankIds = topForRerank.map((s) => s.id);
 			const rerankPlaceholders = rerankIds.map(() => "?").join(", ");
@@ -664,20 +698,37 @@ export async function hybridRecall(
 				content: contentMap.get(s.id) ?? "",
 				score: s.score,
 			}));
-			// Use embedding reranker when query vector is available, else noop
-			const provider = queryVecF32 ? createEmbeddingReranker(getDbAccessor(), queryVecF32) : noopReranker;
+			const provider = cfg.pipelineV2.reranker.useExtractionModel
+				? createLlmReranker(getLlmProvider())
+				: queryVecF32
+					? createEmbeddingReranker(getDbAccessor(), queryVecF32)
+					: noopReranker;
 			const reranked = await rerank(query, candidates, provider, {
 				topN: cfg.pipelineV2.reranker.topN,
 				timeoutMs: cfg.pipelineV2.reranker.timeoutMs,
 				model: cfg.pipelineV2.reranker.model,
 			});
-			// Update scores from reranked results
-			const rerankedMap = new Map(reranked.map((r, i) => [r.id, i]));
+			// Update scores from reranked results without collapsing calibrated
+			// relevance into rank-position placeholders.
+			const rerankedMap = new Map(reranked.map((row) => [row.id, row.score]));
 			for (const s of scored) {
-				const idx = rerankedMap.get(s.id);
-				if (idx !== undefined) {
-					// Preserve relative order from reranker
-					s.score = 1 - idx / reranked.length;
+				const score = rerankedMap.get(s.id);
+				if (typeof score === "number" && Number.isFinite(score)) {
+					s.score = score;
+				}
+			}
+			if (cfg.pipelineV2.reranker.useExtractionModel) {
+				const elapsed = Date.now() - rerankStart;
+				const left = cfg.pipelineV2.reranker.timeoutMs - elapsed;
+				if (left <= 0) {
+					logger.warn("memory", "LLM summary skipped (reranker timeout budget exhausted)", {
+						timeoutMs: cfg.pipelineV2.reranker.timeoutMs,
+						elapsedMs: elapsed,
+					});
+				} else {
+					// Store remaining budget; summary is generated after final
+					// results are assembled so it is grounded in the recalled set.
+					summarizeLeft = left;
 				}
 			}
 			scored.sort((a, b) => b.score - a.score);
@@ -814,25 +865,30 @@ export async function hybridRecall(
 	// --- Fetch full memory rows ---
 	// Scope filter on hydration catches any results that bypassed
 	// the FTS filter clause (e.g. unscoped graph boost results).
+	// Agent scope filter also applied here to catch vector/traversal
+	// results that bypass FTS-level agent filtering.
 	const scopeClause =
 		params.scope !== undefined
 			? params.scope === null
-				? " AND scope IS NULL"
-				: " AND scope = ?"
-			: " AND scope IS NULL";
-	const scopeArgs: unknown[] =
-		params.scope !== undefined && params.scope !== null ? [params.scope] : [];
+				? " AND m.scope IS NULL"
+				: " AND m.scope = ?"
+			: " AND m.scope IS NULL";
+	const scopeArgs: unknown[] = params.scope !== undefined && params.scope !== null ? [params.scope] : [];
+	const agentScope =
+		params.agentId && params.readPolicy
+			? buildAgentScopeClause(params.agentId, params.readPolicy, params.policyGroup ?? null)
+			: { sql: "", args: [] };
 	const placeholders = topIds.map(() => "?").join(", ");
 
 	const rows = getDbAccessor().withReadDb(
 		(db) =>
 			db
 				.prepare(
-					`SELECT id, content, source_id, type, tags, pinned, importance, who, project, created_at
-        FROM memories
-        WHERE id IN (${placeholders})${scopeClause}`,
+					`SELECT m.id, m.content, m.source_id, m.type, m.tags, m.pinned, m.importance, m.who, m.project, m.created_at
+        FROM memories m
+        WHERE m.id IN (${placeholders})${scopeClause}${agentScope.sql}`,
 				)
-				.all(...topIds, ...scopeArgs) as Array<{
+				.all(...topIds, ...scopeArgs, ...agentScope.args) as Array<{
 				id: string;
 				content: string;
 				source_id: string | null;
@@ -846,7 +902,10 @@ export async function hybridRecall(
 			}>,
 	);
 
-	// Update access tracking (don't fail if this fails)
+	// Update access tracking (don't fail if this fails).
+	// Uses topIds (real DB memory IDs from scored), not the final results
+	// array — so the synthetic llm_summary card injected later is never
+	// included here and never touches the memories table.
 	try {
 		getDbAccessor().withWriteTx((db) => {
 			db.prepare(
@@ -861,6 +920,8 @@ export async function hybridRecall(
 
 	const rowMap = new Map(rows.map((r) => [r.id, r]));
 	const recallTruncate = cfg.pipelineV2.guardrails.recallTruncateChars;
+	// No pre-decrement: always fetch `limit` memories. The summary card is
+	// injected after assembly and the array is capped to `limit` at that point.
 	const results: RecallResult[] = scored
 		.slice(0, limit)
 		.filter((s) => rowMap.has(s.id))
@@ -883,6 +944,46 @@ export async function hybridRecall(
 				created_at: r.created_at,
 			};
 		});
+
+	// Generate LLM summary from the final recalled set (not pre-filter candidates).
+	// Skip when limit < 2: can't fit a summary card without evicting the only
+	// real memory, which would leave the caller with nothing to verify against.
+	if (summarizeLeft > 0 && results.length > 0 && limit >= 2) {
+		try {
+			const summCandidates = results
+				.slice(0, 12)
+				.map((r) => ({ id: r.id, content: r.content, score: r.score }));
+			const s = await summarizeRecallWithLlm(getLlmProvider(), query, summCandidates, summarizeLeft);
+			if (s) recallSummary = s;
+		} catch (e) {
+			logger.warn("memory", "LLM summary failed (non-fatal)", {
+				error: e instanceof Error ? e.message : String(e),
+			});
+		}
+	}
+
+	if (recallSummary && limit >= 2) {
+		const digest = createHash("sha1").update(query).digest("hex").slice(0, 12);
+		const content = `[model summary, verify against source memories] ${recallSummary}`;
+		const score = results.length > 0 ? Math.max(0.01, Math.min(1, results[0].score)) : 0.5;
+		if (results.length >= limit) results.length = limit - 1;
+		results.unshift({
+			id: `summary:${digest}`,
+			content,
+			content_length: content.length,
+			truncated: false,
+			score,
+			source: "llm_summary",
+			type: "semantic",
+			tags: null,
+			pinned: false,
+			importance: 0.9,
+			who: "",
+			project: null,
+			created_at: new Date().toISOString(),
+			supplementary: true,
+		});
+	}
 
 	// --- Decision-rationale linking: auto-fetch linked rationale memories ---
 	const decisionIds = results.filter((r) => r.type === "decision").map((r) => r.id);
@@ -915,10 +1016,10 @@ export async function hybridRecall(
 							 WHERE mem.entity_id IN (${ePlaceholders})
 							   AND m.type = 'rationale'
 							   AND m.is_deleted = 0
-							   ${scopeClause}
+							   ${scopeClause}${agentScope.sql}
 							 LIMIT 10`,
 					)
-					.all(...eIds, ...scopeArgs) as Array<{
+					.all(...eIds, ...scopeArgs, ...agentScope.args) as Array<{
 					id: string;
 					content: string;
 					type: string;
@@ -1005,34 +1106,38 @@ export async function hybridRecall(
 						entity_type: string;
 					}>;
 
-					const structured = entities.map((ent) => {
-						const aspects = db
-							.prepare(
-								`SELECT id, name FROM entity_aspects
+					const structured = entities
+						.map((ent) => {
+							const aspects = db
+								.prepare(
+									`SELECT id, name FROM entity_aspects
 								 WHERE entity_id = ? AND agent_id = ?
 								 ORDER BY weight DESC LIMIT 10`,
-							)
-							.all(ent.id, agentId) as Array<{ id: string; name: string }>;
+								)
+								.all(ent.id, agentId) as Array<{ id: string; name: string }>;
 
-						return {
-							name: ent.name,
-							type: ent.entity_type,
-							aspects: aspects.map((asp) => {
-								const attrs = db
-									.prepare(
-										`SELECT content, status, importance FROM entity_attributes
+							return {
+								name: ent.name,
+								type: ent.entity_type,
+								aspects: aspects
+									.map((asp) => {
+										const attrs = db
+											.prepare(
+												`SELECT content, status, importance FROM entity_attributes
 										 WHERE aspect_id = ? AND agent_id = ? AND status = 'active'
 										 ORDER BY importance DESC LIMIT 5`,
-									)
-									.all(asp.id, agentId) as Array<{
-									content: string;
-									status: string;
-									importance: number;
-								}>;
-								return { name: asp.name, attributes: attrs };
-							}).filter((a) => a.attributes.length > 0),
-						};
-					}).filter((e) => e.aspects.length > 0);
+											)
+											.all(asp.id, agentId) as Array<{
+											content: string;
+											status: string;
+											importance: number;
+										}>;
+										return { name: asp.name, attributes: attrs };
+									})
+									.filter((a) => a.attributes.length > 0),
+							};
+						})
+						.filter((e) => e.aspects.length > 0);
 
 					return { eids, structured };
 				});
@@ -1058,13 +1163,9 @@ export async function hybridRecall(
 		try {
 			const agentId = params.agentId ?? "default";
 			const cap = Math.max(3, Math.ceil(limit * 0.3));
-			const blocks = getDbAccessor().withReadDb((db) =>
-				constructContextBlocks(db, agentId, focalEids, cap),
-			);
+			const blocks = getDbAccessor().withReadDb((db) => constructContextBlocks(db, agentId, focalEids, cap));
 			const now = new Date().toISOString();
-			const minReal = results.length > 0
-				? Math.min(...results.map((r) => r.score))
-				: 0.5;
+			const minReal = results.length > 0 ? Math.min(...results.map((r) => r.score)) : 0.5;
 			const maxConstructed = Math.max(0.01, minReal - 0.01);
 			let added = 0;
 			for (const block of blocks) {
@@ -1078,7 +1179,7 @@ export async function hybridRecall(
 					id: syntheticId,
 					content: block.content,
 					content_length: block.content.length,
-					truncated: false,
+					truncated: block.truncated,
 					score: Math.round(Math.min(block.score, maxConstructed) * 100) / 100,
 					source: "constructed",
 					type: "semantic",
@@ -1103,22 +1204,19 @@ export async function hybridRecall(
 	if (params.expand) {
 		try {
 			const keys = [
-				...new Set(
-					[...rowMap.values()]
-						.map((r) => r.source_id)
-						.filter((s): s is string => s !== null && s !== ""),
-				),
+				...new Set([...rowMap.values()].map((r) => r.source_id).filter((s): s is string => s !== null && s !== "")),
 			];
 			if (keys.length > 0) {
 				const ph = keys.map(() => "?").join(", ");
+				const agentId = params.agentId ?? "default";
 				const transcripts = getDbAccessor().withReadDb(
 					(db) =>
 						db
 							.prepare(
 								`SELECT session_key, content FROM session_transcripts
-								 WHERE session_key IN (${ph})`,
+								 WHERE agent_id = ? AND session_key IN (${ph})`,
 							)
-							.all(...keys) as Array<{ session_key: string; content: string }>,
+							.all(agentId, ...keys) as Array<{ session_key: string; content: string }>,
 				);
 				if (transcripts.length > 0) {
 					sources = {};

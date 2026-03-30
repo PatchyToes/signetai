@@ -25,18 +25,23 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import {
+	type AgentDefinition,
 	CONNECTOR_PROVIDERS,
 	type ConnectorConfig,
 	SIGNET_GIT_PROTECTED_PATHS,
 	type SyncCursor,
 	buildArchitectureDoc,
 	buildSignetBlock,
+	findSignetForgeBinary,
 	keywordSearch,
 	mergeSignetGitignoreEntries,
 	networkModeFromBindHost,
 	parseSimpleYaml,
 	readNetworkMode,
+	readPipelinePauseState,
 	resolveNetworkBinding,
+	resolveSignetForgeManagedPath,
+	setPipelinePaused,
 	stripSignetBlock,
 	vectorSearch,
 } from "@signet/core";
@@ -44,6 +49,7 @@ import { watch } from "chokidar";
 import { type Context, Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger as honoLogger } from "hono/logger";
+import { getAgentScope, resolveAgentId } from "./agent-id";
 import { type AnalyticsCollector, type ErrorStage, createAnalyticsCollector } from "./analytics";
 import {
 	type AuthConfig,
@@ -73,6 +79,7 @@ import { normalizeAndHashContent } from "./content-normalization";
 import {
 	type AgentMessage,
 	type AgentMessageType,
+	clearAllPresence,
 	createAgentMessage,
 	getAgentPresenceForSession,
 	isMessageVisibleToAgent,
@@ -103,6 +110,10 @@ import {
 import { buildEmbeddingHealth } from "./embedding-health";
 import { type EmbeddingTrackerHandle, startEmbeddingTracker } from "./embedding-tracker";
 import { getAllFeatureFlags, initFeatureFlags } from "./feature-flags";
+import { writeFileIfChangedAsync } from "./file-sync";
+import { walkImpact } from "./graph-impact";
+import { syncAgentWorkspaces } from "./identity-sync";
+import { linkMemoryToEntities } from "./inline-entity-linker";
 import {
 	getAttributesForAspectFiltered,
 	getEntityAspectsWithCounts,
@@ -114,31 +125,32 @@ import {
 	getPinnedEntities,
 	listKnowledgeEntities,
 	pinEntity,
+	resolveNamedEntity,
 	unpinEntity,
 } from "./knowledge-graph";
 import { closeLlmProvider, getLlmProvider, initLlmProvider } from "./llm";
-import { type LogEntry, logger } from "./logger";
-import { type EmbeddingConfig, loadMemoryConfig } from "./memory-config";
-import { walkImpact } from "./graph-impact";
-import { buildMemoryTimeline } from "./memory-timeline";
+import { type LogCategory, type LogEntry, logger } from "./logger";
+import { type EmbeddingConfig, type ResolvedMemoryConfig, loadMemoryConfig } from "./memory-config";
 import { type RecallParams, hybridRecall } from "./memory-search";
+import { buildMemoryTimeline } from "./memory-timeline";
 import { ONEPASSWORD_SERVICE_ACCOUNT_SECRET, importOnePasswordSecrets, listOnePasswordVaults } from "./onepassword.js";
+import { recordPathFeedback } from "./path-feedback";
 import {
 	DEFAULT_RETENTION,
 	enqueueDocumentIngestJob,
 	enqueueExtractionJob,
+	ensureRetentionWorker,
 	getPipelineWorkerStatus,
 	getSynthesisWorker,
 	nudgeExtractionWorker,
 	readLastSynthesisTime,
 	startPipeline,
-	startRetentionWorker,
 	stopPipeline,
 } from "./pipeline";
-import { clusterEntities } from "./pipeline/community-detection";
 import { getFeedbackTelemetry } from "./pipeline/aspect-feedback";
+import { clusterEntities } from "./pipeline/community-detection";
+import { deadLetterExtractionJob, deadLetterPendingExtractionJobs } from "./pipeline/extraction-fallback";
 import { getGraphBoostIds } from "./pipeline/graph-search";
-import { linkMemoryToEntities } from "./inline-entity-linker";
 import {
 	getTraversalStatus,
 	invalidateTraversalCache,
@@ -164,6 +176,7 @@ import {
 	resolveDefaultOllamaFallbackMaxContextTokens,
 	stopOpenCodeServer,
 } from "./pipeline/provider";
+import { resolveRuntimeModel } from "./pipeline/provider-resolution";
 import { type RerankCandidate, noopReranker, rerank } from "./pipeline/reranker";
 import { createEmbeddingReranker } from "./pipeline/reranker-embedding";
 import { type PredictorClient, createPredictorClient, resolvePredictorCheckpointPath } from "./predictor-client";
@@ -183,6 +196,8 @@ import {
 	cleanOrphanedEmbeddings,
 	createRateLimiter,
 	deduplicateMemories,
+	findDeadMemories,
+	forgetDeadMemories,
 	getDedupStats,
 	getEmbeddingGapStats,
 	pruneChunkGroupEntities,
@@ -195,6 +210,11 @@ import {
 	structuralBackfill,
 	triggerRetentionSweep,
 } from "./repair-actions";
+import {
+	resolveScopedAgent,
+	resolveScopedProject as resolveScopedProjectForClaims,
+	shouldEnforceScope,
+} from "./request-scope";
 import {
 	CRON_PRESETS,
 	computeNextRun,
@@ -214,8 +234,11 @@ import {
 	redactCheckpointRow,
 } from "./session-checkpoints";
 import { parseFeedback, recordAgentFeedback } from "./session-memories";
+import { createSingleFlightRunner } from "./single-flight-runner";
 import { closeSynthesisProvider, initSynthesisProvider } from "./synthesis-llm";
 import { type TelemetryCollector, type TelemetryEventType, createTelemetryCollector } from "./telemetry";
+import { expandTemporalNode } from "./temporal-expand";
+import { upsertThreadHead } from "./thread-heads";
 import { type TimelineSources, buildTimeline } from "./timeline";
 import {
 	type MutationContext,
@@ -397,18 +420,41 @@ const BIND_HOST = normalizeLoopbackHost(readEnvTrimmed("SIGNET_BIND") ?? NET.bin
 const NETWORK_MODE = networkModeFromBindHost(BIND_HOST);
 const INTERNAL_SELF_HOST = BIND_HOST === "0.0.0.0" || BIND_HOST === "::" ? "127.0.0.1" : BIND_HOST;
 
-type RuntimeProviderName = "ollama" | "claude-code" | "opencode" | "codex" | "anthropic";
+type RuntimeProviderName =
+	| "none"
+	| "ollama"
+	| "claude-code"
+	| "opencode"
+	| "codex"
+	| "anthropic"
+	| "openrouter"
+	| "command";
+
+type RuntimeSynthesisProviderName =
+	| "none"
+	| "ollama"
+	| "claude-code"
+	| "codex"
+	| "opencode"
+	| "anthropic"
+	| "openrouter";
 
 interface ProviderRuntimeResolution {
 	extraction: {
 		configured: string | null;
 		resolved: RuntimeProviderName;
 		effective: RuntimeProviderName;
+		fallbackProvider: "ollama" | "none";
+		status: "active" | "degraded" | "blocked" | "disabled" | "paused";
+		degraded: boolean;
+		fallbackApplied: boolean;
+		reason: string | null;
+		since: string | null;
 	};
 	synthesis: {
 		configured: string | null;
-		resolved: "ollama" | "claude-code" | "opencode" | "anthropic" | null;
-		effective: "ollama" | "claude-code" | "opencode" | "anthropic" | null;
+		resolved: RuntimeSynthesisProviderName | null;
+		effective: RuntimeSynthesisProviderName | null;
 	};
 }
 
@@ -417,6 +463,12 @@ const providerRuntimeResolution: ProviderRuntimeResolution = {
 		configured: null,
 		resolved: "claude-code",
 		effective: "claude-code",
+		fallbackProvider: "ollama",
+		status: "active",
+		degraded: false,
+		fallbackApplied: false,
+		reason: null,
+		since: null,
 	},
 	synthesis: {
 		configured: null,
@@ -430,19 +482,48 @@ const providerTracker = createProviderTracker();
 const analyticsCollector = createAnalyticsCollector();
 const repairLimiter = createRateLimiter();
 
+function queueExtractionJob(memoryId: string): void {
+	if (providerRuntimeResolution.extraction.status === "blocked") {
+		deadLetterExtractionJob(getDbAccessor(), memoryId, {
+			reason: providerRuntimeResolution.extraction.reason ?? "Configured extraction provider unavailable at startup",
+		});
+		return;
+	}
+	enqueueExtractionJob(getDbAccessor(), memoryId);
+}
+
 // Telemetry — assigned in main(), read by cleanup()
 let telemetryRef: TelemetryCollector | undefined;
 let embeddingTrackerHandle: EmbeddingTrackerHandle | null = null;
 let predictorClientRef: PredictorClient | null = null;
 let shadowProcess: ChildProcess | null = null;
 let skillReconcilerHandle: ReconcilerHandle | null = null;
+let structuralBackfillTimer: ReturnType<typeof setTimeout> | null = null;
+let pipelineTransition = false;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let checkpointPruneTimer: ReturnType<typeof setInterval> | undefined;
+let httpServer: ReturnType<typeof serve> | null = null;
+let shuttingDown = false;
 let diagnosticsCache: {
 	readonly report: DiagnosticsReport;
 	readonly expiresAt: number;
 } | null = null;
 const DIAGNOSTICS_CACHE_TTL_MS = 2000;
+
+// OpenClaw plugin health — updated by POST /api/diagnostics/openclaw/heartbeat
+interface OpenClawHeartbeatData {
+	readonly pluginVersion: string;
+	readonly hooksRegistered: string[];
+	readonly lastHookCall: string | null;
+	readonly lastError: string | null;
+	readonly latencyMs: number;
+	/** Failures reported in the most recent heartbeat (delta, not cumulative). */
+	readonly lastFailedDelta: number;
+	readonly totalSucceeded: number;
+	readonly totalFailed: number;
+}
+let openClawHeartbeat: { timestamp: string; data: OpenClawHeartbeatData } | null = null;
+const OPENCLAW_STALE_MS = 10 * 60 * 1000; // 10 minutes
 
 // Prevents concurrent UMAP computations for the same dimension count
 const projectionInFlight = new Map<number, Promise<void>>();
@@ -457,6 +538,7 @@ let authForgetLimiter = new AuthRateLimiter(60_000, 30);
 let authModifyLimiter = new AuthRateLimiter(60_000, 60);
 let authBatchForgetLimiter = new AuthRateLimiter(60_000, 5);
 let authAdminLimiter = new AuthRateLimiter(60_000, 10);
+let authRecallLlmLimiter = new AuthRateLimiter(60_000, 60);
 const authCrossAgentMessageLimiter = new AuthRateLimiter(60_000, 120);
 
 function hasMemoriesSessionIdColumn(db: Database): boolean {
@@ -486,6 +568,34 @@ function invalidateDiagnosticsCache(): void {
 	diagnosticsCache = null;
 }
 
+function buildOpenClawHealth(): import("./diagnostics").OpenClawHealth {
+	if (!openClawHeartbeat) {
+		return {
+			status: "never-seen",
+			lastHeartbeat: null,
+			pluginVersion: null,
+			hooksRegistered: [],
+			hooksSucceeded: 0,
+			hooksFailed: 0,
+			lastLatencyMs: 0,
+			lastError: null,
+		};
+	}
+	const age = Date.now() - new Date(openClawHeartbeat.timestamp).getTime();
+	const status = age < OPENCLAW_STALE_MS ? "connected" : "stale";
+	const d = openClawHeartbeat.data;
+	return {
+		status,
+		lastHeartbeat: openClawHeartbeat.timestamp,
+		pluginVersion: d.pluginVersion,
+		hooksRegistered: d.hooksRegistered,
+		hooksSucceeded: d.totalSucceeded,
+		hooksFailed: d.totalFailed,
+		lastLatencyMs: d.latencyMs,
+		lastError: d.lastError,
+	};
+}
+
 function getCachedDiagnosticsReport(): DiagnosticsReport {
 	const now = Date.now();
 	if (diagnosticsCache !== null && diagnosticsCache.expiresAt > now) {
@@ -493,7 +603,7 @@ function getCachedDiagnosticsReport(): DiagnosticsReport {
 	}
 
 	const report = getDbAccessor().withReadDb((db) =>
-		getDiagnostics(db, providerTracker, getUpdateState(), buildPredictorHealthParams()),
+		getDiagnostics(db, providerTracker, getUpdateState(), buildPredictorHealthParams(), buildOpenClawHealth()),
 	);
 	diagnosticsCache = {
 		report,
@@ -1260,13 +1370,11 @@ function parsePrefixes(raw: string): ParsedMemory {
 	return { content, tags, pinned, importance };
 }
 
-// Resolve dashboard static files location
-function getDashboardPath(): string | null {
+function getDashboardCandidates(): string[] {
 	const __filename = fileURLToPath(import.meta.url);
 	const __dirname = dirname(__filename);
 
-	// Check various locations for the built dashboard
-	const candidates = [
+	return [
 		// When running from workspace
 		join(__dirname, "..", "..", "cli", "dashboard", "build"),
 		// When installed as package
@@ -1275,6 +1383,11 @@ function getDashboardPath(): string | null {
 		join(__dirname, "..", "dashboard"),
 		join(__dirname, "dashboard"),
 	];
+}
+
+// Resolve dashboard static files location
+function getDashboardPath(): string | null {
+	const candidates = getDashboardCandidates();
 
 	for (const candidate of candidates) {
 		if (existsSync(join(candidate, "index.html"))) {
@@ -1304,6 +1417,16 @@ app.use(
 		credentials: true,
 	}),
 );
+
+// Reject non-health requests during shutdown so keep-alive connections
+// get a clean 503 instead of a socket reset.
+app.use("*", async (c, next) => {
+	if (shuttingDown && c.req.path !== "/health") {
+		c.status(503);
+		return c.json({ error: "shutting down" });
+	}
+	return next();
+});
 
 // Auth middleware — reads from module-level authConfig/authSecret
 // which are initialized properly in main(). In local mode this is a no-op.
@@ -1395,13 +1518,14 @@ app.get("/health", (c) => {
 		Date.now() - extraction.stats.lastProgressAt > 60_000;
 
 	return c.json({
-		status: "healthy",
+		status: shuttingDown ? "shutting_down" : "healthy",
 		uptime: process.uptime(),
 		pid: process.pid,
 		version: CURRENT_VERSION,
 		port: PORT,
 		agentsDir: AGENTS_DIR,
 		db: dbOk,
+		shuttingDown,
 		updateAvailable: us.lastCheck?.updateAvailable ?? false,
 		pendingRestart: us.pendingRestartVersion !== null,
 		pipeline: {
@@ -1698,8 +1822,9 @@ app.use("/api/memory/:id", async (c, next) => {
 app.get("/api/logs", (c) => {
 	const limit = Number.parseInt(c.req.query("limit") || "100", 10);
 	const level = c.req.query("level") as "debug" | "info" | "warn" | "error" | undefined;
-	const category = c.req.query("category") as any;
-	const since = c.req.query("since") ? new Date(c.req.query("since")!) : undefined;
+	const category = c.req.query("category") as LogCategory | undefined;
+	const sinceRaw = c.req.query("since");
+	const since = sinceRaw ? new Date(sinceRaw) : undefined;
 
 	const logs = logger.getRecent({ limit, level, category, since });
 	return c.json({ logs, count: logs.length });
@@ -1843,6 +1968,84 @@ app.get("/api/identity", (c) => {
 	} catch {
 		return c.json({ name: "Unknown", creature: "", vibe: "" });
 	}
+});
+
+// ============================================================================
+// Agents API
+// ============================================================================
+
+interface AgentRow {
+	id: string;
+	name: string;
+	read_policy: string;
+	policy_group: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+app.get("/api/agents", (c) => {
+	const agents = getDbAccessor().withReadDb(
+		(db) =>
+			db
+				.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents ORDER BY name")
+				.all() as AgentRow[],
+	);
+	return c.json({ agents });
+});
+
+app.get("/api/agents/:name", (c) => {
+	const name = c.req.param("name");
+	const agent = getDbAccessor().withReadDb(
+		(db) =>
+			db
+				.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE name = ?")
+				.get(name) as AgentRow | undefined,
+	);
+	if (!agent) return c.json({ error: "Agent not found" }, 404);
+	return c.json(agent);
+});
+
+app.post("/api/agents", async (c) => {
+	const body = toRecord(await c.req.json().catch(() => null));
+	if (!body) return c.json({ error: "Invalid JSON body" }, 400);
+	const name = parseOptionalString(body.name);
+	if (!name) return c.json({ error: "name is required" }, 400);
+	const readPolicy = parseOptionalString(body.read_policy) ?? "isolated";
+	const group = parseOptionalString(body.policy_group) ?? null;
+	const now = new Date().toISOString();
+	getDbAccessor().withWriteTx((db) => {
+		db.prepare(
+			`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+		).run(name, name, readPolicy, group, now, now);
+	});
+	const created = getDbAccessor().withReadDb(
+		(db) =>
+			db
+				.prepare("SELECT id, name, read_policy, policy_group, created_at, updated_at FROM agents WHERE id = ?")
+				.get(name) as AgentRow,
+	);
+	return c.json(created, 201);
+});
+
+app.delete("/api/agents/:name", (c) => {
+	const name = c.req.param("name");
+	if (name === "default") return c.json({ error: "Cannot remove the default agent" }, 400);
+	const purge = c.req.query("purge") === "true";
+	const agent = getDbAccessor().withReadDb(
+		(db) => db.prepare("SELECT id FROM agents WHERE name = ?").get(name) as { id: string } | undefined,
+	);
+	if (!agent) return c.json({ error: "Agent not found" }, 404);
+	getDbAccessor().withWriteTx((db) => {
+		if (purge) {
+			db.prepare("DELETE FROM memories WHERE agent_id = ?").run(name);
+		} else {
+			// Archive: mark memories as visibility='archived' so they're excluded from search
+			db.prepare("UPDATE memories SET visibility = 'archived' WHERE agent_id = ?").run(name);
+		}
+		db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id);
+	});
+	return c.json({ success: true, purged: purge });
 });
 
 // ============================================================================
@@ -2088,7 +2291,7 @@ app.get("/memory/search", (c) => {
 		tags: c.req.query("tags") ?? "",
 		who: c.req.query("who") ?? "",
 		pinned: c.req.query("pinned") === "1" || c.req.query("pinned") === "true",
-		importance_min: c.req.query("importance_min") ? Number.parseFloat(c.req.query("importance_min")!) : null,
+		importance_min: c.req.query("importance_min") ? Number.parseFloat(c.req.query("importance_min") ?? "") : null,
 		since: c.req.query("since") ?? "",
 	};
 
@@ -2190,7 +2393,7 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 }
 
 async function readOptionalJsonObject(c: Context): Promise<Record<string, unknown> | null> {
-	const raw = await c.req.raw.text();
+	const raw = await c.req.text();
 	if (!raw.trim()) return {};
 	try {
 		return toRecord(JSON.parse(raw));
@@ -2238,10 +2441,7 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
 }
 
 function shouldEnforceAuthScope(c: Context): boolean {
-	if (authConfig.mode === "local") return false;
-	const auth = c.get("auth");
-	if (authConfig.mode === "hybrid" && !auth?.claims) return false;
-	return true;
+	return shouldEnforceScope(authConfig.mode, c.get("auth")?.claims ?? null);
 }
 
 function resolveScopedAgentId(
@@ -2249,20 +2449,14 @@ function resolveScopedAgentId(
 	requestedAgentId: string | undefined,
 	fallbackAgentId = "default",
 ): { agentId: string; error?: string } {
-	const auth = c.get("auth");
-	const scopedAgentId = parseOptionalString(auth?.claims?.scope.agent);
-	const agentId = requestedAgentId ?? scopedAgentId ?? fallbackAgentId;
+	return resolveScopedAgent(c.get("auth")?.claims ?? null, authConfig.mode, requestedAgentId, fallbackAgentId);
+}
 
-	if (!shouldEnforceAuthScope(c)) {
-		return { agentId };
-	}
-
-	const decision = checkScope(auth?.claims ?? null, { agent: agentId }, authConfig.mode);
-	if (!decision.allowed) {
-		return { agentId, error: decision.reason ?? "scope violation" };
-	}
-
-	return { agentId };
+function resolveScopedProject(
+	c: Context,
+	requestedProject: string | undefined,
+): { project: string | undefined; error?: string } {
+	return resolveScopedProjectForClaims(c.get("auth")?.claims ?? null, authConfig.mode, requestedProject);
 }
 
 function validateSessionAgentBinding(
@@ -2608,6 +2802,8 @@ app.post("/api/memory/remember", async (c) => {
 		sourceType?: string;
 		sourceId?: string;
 		scope?: string | null;
+		agentId?: string;
+		visibility?: "global" | "private" | "archived";
 		hints?: string[];
 		transcript?: string;
 		structured?: {
@@ -2641,6 +2837,8 @@ app.post("/api/memory/remember", async (c) => {
 	const raw = body.content?.trim();
 	if (!raw) return c.json({ error: "content is required" }, 400);
 	const scope = body.scope ?? null;
+	const agentId = resolveAgentId({ agentId: body.agentId, sessionKey: c.req.header("x-signet-session-key") });
+	const visibility = body.visibility === "private" ? "private" : "global";
 	const hasBodyTags = Object.prototype.hasOwnProperty.call(body, "tags");
 	const bodyTags = hasBodyTags ? parseTagsMutation(body.tags) : undefined;
 	if (hasBodyTags && bodyTags === undefined) {
@@ -2684,8 +2882,8 @@ app.post("/api/memory/remember", async (c) => {
 				db.prepare(
 					`INSERT INTO entities
 					 (id, name, canonical_name, entity_type, agent_id, mentions, created_at, updated_at)
-					 VALUES (?, ?, ?, 'chunk_group', 'default', 0, ?, ?)`,
-				).run(groupId, `chunk-group:${groupId}`, `chunk-group:${groupId}`, now, now);
+					 VALUES (?, ?, ?, 'chunk_group', ?, 0, ?, ?)`,
+				).run(groupId, `chunk-group:${groupId}`, `chunk-group:${groupId}`, agentId, now, now);
 			});
 		} catch (e) {
 			logger.error("memory", "Failed to create chunk group entity", e as Error);
@@ -2704,11 +2902,16 @@ app.post("/api/memory/remember", async (c) => {
 			try {
 				// Dedup check + insert (scope-aware: same content in different scopes is not a duplicate)
 				const inserted = getDbAccessor().withWriteTx((db) => {
-					const byHash = scope !== null
-						? db.prepare(`SELECT id FROM memories WHERE content_hash = ? AND scope = ? AND is_deleted = 0 LIMIT 1`)
-							.get(chunkNormalized.contentHash, scope) as { id: string } | undefined
-						: db.prepare(`SELECT id FROM memories WHERE content_hash = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`)
-							.get(chunkNormalized.contentHash) as { id: string } | undefined;
+					const byHash =
+						scope !== null
+							? (db
+									.prepare("SELECT id FROM memories WHERE content_hash = ? AND scope = ? AND is_deleted = 0 LIMIT 1")
+									.get(chunkNormalized.contentHash, scope) as { id: string } | undefined)
+							: (db
+									.prepare(
+										"SELECT id FROM memories WHERE content_hash = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1",
+									)
+									.get(chunkNormalized.contentHash) as { id: string } | undefined);
 					if (byHash) return false;
 
 					txIngestEnvelope(db, {
@@ -2731,6 +2934,8 @@ app.post("/api/memory/remember", async (c) => {
 						sourceType: "chunk",
 						sourceId: groupId,
 						scope,
+						agentId,
+						visibility,
 						createdAt: now,
 					});
 
@@ -2763,9 +2968,7 @@ app.post("/api/memory/remember", async (c) => {
 							// Use memory-scoped content hash for embeddings so the same
 							// content in different scopes each gets its own vector row
 							// (vector search joins on source_id, not content_hash)
-							const embHash = scope
-								? `${chunkNormalized.contentHash}:${scope}`
-								: chunkNormalized.contentHash;
+							const embHash = scope ? `${chunkNormalized.contentHash}:${scope}` : chunkNormalized.contentHash;
 							getDbAccessor().withWriteTx((db) => {
 								syncVecDeleteBySourceId(db, "memory", chunkId);
 								db.prepare(`DELETE FROM embeddings WHERE source_type = 'memory' AND source_id = ?`).run(chunkId);
@@ -2773,15 +2976,7 @@ app.post("/api/memory/remember", async (c) => {
 									INSERT INTO embeddings
 									  (id, content_hash, vector, dimensions, source_type, source_id, chunk_text, created_at)
 									VALUES (?, ?, ?, ?, 'memory', ?, ?, ?)
-								`).run(
-									embId,
-									embHash,
-									blob,
-									vec.length,
-									chunkId,
-									chunkNormalized.storageContent,
-									now,
-								);
+								`).run(embId, embHash, blob, vec.length, chunkId, chunkNormalized.storageContent, now);
 								syncVecInsert(db, embId, vec);
 								db.prepare("UPDATE memories SET embedding_model = ? WHERE id = ?").run(
 									fullCfg.embedding.model,
@@ -2809,7 +3004,7 @@ app.post("/api/memory/remember", async (c) => {
 				// Enqueue pipeline extraction if enabled
 				if (pipelineEnqueueEnabled) {
 					try {
-						enqueueExtractionJob(getDbAccessor(), chunkId);
+						queueExtractionJob(chunkId);
 					} catch (e) {
 						logger.warn("pipeline", "Failed to enqueue chunk extraction", {
 							chunkId,
@@ -2879,28 +3074,40 @@ app.post("/api/memory/remember", async (c) => {
 		const result = getDbAccessor().withWriteTx((db) => {
 			// Check sourceId-based dedupe first (scope-aware)
 			if (sourceId) {
-				const bySource = (scope !== null
-					? db.prepare(
-						`SELECT id, type, tags, pinned, importance, content
+				const bySource = (
+					scope !== null
+						? db
+								.prepare(
+									`SELECT id, type, tags, pinned, importance, content
 						 FROM memories WHERE source_type = ? AND source_id = ? AND scope = ? AND is_deleted = 0 LIMIT 1`,
-					).get(sourceType, sourceId, scope)
-					: db.prepare(
-						`SELECT id, type, tags, pinned, importance, content
+								)
+								.get(sourceType, sourceId, scope)
+						: db
+								.prepare(
+									`SELECT id, type, tags, pinned, importance, content
 						 FROM memories WHERE source_type = ? AND source_id = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`,
-					).get(sourceType, sourceId)) as DedupeRow | undefined;
+								)
+								.get(sourceType, sourceId)
+				) as DedupeRow | undefined;
 				if (bySource) return { deduped: true as const, row: bySource };
 			}
 
 			// Check content_hash dedupe (scope-aware: same content in different scopes is not a duplicate)
-			const byHash = (scope !== null
-				? db.prepare(
-					`SELECT id, type, tags, pinned, importance, content
+			const byHash = (
+				scope !== null
+					? db
+							.prepare(
+								`SELECT id, type, tags, pinned, importance, content
 					 FROM memories WHERE content_hash = ? AND scope = ? AND is_deleted = 0 LIMIT 1`,
-				).get(contentHash, scope)
-				: db.prepare(
-					`SELECT id, type, tags, pinned, importance, content
+							)
+							.get(contentHash, scope)
+					: db
+							.prepare(
+								`SELECT id, type, tags, pinned, importance, content
 					 FROM memories WHERE content_hash = ? AND scope IS NULL AND is_deleted = 0 LIMIT 1`,
-				).get(contentHash)) as DedupeRow | undefined;
+							)
+							.get(contentHash)
+			) as DedupeRow | undefined;
 			if (byHash) return { deduped: true as const, row: byHash };
 
 			// No duplicate — insert
@@ -2918,13 +3125,19 @@ app.post("/api/memory/remember", async (c) => {
 				tags,
 				pinned,
 				isDeleted: 0,
-				extractionStatus: hasStructured ? "complete" : (pipelineEnqueueEnabled ? "pending" : "none"),
+				extractionStatus: hasStructured ? "complete" : pipelineEnqueueEnabled ? "pending" : "none",
 				embeddingModel: null,
-				extractionModel: hasStructured ? "structured-passthrough" : (pipelineEnqueueEnabled ? pipelineCfg.extractionModel : null),
+				extractionModel: hasStructured
+					? "structured-passthrough"
+					: pipelineEnqueueEnabled
+						? pipelineCfg.extractionModel
+						: null,
 				updatedBy: who,
 				sourceType,
 				sourceId,
 				scope,
+				agentId,
+				visibility,
 				createdAt: now,
 			});
 			return { deduped: false as const };
@@ -2977,17 +3190,7 @@ app.post("/api/memory/remember", async (c) => {
 	// Lossless transcript storage: write raw conversation text to
 	// session_transcripts so expand=true can join it at recall time.
 	if (body.transcript && sourceId) {
-		try {
-			getDbAccessor().withWriteTx((db) => {
-				db.prepare(
-					`INSERT OR IGNORE INTO session_transcripts
-					 (session_key, content, harness, project, agent_id, created_at)
-					VALUES (?, ?, ?, ?, 'default', ?)`,
-				).run(sourceId, body.transcript, sourceType, project, now);
-			});
-		} catch {
-			// Non-fatal — table may not exist pre-migration
-		}
+		upsertSessionTranscript(sourceId, body.transcript, sourceType, project, agentId);
 	}
 
 	// Generate embedding asynchronously — save memory first so failures are
@@ -3125,7 +3328,7 @@ app.post("/api/memory/remember", async (c) => {
 		// Enqueue pipeline extraction if enabled
 		if (pipelineEnqueueEnabled) {
 			try {
-				enqueueExtractionJob(getDbAccessor(), id);
+				queueExtractionJob(id);
 			} catch (e) {
 				getDbAccessor().withWriteTx((db) => {
 					db.prepare(
@@ -3751,8 +3954,36 @@ app.post("/api/memory/feedback", async (c) => {
 		return c.json({ error: "Invalid feedback format — expected map of ID to number (-1 to 1)" }, 400);
 	}
 
-	recordAgentFeedback(sessionKey, parsed);
-	return c.json({ ok: true, recorded: Object.keys(parsed).length });
+	const agentId = parseOptionalString(payload.agentId) ?? "default";
+	const cfg = loadMemoryConfig(AGENTS_DIR).pipelineV2.feedback;
+	try {
+		const result = recordPathFeedback(getDbAccessor(), {
+			sessionKey,
+			agentId,
+			ratings: parsed,
+			paths: payload.paths,
+			rewards: payload.rewards,
+			maxAspectWeight: cfg?.maxAspectWeight,
+			minAspectWeight: cfg?.minAspectWeight,
+		});
+		return c.json({
+			ok: true,
+			recorded: Object.keys(parsed).length,
+			accepted: result.accepted,
+			rejected: Math.max(0, Object.keys(parsed).length - result.accepted),
+			propagated: result.propagated,
+			cooccurrenceUpdated: result.cooccurrenceUpdated,
+			dependenciesUpdated: result.dependenciesUpdated,
+			acceptanceRule: "accepted means the memory id was recorded for this session and agent",
+		});
+	} catch (error) {
+		recordAgentFeedback(sessionKey, parsed, agentId);
+		logger.warn("daemon", "Path feedback failed; fell back to legacy feedback", {
+			error: error instanceof Error ? error.message : String(error),
+			sessionKey,
+		});
+		return c.json({ ok: true, recorded: Object.keys(parsed).length, fallback: true });
+	}
 });
 
 app.post("/api/memory/forget", async (c) => {
@@ -4055,12 +4286,31 @@ app.post("/api/memory/recall", async (c) => {
 	if (!query) return c.json({ error: "query is required" }, 400);
 
 	const cfg = loadMemoryConfig(AGENTS_DIR);
+	// Rate-limit LLM-enabled recall independently of plain recall.
+	// Only enforced in non-local auth modes; skipped for loopback-only daemons.
+	if (cfg.pipelineV2.reranker.enabled && cfg.pipelineV2.reranker.useExtractionModel && authConfig.mode !== "local") {
+		const actor = c.get("auth")?.claims?.sub ?? "anonymous";
+		const check = authRecallLlmLimiter.check(actor);
+		if (!check.allowed) {
+			c.header("Retry-After", String(Math.ceil((check.resetAt - Date.now()) / 1000)));
+			return c.json({ error: "rate limit exceeded", retryAfter: check.resetAt }, 429);
+		}
+		authRecallLlmLimiter.record(actor);
+	}
 	try {
-		const agentId = body.agentId ?? c.req.header("x-signet-agent-id") ?? "default";
+		const agentId = resolveAgentId({ agentId: body.agentId, sessionKey: c.req.header("x-signet-session-key") });
+		const agentScope = getAgentScope(agentId);
 		// Enforce auth scope: scoped tokens may only read their own project.
 		const scopeProject = c.get("auth")?.claims?.scope?.project;
 		const result = await hybridRecall(
-			{ ...body, query, agentId, ...(scopeProject ? { project: scopeProject } : {}) },
+			{
+				...body,
+				query,
+				agentId,
+				readPolicy: agentScope.readPolicy,
+				policyGroup: agentScope.policyGroup,
+				...(scopeProject ? { project: scopeProject } : {}),
+			},
 			cfg,
 			fetchEmbedding,
 		);
@@ -5064,7 +5314,10 @@ setFetchEmbedding(fetchEmbedding);
 
 // Marketplace routes (MCP servers catalog + routing)
 import { mountMarketplaceRoutes } from "./routes/marketplace.js";
-mountMarketplaceRoutes(app);
+mountMarketplaceRoutes(app, authConfig.mode);
+
+import { mountMcpAnalyticsRoutes } from "./routes/mcp-analytics.js";
+mountMcpAnalyticsRoutes(app, authConfig.mode);
 
 import { mountAppTrayRoutes } from "./routes/app-tray.js";
 mountAppTrayRoutes(app);
@@ -5097,22 +5350,44 @@ mountOsAgentRoutes(app);
 // Harnesses API
 // ============================================================================
 
+function findForgeBinaryPath(): string | null {
+	return findSignetForgeBinary(AGENTS_DIR);
+}
+
 app.get("/api/harnesses", async (c) => {
+	const verifiedForgePath = findForgeBinaryPath();
 	const configs = [
-		{ name: "Claude Code", id: "claude-code", path: join(homedir(), ".claude", "settings.json") },
+		{
+			name: "Claude Code",
+			id: "claude-code",
+			path: join(homedir(), ".claude", "settings.json"),
+			exists: existsSync(join(homedir(), ".claude", "settings.json")),
+		},
 		{
 			name: "OpenCode",
 			id: "opencode",
 			path: join(homedir(), ".config", "opencode", "AGENTS.md"),
+			exists: existsSync(join(homedir(), ".config", "opencode", "AGENTS.md")),
 		},
-		{ name: "OpenClaw", id: "openclaw", path: join(AGENTS_DIR, "AGENTS.md") },
+		{
+			name: "OpenClaw",
+			id: "openclaw",
+			path: join(AGENTS_DIR, "AGENTS.md"),
+			exists: existsSync(join(AGENTS_DIR, "AGENTS.md")),
+		},
+		{
+			name: "Forge",
+			id: "forge",
+			path: verifiedForgePath ?? resolveSignetForgeManagedPath(),
+			exists: Boolean(verifiedForgePath),
+		},
 	];
 
 	const harnesses = configs.map((config) => ({
 		name: config.name,
 		id: config.id,
 		path: config.path,
-		exists: existsSync(config.path),
+		exists: config.exists,
 		lastSeen: harnessLastSeen.get(config.id) ?? null,
 	}));
 
@@ -5430,6 +5705,7 @@ app.delete("/api/secrets/:name", (c) => {
 // ============================================================================
 
 import {
+	type CheckpointExtractRequest,
 	type PreCompactionRequest,
 	type RecallRequest,
 	type RememberRequest,
@@ -5437,6 +5713,7 @@ import {
 	type SessionStartRequest,
 	type SynthesisRequest,
 	type UserPromptSubmitRequest,
+	handleCheckpointExtract,
 	handlePreCompaction,
 	handleSessionEnd,
 	handleSessionStart,
@@ -5445,6 +5722,8 @@ import {
 	resetPromptDedup,
 	writeMemoryMd,
 } from "./hooks.js";
+import { writeCompactionArtifact } from "./memory-lineage.js";
+import { upsertSessionTranscript } from "./session-transcripts.js";
 
 import {
 	type RuntimePath,
@@ -5456,7 +5735,10 @@ import {
 	getSessionPath,
 	hasSession,
 	isSessionBypassed,
+	normalizeSessionKey,
+	releaseAllSessions,
 	releaseSession,
+	renewSession,
 	startSessionCleanup,
 	stopSessionCleanup,
 	unbypassSession,
@@ -5509,7 +5791,44 @@ function isInternalCall(c: Context): boolean {
 function checkBypass(body?: { sessionKey?: string; sessionId?: string }): boolean {
 	const key = body?.sessionKey ?? body?.sessionId;
 	if (!key) return false;
+	// isSessionBypassed normalizes the key via normalizeSessionKey() internally,
+	// so raw "session:<uuid>" forms from hook bodies are handled correctly.
 	return isSessionBypassed(key);
+}
+
+function listLiveSessions(agentId: string): Array<{
+	key: string;
+	runtimePath: string;
+	claimedAt: string;
+	expiresAt: string | null;
+	bypassed: boolean;
+}> {
+	// Seed from tracker claims for this agent. Claims now carry agentId so
+	// sessions from another agent workspace that happens to share the daemon
+	// port cannot appear in this agent's session list.
+	const byKey = new Map(
+		getActiveSessions()
+			.filter((s) => s.agentId === agentId)
+			.map((session) => [session.key, session] as const),
+	);
+
+	// Merge in presence-only sessions for this agent (no tracker claim yet,
+	// e.g. plugin path or session whose claim arrived after presence).
+	// Filter by agentId here since presence can contain cross-agent records.
+	for (const presence of listAgentPresence({ limit: Number.MAX_SAFE_INTEGER })) {
+		if (presence.agentId !== agentId) continue;
+		if (!presence.sessionKey) continue;
+		const key = normalizeSessionKey(presence.sessionKey);
+		if (byKey.has(key)) continue;
+		byKey.set(key, {
+			key,
+			runtimePath: presence.runtimePath ?? "unknown",
+			claimedAt: presence.startedAt,
+			expiresAt: null,
+			bypassed: isSessionBypassed(key),
+		});
+	}
+	return [...byKey.values()].sort((a, b) => b.claimedAt.localeCompare(a.claimedAt));
 }
 
 // Session start hook - provides context/memories for injection
@@ -5527,9 +5846,15 @@ app.post("/api/hooks/session-start", async (c) => {
 		const runtimePath = resolveRuntimePath(c, body);
 		if (runtimePath) body.runtimePath = runtimePath;
 
-		// Enforce single runtime path per session
+		// Enforce single runtime path per session.
+		// Use resolveAgentId to match the same agent-resolution path used
+		// throughout the hook (handles body.agentId and session-key-encoded ids).
 		if (body.sessionKey && runtimePath) {
-			const claim = claimSession(body.sessionKey, runtimePath);
+			const claim = claimSession(
+				body.sessionKey,
+				runtimePath,
+				resolveAgentId({ agentId: body.agentId, sessionKey: body.sessionKey }),
+			);
 			if (!claim.ok) {
 				return c.json(
 					{
@@ -5669,6 +5994,43 @@ app.post("/api/hooks/session-end", async (c) => {
 	}
 });
 
+// Mid-session checkpoint extraction (long-lived sessions)
+app.post("/api/hooks/session-checkpoint-extract", async (c) => {
+	if (isInternalCall(c)) {
+		return c.json({ skipped: true });
+	}
+	try {
+		const body = (await c.req.json()) as CheckpointExtractRequest;
+
+		if (!body.harness || !body.sessionKey) {
+			return c.json({ error: "harness and sessionKey are required" }, 400);
+		}
+
+		const runtimePath = resolveRuntimePath(c, body);
+		if (runtimePath) body.runtimePath = runtimePath;
+
+		// Reject if the session was claimed by a different runtime path so a
+		// plugin running in parallel cannot enqueue jobs for another session.
+		const conflict = checkSessionClaim(c, body.sessionKey, runtimePath);
+		if (conflict) return conflict;
+
+		stampHarness(body.harness);
+
+		if (isSessionBypassed(body.sessionKey)) {
+			return c.json({ skipped: true });
+		}
+
+		// Refresh session TTL — keeps the session alive without ending it
+		renewSession(body.sessionKey);
+
+		const result = handleCheckpointExtract(body);
+		return c.json(result);
+	} catch (e) {
+		logger.error("hooks", "Checkpoint extract hook failed", e as Error);
+		return c.json({ error: "Hook execution failed" }, 500);
+	}
+});
+
 // Remember hook - explicit memory save
 app.post("/api/hooks/remember", async (c) => {
 	if (isInternalCall(c)) {
@@ -5730,9 +6092,20 @@ app.post("/api/hooks/recall", async (c) => {
 			return c.json({ memories: [], count: 0, bypassed: true });
 		}
 
-		const agentId = c.req.header("x-signet-agent-id") ?? "default";
+		const agentId = resolveAgentId({
+			agentId: c.req.header("x-signet-agent-id"),
+			sessionKey: body.sessionKey,
+		});
+		const agentScope = getAgentScope(agentId);
 		const result = await hybridRecall(
-			{ query: body.query, limit: body.limit, scope: body.project, agentId },
+			{
+				query: body.query,
+				limit: body.limit,
+				scope: body.project,
+				agentId,
+				readPolicy: agentScope.readPolicy,
+				policyGroup: agentScope.policyGroup,
+			},
 			cfg,
 			fetchEmbedding,
 		);
@@ -5777,6 +6150,8 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 			harness: string;
 			summary: string;
 			sessionKey?: string;
+			project?: string;
+			agentId?: string;
 			runtimePath?: string;
 		};
 
@@ -5798,25 +6173,112 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 		}
 
 		const now = new Date().toISOString();
+		const scopedAgent = resolveScopedAgentId(c, resolveAgentId({ agentId: body.agentId, sessionKey: body.sessionKey }));
+		if (scopedAgent.error) {
+			return c.json({ error: scopedAgent.error }, 403);
+		}
+		const agentId = scopedAgent.agentId;
+		const transcriptRow = body.sessionKey
+			? getDbAccessor().withReadDb(
+					(db) =>
+						db
+							.prepare(
+								`SELECT project
+							 FROM session_transcripts
+							 WHERE session_key = ? AND agent_id = ?`,
+							)
+							.get(body.sessionKey, agentId) as { project: string | null } | undefined,
+				)
+			: undefined;
+		const requestedProject = transcriptRow?.project ?? parseOptionalString(body.project);
+		const scopedProject = resolveScopedProject(c, requestedProject);
+		if (scopedProject.error) {
+			return c.json({ error: scopedProject.error }, 403);
+		}
+		const project = scopedProject.project ?? null;
 
 		const summaryId = crypto.randomUUID();
+		const sessionId = body.sessionKey ?? `compaction:${now}`;
 		getDbAccessor().withWriteTx((db) => {
-			db.prepare(`
-        INSERT INTO memories (id, content, type, importance, source_type, who, tags, created_at, updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+			db.prepare(
+				`INSERT INTO memories (
+					id, content, type, importance, source_id, source_type,
+					who, tags, project, agent_id, created_at, updated_at, updated_by
+				)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			).run(
 				summaryId,
 				body.summary,
 				"session_summary",
 				0.8,
+				body.sessionKey ?? null,
 				body.harness,
 				"system",
-				JSON.stringify(["session", "summary", body.harness]),
+				`session,summary,${body.harness}`,
+				project,
+				agentId,
 				now,
 				now,
 				"system",
 			);
+
+			const table = db
+				.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'`)
+				.get();
+			if (table) {
+				const nodeId = body.sessionKey ? `${body.sessionKey}:compaction:${Date.parse(now)}` : crypto.randomUUID();
+				db.prepare(
+					`INSERT OR REPLACE INTO session_summaries (
+						id, project, depth, kind, content, token_count,
+						earliest_at, latest_at, session_key, harness,
+						agent_id, source_type, source_ref, meta_json, created_at
+					) VALUES (?, ?, 0, 'session', ?, ?, ?, ?, ?, ?, ?, 'compaction', ?, ?, ?)`,
+				).run(
+					nodeId,
+					project,
+					body.summary,
+					Math.ceil(body.summary.length / 4),
+					now,
+					now,
+					body.sessionKey ?? null,
+					body.harness,
+					agentId,
+					body.sessionKey ?? null,
+					JSON.stringify({ source: "compaction-complete" }),
+					now,
+				);
+				upsertThreadHead(db as unknown as Database, {
+					agentId,
+					nodeId,
+					content: body.summary,
+					latestAt: now,
+					project,
+					sessionKey: body.sessionKey ?? null,
+					sourceType: "compaction",
+					sourceRef: body.sessionKey ?? null,
+					harness: body.harness,
+				});
+			}
 		});
+
+		try {
+			await writeCompactionArtifact({
+				agentId,
+				sessionId,
+				sessionKey: body.sessionKey ?? null,
+				project,
+				harness: body.harness,
+				capturedAt: now,
+				startedAt: null,
+				endedAt: null,
+				summary: body.summary,
+			});
+		} catch (err) {
+			logger.warn("hooks", "Compaction artifact write failed (non-fatal)", {
+				error: err instanceof Error ? err.message : String(err),
+				sessionKey: body.sessionKey,
+			});
+		}
 
 		logger.info("hooks", "Compaction summary saved", {
 			harness: body.harness,
@@ -5828,6 +6290,60 @@ app.post("/api/hooks/compaction-complete", async (c) => {
 		if (body.sessionKey) {
 			resetPromptDedup(body.sessionKey);
 		}
+
+		// Compaction resets the message array to a short summary. Clear the
+		// stored transcript and extract cursor so post-compaction inline
+		// transcripts from event.messages can accumulate from byte 0.
+		// Without this, the pre-compaction cursor would exceed the new
+		// transcript length and every checkpoint would be skipped.
+		if (body.sessionKey) {
+			try {
+				getDbAccessor().withWriteTx((db) => {
+					const hasTx = db
+						.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_transcripts'")
+						.get();
+					if (hasTx) {
+						db.prepare("DELETE FROM session_transcripts WHERE session_key = ? AND agent_id = ?").run(
+							body.sessionKey,
+							agentId,
+						);
+					}
+					const hasCur = db
+						.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='session_extract_cursors'")
+						.get();
+					if (hasCur) {
+						db.prepare("DELETE FROM session_extract_cursors WHERE session_key = ? AND agent_id = ?").run(
+							body.sessionKey,
+							agentId,
+						);
+					}
+				});
+			} catch (err) {
+				logger.warn("hooks", "Failed to reset checkpoint state after compaction (non-fatal)", {
+					error: err instanceof Error ? err.message : String(err),
+					sessionKey: body.sessionKey,
+				});
+			}
+		}
+
+		void getSynthesisWorker()
+			?.triggerNow({
+				force: true,
+				source: "compaction-complete",
+				agentId,
+			})
+			.then((result) => {
+				if (!result.skipped) return;
+				logger.info("synthesis", "Skipped MEMORY.md synthesis after compaction", {
+					reason: result.reason,
+					sessionKey: body.sessionKey,
+				});
+			})
+			.catch((error) => {
+				logger.warn("synthesis", "Failed to trigger MEMORY.md synthesis after compaction", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 
 		return c.json({
 			success: true,
@@ -5899,12 +6415,15 @@ app.post("/api/cross-agent/presence", async (c) => {
 
 	const runtimePathRaw = parseOptionalString(payload.runtimePath);
 	const runtimePath = runtimePathRaw === "plugin" || runtimePathRaw === "legacy" ? runtimePathRaw : undefined;
-	const requestedAgentId = parseOptionalString(payload.agentId);
+	const sessionKey = parseOptionalString(payload.sessionKey);
+	// Resolve agent using the same fallback chain as hook paths: explicit
+	// agentId takes precedence, then the scope encoded in the session key
+	// (agent:<id>:<uuid>), then "default".
+	const requestedAgentId = resolveAgentId({ agentId: parseOptionalString(payload.agentId), sessionKey });
 	const scopedAgent = resolveScopedAgentId(c, requestedAgentId, "default");
 	if (scopedAgent.error) {
 		return c.json({ error: scopedAgent.error }, 403);
 	}
-	const sessionKey = parseOptionalString(payload.sessionKey);
 	const sessionError = validateSessionAgentBinding(c, sessionKey, scopedAgent.agentId, {
 		requireExisting: false,
 		context: "sessionKey",
@@ -6217,8 +6736,18 @@ app.get("/api/hooks/synthesis/config", (c) => {
 // Request MEMORY.md synthesis
 app.post("/api/hooks/synthesis", async (c) => {
 	try {
-		const body = (await c.req.json()) as SynthesisRequest;
-		const result = handleSynthesisRequest(body);
+		const body = (await c.req.json()) as SynthesisRequest & { agentId?: string; sessionKey?: string };
+		const scopedAgent = resolveScopedAgentId(
+			c,
+			resolveAgentId({
+				agentId: body.agentId ?? c.req.header("x-signet-agent-id"),
+				sessionKey: body.sessionKey ?? c.req.header("x-signet-session-key"),
+			}),
+		);
+		if (scopedAgent.error) {
+			return c.json({ error: scopedAgent.error }, 403);
+		}
+		const result = handleSynthesisRequest(body, { agentId: scopedAgent.agentId });
 		return c.json(result);
 	} catch (e) {
 		logger.error("hooks", "Synthesis request failed", e as Error);
@@ -6229,7 +6758,7 @@ app.post("/api/hooks/synthesis", async (c) => {
 // Save synthesized MEMORY.md
 app.post("/api/hooks/synthesis/complete", async (c) => {
 	try {
-		const body = (await c.req.json()) as { content: string };
+		const body = (await c.req.json()) as { content: string; agentId?: string; sessionKey?: string };
 
 		if (!body.content) {
 			return c.json({ error: "content is required" }, 400);
@@ -6253,9 +6782,23 @@ app.post("/api/hooks/synthesis/complete", async (c) => {
 		}
 
 		try {
-			const result = writeMemoryMd(body.content);
+			const scopedAgent = resolveScopedAgentId(
+				c,
+				resolveAgentId({
+					agentId: body.agentId ?? c.req.header("x-signet-agent-id"),
+					sessionKey: body.sessionKey ?? c.req.header("x-signet-session-key"),
+				}),
+			);
+			if (scopedAgent.error) {
+				return c.json({ error: scopedAgent.error }, 403);
+			}
+			const result = writeMemoryMd(body.content, {
+				agentId: scopedAgent.agentId,
+				owner: "api-hooks-synthesis-complete",
+			});
 			if (!result.ok) {
-				return c.json({ error: result.error }, 400);
+				const status = result.code === "busy" ? 409 : 400;
+				return c.json({ error: result.error }, status);
 			}
 			logger.info("hooks", "MEMORY.md synthesized");
 		} finally {
@@ -6302,16 +6845,25 @@ app.get("/api/synthesis/status", (c) => {
 // Session API
 // ============================================================================
 
-// List active sessions with bypass status
+// List active sessions for the requesting agent with bypass status.
+// Cross-agent session visibility is intentionally served by
+// /api/cross-agent/presence — surfacing other agents' sessions here
+// would violate per-agent data scoping (CLAUDE.md §agent-scoping).
+// Optional ?agent_id= query param to target a specific agent's sessions.
 app.get("/api/sessions", (c) => {
-	const sessions = getActiveSessions();
+	const scopedAgent = resolveScopedAgentId(c, c.req.query("agent_id"), "default");
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+	const sessions = listLiveSessions(scopedAgent.agentId);
 	return c.json({ sessions, count: sessions.length });
 });
 
 // Get single session status
-app.get("/api/sessions/:key", (c) => {
-	const key = c.req.param("key");
-	const sessions = getActiveSessions();
+// Optional ?agent_id= query param to target a specific agent's session.
+app.get("/api/sessions/:key{(?!summaries$)[^/]+}", (c) => {
+	const scopedAgent = resolveScopedAgentId(c, c.req.query("agent_id"), "default");
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+	const key = normalizeSessionKey(c.req.param("key"));
+	const sessions = listLiveSessions(scopedAgent.agentId);
 	const session = sessions.find((s) => s.key === key);
 	if (!session) {
 		return c.json({ error: "Session not found" }, 404);
@@ -6320,9 +6872,12 @@ app.get("/api/sessions/:key", (c) => {
 });
 
 // Toggle bypass for a session
-app.post("/api/sessions/:key/bypass", async (c) => {
-	const key = c.req.param("key");
-	const sessions = getActiveSessions();
+// Optional ?agent_id= query param to target a specific agent's session.
+app.post("/api/sessions/:key{(?!summaries$)[^/]+}/bypass", async (c) => {
+	const scopedAgent = resolveScopedAgentId(c, c.req.query("agent_id"), "default");
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+	const key = normalizeSessionKey(c.req.param("key"));
+	const sessions = listLiveSessions(scopedAgent.agentId);
 	const session = sessions.find((s) => s.key === key);
 	if (!session) {
 		return c.json({ error: "Session not found" }, 404);
@@ -6335,20 +6890,64 @@ app.post("/api/sessions/:key/bypass", async (c) => {
 	const enabled = body.enabled === true;
 
 	if (enabled) {
-		const ok = bypassSession(key);
+		// allowUnknown for presence-only sessions (expiresAt === null means no
+		// tracker claim) — bypassSession checks sessions.has(key) otherwise.
+		const ok = bypassSession(key, { allowUnknown: session.expiresAt === null });
 		if (!ok) {
 			return c.json({ error: "Session not found or already released" }, 404);
 		}
 	} else {
+		// unbypassSession is unconditional — bypassedSessions.delete() is a
+		// safe no-op for unknown keys, so no allowUnknown guard is needed.
 		unbypassSession(key);
 	}
 	return c.json({ key, bypassed: enabled });
 });
 
+// Renew a session — reset TTL to prevent silent eviction
+// Optional ?agent_id= query param to target a specific agent's session.
+app.post("/api/sessions/:key{(?!summaries$)[^/]+}/renew", (c) => {
+	const scopedAgent = resolveScopedAgentId(c, c.req.query("agent_id"), "default");
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
+	const key = normalizeSessionKey(c.req.param("key"));
+	const session = listLiveSessions(scopedAgent.agentId).find((s) => s.key === key);
+	if (!session) {
+		return c.json({ error: "Session not found" }, 404);
+	}
+	// Presence-only sessions (expiresAt === null) have no tracker claim —
+	// renewSession would return null, but the session is live via cross-agent
+	// presence. Refresh last_seen_at so the 4-hour stale filter doesn't evict it.
+	// Pass agentId so touchAgentPresence verifies record ownership before touching.
+	if (session.expiresAt === null) {
+		touchAgentPresence(key, scopedAgent.agentId);
+		return c.json({ key, renewed: true });
+	}
+	const expiresAt = renewSession(key);
+	if (!expiresAt) {
+		return c.json({ error: "Session not found or expired" }, 404);
+	}
+	return c.json({ key, renewed: true, expiresAt });
+});
+
 // Session summaries DAG
 app.get("/api/sessions/summaries", (c) => {
 	const accessor = getDbAccessor();
-	const project = c.req.query("project");
+	const scopedAgent = resolveScopedAgentId(
+		c,
+		resolveAgentId({
+			agentId: c.req.query("agentId") ?? c.req.header("x-signet-agent-id"),
+			sessionKey: c.req.query("sessionKey") ?? c.req.header("x-signet-session-key"),
+		}),
+	);
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const scopedProject = resolveScopedProject(c, c.req.query("project"));
+	if (scopedProject.error) {
+		return c.json({ error: scopedProject.error }, 403);
+	}
+	const agentId = scopedAgent.agentId;
+	const project = scopedProject.project;
 	const depthRaw = c.req.query("depth");
 	const depthNum = depthRaw !== undefined ? Number(depthRaw) : undefined;
 	if (
@@ -6371,8 +6970,8 @@ app.get("/api/sessions/summaries", (c) => {
 	}
 
 	return accessor.withReadDb((db) => {
-		let where = "WHERE 1=1";
-		const params: unknown[] = [];
+		let where = "WHERE agent_id = ?";
+		const params: unknown[] = [agentId];
 
 		if (project) {
 			where += " AND project = ?";
@@ -6390,7 +6989,8 @@ app.get("/api/sessions/summaries", (c) => {
 		const summaries = db
 			.prepare(
 				`SELECT id, project, depth, kind, content, token_count,
-				        earliest_at, latest_at, session_key, harness, agent_id, created_at
+				        earliest_at, latest_at, session_key, harness, agent_id,
+				        source_type, source_ref, meta_json, created_at
 				 FROM session_summaries
 				 ${where}
 				 ORDER BY latest_at DESC
@@ -6410,6 +7010,44 @@ app.get("/api/sessions/summaries", (c) => {
 			total: countRow?.cnt ?? 0,
 		});
 	});
+});
+
+app.post("/api/sessions/summaries/expand", async (c) => {
+	const body = await c.req.json().catch(() => ({}));
+	const id = typeof body.id === "string" ? body.id.trim() : "";
+	if (!id) {
+		return c.json({ error: "id is required" }, 400);
+	}
+
+	const includeTranscript = typeof body.includeTranscript === "boolean" ? body.includeTranscript : true;
+	const transcriptCharLimit =
+		typeof body.transcriptCharLimit === "number" && Number.isFinite(body.transcriptCharLimit)
+			? Math.max(200, Math.min(12000, Math.trunc(body.transcriptCharLimit)))
+			: undefined;
+	const scopedAgent = resolveScopedAgentId(
+		c,
+		resolveAgentId({
+			agentId: typeof body.agentId === "string" ? body.agentId : c.req.header("x-signet-agent-id"),
+			sessionKey: typeof body.sessionKey === "string" ? body.sessionKey : c.req.header("x-signet-session-key"),
+		}),
+	);
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const scopedProject = resolveScopedProject(c, undefined);
+	if (scopedProject.error) {
+		return c.json({ error: scopedProject.error }, 403);
+	}
+
+	const result = expandTemporalNode(id, scopedAgent.agentId, {
+		includeTranscript,
+		project: scopedProject.project,
+		transcriptCharLimit,
+	});
+	if (!result) {
+		return c.json({ error: "summary node not found" }, 404);
+	}
+	return c.json(result);
 });
 
 // ============================================================================
@@ -7037,6 +7675,8 @@ app.get("/api/tasks/:id/runs", (c) => {
 
 app.get("/api/status", (c) => {
 	const config = loadMemoryConfig(AGENTS_DIR);
+	const workerStatus = getPipelineWorkerStatus();
+	const extractionWorker = workerStatus.extraction;
 	const configuredLogFile = readEnvTrimmed("SIGNET_LOG_FILE");
 	const configuredLogDir = readEnvTrimmed("SIGNET_LOG_DIR") ?? LOG_DIR;
 	const datedLogFile = join(configuredLogDir, `signet-${new Date().toISOString().slice(0, 10)}.log`);
@@ -7081,6 +7721,17 @@ app.get("/api/status", (c) => {
 		agentsDir: AGENTS_DIR,
 		memoryDb: existsSync(MEMORY_DB),
 		pipelineV2: config.pipelineV2,
+		pipeline: {
+			extraction: {
+				running: extractionWorker.running,
+				overloaded: extractionWorker.stats?.overloaded ?? false,
+				loadPerCpu: extractionWorker.stats?.loadPerCpu ?? null,
+				maxLoadPerCpu: extractionWorker.stats?.maxLoadPerCpu ?? null,
+				overloadBackoffMs: extractionWorker.stats?.overloadBackoffMs ?? null,
+				overloadSince: extractionWorker.stats?.overloadSince ?? null,
+				nextTickInMs: extractionWorker.stats?.nextTickInMs ?? null,
+			},
+		},
 		providerResolution: providerRuntimeResolution,
 		logging: {
 			logDir: configuredLogFile ? dirname(configuredLogFile) : configuredLogDir,
@@ -7177,6 +7828,63 @@ app.get("/api/diagnostics/:domain", (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// OpenClaw plugin health diagnostics
+// ---------------------------------------------------------------------------
+
+// Unauthenticated — daemon is local-only, plugin may not carry auth token
+app.post("/api/diagnostics/openclaw/heartbeat", async (c) => {
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Invalid JSON" }, 400);
+	}
+	if (!body || typeof body !== "object") {
+		return c.json({ error: "Body must be an object" }, 400);
+	}
+	const b = body as Record<string, unknown>;
+	if (typeof b.pluginVersion !== "string") {
+		return c.json({ error: "pluginVersion (string) is required" }, 400);
+	}
+	const prev = openClawHeartbeat?.data;
+	openClawHeartbeat = {
+		timestamp: new Date().toISOString(),
+		data: {
+			pluginVersion: b.pluginVersion.slice(0, 128),
+			hooksRegistered: Array.isArray(b.hooksRegistered)
+				? (b.hooksRegistered as unknown[])
+						.filter((x): x is string => typeof x === "string")
+						.map((s) => s.slice(0, 128))
+						.slice(0, 50)
+				: [],
+			lastHookCall: typeof b.lastHookCall === "string" ? b.lastHookCall.slice(0, 512) : null,
+			lastError: typeof b.lastError === "string" ? b.lastError.slice(0, 512) : null,
+			latencyMs: typeof b.latencyMs === "number" && Number.isFinite(b.latencyMs) ? b.latencyMs : 0,
+			// Plugin sends per-heartbeat deltas, not cumulative totals. Clamp to
+			// non-negative to guard against malformed or negative inputs corrupting counters.
+			lastFailedDelta: Math.max(
+				0,
+				typeof b.hooksFailed === "number" ? b.hooksFailed : typeof b.errorCount === "number" ? b.errorCount : 0,
+			),
+			totalSucceeded:
+				(prev?.totalSucceeded ?? 0) + Math.max(0, typeof b.hooksSucceeded === "number" ? b.hooksSucceeded : 0),
+			totalFailed:
+				(prev?.totalFailed ?? 0) +
+				Math.max(
+					0,
+					typeof b.hooksFailed === "number" ? b.hooksFailed : typeof b.errorCount === "number" ? b.errorCount : 0,
+				),
+		},
+	};
+	invalidateDiagnosticsCache();
+	return c.json({ ok: true });
+});
+
+app.get("/api/diagnostics/openclaw", (c) => {
+	return c.json(buildOpenClawHealth());
+});
+
+// ---------------------------------------------------------------------------
 // Pipeline status (composite snapshot for dashboard visualization)
 // ---------------------------------------------------------------------------
 
@@ -7215,13 +7923,7 @@ app.get("/api/pipeline/status", (c) => {
 	const diagnostics = getCachedDiagnosticsReport();
 
 	const pipelineV2 = cfg.pipelineV2;
-	const mode = !pipelineV2.enabled
-		? "disabled"
-		: pipelineV2.mutationsFrozen
-			? "frozen"
-			: pipelineV2.shadowMode
-				? "shadow"
-				: "controlled-write";
+	const mode = readPipelineMode(pipelineV2);
 
 	// Predictor sidecar snapshot for pipeline overview
 	const predictorHealth = diagnostics.predictor;
@@ -7249,8 +7951,60 @@ app.get("/api/pipeline/status", (c) => {
 	});
 });
 
+const pipelineAdminGuard = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
+	const perm = requirePermission("admin", authConfig);
+	const rate = requireRateLimit("admin", authAdminLimiter, authConfig);
+	return perm(c, async () => rate(c, next));
+};
+
+async function togglePipelinePause(c: Context, paused: boolean): Promise<Response> {
+	if (shuttingDown) {
+		return c.json({ error: "Daemon is shutting down" }, 503);
+	}
+	if (pipelineTransition) {
+		return c.json({ error: "Pipeline transition already in progress" }, 409);
+	}
+
+	const prev = readPipelinePauseState(AGENTS_DIR);
+	if (!prev.exists) {
+		return c.json({ error: "No Signet config file found" }, 404);
+	}
+
+	pipelineTransition = true;
+	try {
+		const changed = prev.paused !== paused;
+		const next = changed ? setPipelinePaused(AGENTS_DIR, paused) : prev;
+		if (changed) {
+			await restartPipelineRuntime(loadMemoryConfig(AGENTS_DIR), telemetryRef);
+		}
+		const liveCfg = loadMemoryConfig(AGENTS_DIR);
+		return c.json({
+			success: true,
+			changed,
+			paused: next.paused,
+			file: next.file,
+			mode: readPipelineMode(liveCfg.pipelineV2),
+		});
+	} catch (err) {
+		logger.error("pipeline", paused ? "Failed to pause pipeline" : "Failed to resume pipeline", err);
+		return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+	} finally {
+		pipelineTransition = false;
+	}
+}
+
+app.use("/api/pipeline/pause", pipelineAdminGuard);
+app.use("/api/pipeline/resume", pipelineAdminGuard);
 app.use("/api/pipeline/nudge", async (c, next) => {
 	return requirePermission("admin", authConfig)(c, next);
+});
+
+app.post("/api/pipeline/pause", (c) => {
+	return togglePipelinePause(c, true);
+});
+
+app.post("/api/pipeline/resume", (c) => {
+	return togglePipelinePause(c, false);
 });
 
 app.post("/api/pipeline/nudge", (c) => {
@@ -7646,9 +8400,7 @@ app.get("/api/repair/cold-stats", (c) => {
 
 app.post("/api/repair/cluster-entities", (c) => {
 	const agentId = c.req.query("agent_id") ?? "default";
-	const result = getDbAccessor().withWriteTx((db) =>
-		clusterEntities(db, agentId),
-	);
+	const result = getDbAccessor().withWriteTx((db) => clusterEntities(db, agentId));
 	return c.json(result);
 });
 
@@ -7664,13 +8416,16 @@ app.post("/api/repair/relink-entities", async (c) => {
 	const accessor = getDbAccessor();
 
 	// Find memories with no entity mentions
-	const unlinked = accessor.withReadDb((db) =>
-		db.prepare(
-			`SELECT id, content FROM memories
+	const unlinked = accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT id, content FROM memories
 			 WHERE is_deleted = 0
 			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_entity_mentions)
 			 LIMIT ?`,
-		).all(batchSize) as Array<{ id: string; content: string }>,
+				)
+				.all(batchSize) as Array<{ id: string; content: string }>,
 	);
 
 	if (unlinked.length === 0) {
@@ -7683,9 +8438,7 @@ app.post("/api/repair/relink-entities", async (c) => {
 	let attributes = 0;
 
 	for (const mem of unlinked) {
-		const result = accessor.withWriteTx((db) =>
-			linkMemoryToEntities(db, mem.id, mem.content, agentId),
-		);
+		const result = accessor.withWriteTx((db) => linkMemoryToEntities(db, mem.id, mem.content, agentId));
 		linked += result.linked;
 		entities += result.entityIds.length;
 		aspects += result.aspects;
@@ -7693,12 +8446,17 @@ app.post("/api/repair/relink-entities", async (c) => {
 	}
 
 	// Check how many remain
-	const remaining = accessor.withReadDb((db) =>
-		(db.prepare(
-			`SELECT COUNT(*) as cnt FROM memories
+	const remaining = accessor.withReadDb(
+		(db) =>
+			(
+				db
+					.prepare(
+						`SELECT COUNT(*) as cnt FROM memories
 			 WHERE is_deleted = 0
 			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_entity_mentions)`,
-		).get() as { cnt: number }).cnt,
+					)
+					.get() as { cnt: number }
+			).cnt,
 	);
 
 	return c.json({
@@ -7729,14 +8487,17 @@ app.post("/api/repair/backfill-hints", async (c) => {
 
 	const accessor = getDbAccessor();
 	// Find unscoped memories that have no hints yet
-	const unhinted = accessor.withReadDb((db) =>
-		db.prepare(
-			`SELECT m.id, m.content FROM memories m
+	const unhinted = accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT m.id, m.content FROM memories m
 			 WHERE m.is_deleted = 0 AND m.scope IS NULL
 			   AND m.id NOT IN (SELECT DISTINCT memory_id FROM memory_hints)
 			 ORDER BY m.created_at DESC
 			 LIMIT ?`,
-		).all(batchSize) as Array<{ id: string; content: string }>,
+				)
+				.all(batchSize) as Array<{ id: string; content: string }>,
 	);
 
 	if (unhinted.length === 0) {
@@ -7752,20 +8513,73 @@ app.post("/api/repair/backfill-hints", async (c) => {
 		}
 	});
 
-	const remaining = accessor.withReadDb((db) =>
-		(db.prepare(
-			`SELECT COUNT(*) as cnt FROM memories
+	const remaining = accessor.withReadDb(
+		(db) =>
+			(
+				db
+					.prepare(
+						`SELECT COUNT(*) as cnt FROM memories
 			 WHERE is_deleted = 0 AND scope IS NULL
 			   AND id NOT IN (SELECT DISTINCT memory_id FROM memory_hints)`,
-		).get() as { cnt: number }).cnt,
+					)
+					.get() as { cnt: number }
+			).cnt,
 	);
 
 	return c.json({
 		action: "backfill-hints",
 		enqueued,
 		remaining,
-		message: remaining > 0 ? `${remaining} unscoped memories still need hints — call again` : "all unscoped memories have hints",
+		message:
+			remaining > 0
+				? `${remaining} unscoped memories still need hints — call again`
+				: "all unscoped memories have hints",
 	});
+});
+
+// ---------------------------------------------------------------------------
+// Dead memory hygiene
+// ---------------------------------------------------------------------------
+
+app.get("/api/repair/dead-memories", (c) => {
+	const maxConfidence = Number(c.req.query("maxConfidence") ?? "0.1");
+	const maxAccessDays = Number(c.req.query("maxAccessDays") ?? "90");
+	const limit = Math.min(Number(c.req.query("limit") ?? "200"), 500);
+	if (
+		!Number.isFinite(maxConfidence) ||
+		!Number.isFinite(maxAccessDays) ||
+		!Number.isFinite(limit) ||
+		maxConfidence < 0 ||
+		maxConfidence > 1 ||
+		maxAccessDays < 0 ||
+		limit < 0
+	) {
+		return c.json({ error: "maxConfidence must be 0–1, maxAccessDays and limit must be non-negative" }, 400);
+	}
+	const dead = getDbAccessor().withReadDb((db) => findDeadMemories(db, { maxConfidence, maxAccessDays, limit }));
+	return c.json({ count: dead.length, memories: dead });
+});
+
+app.post("/api/repair/dead-memories/forget", async (c) => {
+	let ids: unknown;
+	try {
+		const body = await c.req.json();
+		ids = body?.ids;
+	} catch {
+		return c.json({ error: "Request body must be JSON with an ids array" }, 400);
+	}
+	if (!Array.isArray(ids) || ids.length === 0) {
+		return c.json({ error: "ids must be a non-empty array" }, 400);
+	}
+	if (ids.length > 500) {
+		return c.json({ error: "Maximum 500 ids per batch" }, 400);
+	}
+	const validIds = ids.filter((id): id is string => typeof id === "string" && id.length > 0);
+	if (validIds.length !== ids.length) {
+		return c.json({ error: "All ids must be non-empty strings" }, 400);
+	}
+	const forgotten = forgetDeadMemories(getDbAccessor(), validIds);
+	return c.json({ forgotten });
 });
 
 // ============================================================================
@@ -8134,6 +8948,8 @@ app.get("/api/knowledge/constellation", (c) => {
 });
 
 app.post("/api/knowledge/expand", async (c) => {
+	const scopedAgent = resolveScopedAgentId(c, undefined, "default");
+	if (scopedAgent.error) return c.json({ error: scopedAgent.error }, 403);
 	const body = await c.req.json().catch(() => ({}));
 	const entityName = typeof body.entity === "string" ? body.entity.trim() : "";
 	const aspectFilter = typeof body.aspect === "string" ? body.aspect.trim() : undefined;
@@ -8143,13 +8959,21 @@ app.post("/api/knowledge/expand", async (c) => {
 		return c.json({ error: "entity name is required" }, 400);
 	}
 
-	const agentId = "default";
-
-	const focal = getDbAccessor().withReadDb((db) =>
-		resolveFocalEntities(db, agentId, {
-			queryTokens: entityName.split(/\s+/),
-		}),
-	);
+	const agentId = scopedAgent.agentId;
+	const resolved = resolveNamedEntity(getDbAccessor(), {
+		agentId,
+		name: entityName,
+	});
+	const focal =
+		resolved !== null
+			? {
+					entityIds: [resolved.id],
+				}
+			: getDbAccessor().withReadDb((db) =>
+					resolveFocalEntities(db, agentId, {
+						queryTokens: entityName.split(/\s+/),
+					}),
+				);
 
 	if (focal.entityIds.length === 0) {
 		return c.json(
@@ -8318,16 +9142,25 @@ app.post("/api/knowledge/expand", async (c) => {
 
 app.post("/api/knowledge/expand/session", async (c) => {
 	const body = await c.req.json().catch(() => ({}));
-	const entityName =
-		typeof body.entityName === "string" ? body.entityName.trim() : "";
-	const sessionId =
-		typeof body.sessionId === "string" ? body.sessionId.trim() : undefined;
-	const timeRange =
-		typeof body.timeRange === "string" ? body.timeRange.trim() : undefined;
-	const maxResults =
-		typeof body.maxResults === "number"
-			? Math.max(1, Math.min(body.maxResults, 50))
-			: 10;
+	const entityName = typeof body.entityName === "string" ? body.entityName.trim() : "";
+	const scopedAgent = resolveScopedAgentId(
+		c,
+		resolveAgentId({
+			agentId: typeof body.agentId === "string" ? body.agentId : c.req.header("x-signet-agent-id"),
+			sessionKey: typeof body.sessionId === "string" ? body.sessionId : c.req.header("x-signet-session-key"),
+		}),
+	);
+	if (scopedAgent.error) {
+		return c.json({ error: scopedAgent.error }, 403);
+	}
+	const scopedProject = resolveScopedProject(c, undefined);
+	if (scopedProject.error) {
+		return c.json({ error: scopedProject.error }, 403);
+	}
+	const agentId = scopedAgent.agentId;
+	const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : undefined;
+	const timeRange = typeof body.timeRange === "string" ? body.timeRange.trim() : undefined;
+	const maxResults = typeof body.maxResults === "number" ? Math.max(1, Math.min(body.maxResults, 50)) : 10;
 
 	if (!entityName) {
 		return c.json({ error: "entityName is required" }, 400);
@@ -8336,38 +9169,28 @@ app.post("/api/knowledge/expand/session", async (c) => {
 	return getDbAccessor().withReadDb((db) => {
 		// Check if session_summaries table exists
 		const tbl = db
-			.prepare(
-				"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'",
-			)
+			.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_summaries'")
 			.get() as { name: string } | undefined;
 		if (!tbl) {
 			return c.json({ entityName, summaries: [], total: 0 });
 		}
 
-		// Resolve entity by canonical_name match
-		const entity = db
-			.prepare(
-				`SELECT id, name FROM entities
-				 WHERE canonical_name LIKE ?
-				   AND agent_id = 'default'
-				 ORDER BY mentions DESC, updated_at DESC
-				 LIMIT 1`,
-			)
-			.get(`%${entityName.toLowerCase()}%`) as
-			| { id: string; name: string }
-			| undefined;
+		const entity = resolveNamedEntity(getDbAccessor(), {
+			agentId,
+			name: entityName,
+		});
 
 		if (!entity) {
 			return c.json({ entityName, summaries: [], total: 0 });
 		}
 
-		// Build query: session_summaries ← session_summary_memories
-		//   ← memory_entity_mentions → entities
-		const conditions = [
-			"mem.entity_id = ?",
-			"ss.kind = 'session'",
-		];
-		const args: Array<string | number> = [entity.id];
+		const conditions = ["ss.agent_id = ?", "ss.kind = 'session'", "COALESCE(ss.source_type, 'summary') = 'summary'"];
+		const args: Array<string | number> = [agentId];
+
+		if (scopedProject.project) {
+			conditions.push("ss.project = ?");
+			args.push(scopedProject.project);
+		}
 
 		if (sessionId) {
 			conditions.push("ss.session_key = ?");
@@ -8375,32 +9198,57 @@ app.post("/api/knowledge/expand/session", async (c) => {
 		}
 
 		if (timeRange === "last_week") {
-			conditions.push(
-				"ss.latest_at >= datetime('now', '-7 days')",
-			);
+			conditions.push("ss.latest_at >= datetime('now', '-7 days')");
 		} else if (timeRange === "last_month") {
-			conditions.push(
-				"ss.latest_at >= datetime('now', '-30 days')",
-			);
+			conditions.push("ss.latest_at >= datetime('now', '-30 days')");
 		} else if (timeRange && timeRange.length > 0) {
 			conditions.push("ss.latest_at >= ?");
 			args.push(timeRange);
 		}
 
+		// Text fallback: only for names >= 4 chars to avoid ambiguous short
+		// tokens ("go", "ai", etc.) matching unrelated content. Normalize
+		// the content by replacing common punctuation with spaces and
+		// space-padding both ends, then match the name as a space-delimited
+		// word. This avoids prefix collisions ("signetai") while covering all
+		// punctuation-adjacent forms: "Signet.", "Signet,", "(Signet)", '"Signet"'.
+		// SQL wildcards in canonicalName are escaped; cn is lowercased.
+		const cn = entity.canonicalName.toLowerCase().replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+		const useTextFallback = cn.length >= 4;
+		// Replace common punctuation with spaces so any delimiter around the
+		// name becomes a space, then space-pad both ends of the content.
+		// A single '% cn %' pattern then handles all forms: "Signet.", "Signet,",
+		// "(Signet)", '"Signet"', "Signet:" etc. without false prefix matches.
+		// char(39)=', char(40)=(, char(41)=), char(10)=LF, char(9)=TAB
+		const normalizedContent =
+			`LOWER(' ' || REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(` +
+			`REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ss.content,` +
+			`',', ' '), '.', ' '), '!', ' '), '?', ' '), ';', ' '), '"', ' '),` +
+			`char(39), ' '), char(40), ' '), char(41), ' '),` +
+			`char(10), ' '), char(9), ' '), ':', ' '), '-', ' ') || ' ')`;
+		const fallbackClause = useTextFallback ? `OR ${normalizedContent} LIKE ? ESCAPE '\\'` : "";
+		const fallbackArgs = useTextFallback ? [`% ${cn} %`] : [];
 		const rows = db
 			.prepare(
 				`SELECT DISTINCT ss.id, ss.content, ss.session_key,
 				        ss.harness, ss.earliest_at, ss.latest_at
 				 FROM session_summaries ss
-				 JOIN session_summary_memories ssm
-				   ON ssm.summary_id = ss.id
-				 JOIN memory_entity_mentions mem
-				   ON mem.memory_id = ssm.memory_id
 				 WHERE ${conditions.join(" AND ")}
+				   AND (
+						EXISTS (
+							SELECT 1
+							FROM session_summary_memories ssm
+							JOIN memory_entity_mentions mem
+							  ON mem.memory_id = ssm.memory_id
+							WHERE ssm.summary_id = ss.id
+							  AND mem.entity_id = ?
+						)
+						${fallbackClause}
+				   )
 				 ORDER BY ss.latest_at DESC
 				 LIMIT ?`,
 			)
-			.all(...args, maxResults) as Array<{
+			.all(...args, entity.id, ...fallbackArgs, maxResults) as Array<{
 			id: string;
 			content: string;
 			session_key: string | null;
@@ -8430,22 +9278,15 @@ app.post("/api/knowledge/expand/session", async (c) => {
 
 app.post("/api/graph/impact", async (c) => {
 	const body = await c.req.json().catch(() => ({}));
-	const entityId =
-		typeof body.entityId === "string" ? body.entityId.trim() : "";
-	const direction =
-		body.direction === "upstream" ? "upstream" : "downstream";
-	const maxDepth =
-		typeof body.maxDepth === "number"
-			? Math.max(1, Math.min(body.maxDepth, 10))
-			: 3;
+	const entityId = typeof body.entityId === "string" ? body.entityId.trim() : "";
+	const direction = body.direction === "upstream" ? "upstream" : "downstream";
+	const maxDepth = typeof body.maxDepth === "number" ? Math.max(1, Math.min(body.maxDepth, 10)) : 3;
 
 	if (!entityId) {
 		return c.json({ error: "entityId is required" }, 400);
 	}
 
-	const result = getDbAccessor().withReadDb((db) =>
-		walkImpact(db, { entityId, direction, maxDepth, timeoutMs: 200 }),
-	);
+	const result = getDbAccessor().withReadDb((db) => walkImpact(db, { entityId, direction, maxDepth, timeoutMs: 200 }));
 	return c.json(result);
 });
 
@@ -8460,7 +9301,8 @@ app.get("/api/analytics/usage", (c) => {
 app.get("/api/analytics/errors", (c) => {
 	const stage = c.req.query("stage") as ErrorStage | undefined;
 	const since = c.req.query("since") ?? undefined;
-	const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+	const limitRaw = c.req.query("limit");
+	const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
 	return c.json({
 		errors: analyticsCollector.getErrors({ stage, since, limit }),
 		summary: analyticsCollector.getErrorSummary(),
@@ -8474,8 +9316,9 @@ app.get("/api/analytics/latency", (c) => {
 app.get("/api/analytics/logs", (c) => {
 	const limit = Number.parseInt(c.req.query("limit") || "100", 10);
 	const level = c.req.query("level") as "debug" | "info" | "warn" | "error" | undefined;
-	const category = c.req.query("category") as any;
-	const since = c.req.query("since") ? new Date(c.req.query("since")!) : undefined;
+	const category = c.req.query("category") as LogCategory | undefined;
+	const sinceRaw = c.req.query("since");
+	const since = sinceRaw ? new Date(sinceRaw) : undefined;
 	const logs = logger.getRecent({ limit, level, category, since });
 	return c.json({ logs, count: logs.length });
 });
@@ -8895,7 +9738,9 @@ function setupStaticServing() {
 			})(c, next);
 		});
 	} else {
-		logger.warn("daemon", "Dashboard not found - API-only mode");
+		logger.warn("daemon", "Dashboard not found - API-only mode", {
+			candidates: getDashboardCandidates(),
+		});
 		app.get("/", (c) => {
 			return c.html(`
         <!DOCTYPE html>
@@ -9027,6 +9872,7 @@ const gitConfig = loadGitConfig();
 let gitSyncTimer: ReturnType<typeof setInterval> | null = null;
 let lastGitSync: Date | null = null;
 let gitSyncInProgress = false;
+let gitSyncPromise: Promise<unknown> | null = null;
 
 function isGitRepo(dir: string): boolean {
 	return existsSync(join(dir, ".git"));
@@ -9469,26 +10315,43 @@ function startGitSyncTimer() {
 	const intervalMs = gitConfig.syncInterval * 1000;
 	logger.info("git", `Auto-sync enabled: every ${gitConfig.syncInterval}s`);
 
-	gitSyncTimer = setInterval(async () => {
-		// Check if any credentials are available (gh, ssh, credential helper, or stored token)
-		const hasCreds = await hasAnyGitCredentials();
-		if (!hasCreds) {
-			// Silently skip if no credentials configured
-			return;
-		}
+	gitSyncTimer = setInterval(() => {
+		const work = (async () => {
+			// Check if any credentials are available (gh, ssh, credential helper, or stored token)
+			const hasCreds = await hasAnyGitCredentials();
+			if (!hasCreds) {
+				// Silently skip if no credentials configured
+				return;
+			}
 
-		logger.debug("git", "Running periodic sync...");
-		const result = await gitSync();
-		if (!result.success) {
-			logger.warn("git", `Periodic sync failed: ${result.message}`);
-		}
+			logger.debug("git", "Running periodic sync...");
+			const result = await gitSync();
+			if (!result.success) {
+				logger.warn("git", `Periodic sync failed: ${result.message}`);
+			}
+		})().catch((e) => {
+			logger.warn("git", "Periodic sync error", { error: String(e) });
+		});
+		gitSyncPromise = work;
+		work.finally(() => {
+			if (gitSyncPromise === work) gitSyncPromise = null;
+		});
 	}, intervalMs);
 }
 
-function stopGitSyncTimer() {
+async function stopGitSyncTimer(): Promise<void> {
 	if (gitSyncTimer) {
 		clearInterval(gitSyncTimer);
 		gitSyncTimer = null;
+	}
+	// Await in-flight sync so git operations finish before DB closes
+	if (gitSyncPromise) {
+		try {
+			await gitSyncPromise;
+		} catch {
+			// best-effort — sync failure shouldn't block shutdown
+		}
+		gitSyncPromise = null;
 	}
 }
 
@@ -9697,9 +10560,9 @@ async function syncHarnessConfigs() {
 	const agentsMdPath = join(AGENTS_DIR, "AGENTS.md");
 	if (!existsSync(agentsMdPath)) return;
 
-	const rawContent = readFileSync(agentsMdPath, "utf-8");
+	const rawContent = await Bun.file(agentsMdPath).text();
 	const content = stripSignetBlock(rawContent);
-	const withBlock = buildSignetBlock() + content;
+	const withBlock = buildSignetBlock(AGENTS_DIR) + content;
 
 	// Build header with cross-references to other documents
 	const buildHeader = (targetName: string) => {
@@ -9711,18 +10574,21 @@ async function syncHarnessConfigs() {
 			{ name: "agent.yaml", desc: "Configuration & settings" },
 		];
 
+		// Strip newlines/CRs so a malformed AGENTS_DIR can't break out of comment lines
+		const safe = (p: string) => p.replace(/[\n\r]/g, "");
+
 		const existingFiles = files.filter((f) => existsSync(join(AGENTS_DIR, f.name)));
-		const fileList = existingFiles.map((f) => `#   - ~/.agents/${f.name} (${f.desc})`).join("\n");
+		const fileList = existingFiles.map((f) => `#   - ${safe(join(AGENTS_DIR, f.name))} (${f.desc})`).join("\n");
 
 		return `# ${targetName}
 # ============================================================================
-# AUTO-GENERATED from ~/.agents/AGENTS.md by Signet
+# AUTO-GENERATED from ${safe(agentsMdPath)} by Signet
 # Generated: ${new Date().toISOString()}
-# 
-# DO NOT EDIT THIS FILE - changes will be overwritten
-# Edit the source file instead: ~/.agents/AGENTS.md
 #
-# Signet Agent Home: ~/.agents/
+# DO NOT EDIT THIS FILE - changes will be overwritten
+# Edit the source file instead: ${safe(agentsMdPath)}
+#
+# Signet Agent Home: ${safe(AGENTS_DIR)}
 # Dashboard: http://localhost:3850
 # CLI: signet --help
 #
@@ -9735,20 +10601,22 @@ ${fileList}
 `;
 	};
 
-	// Read and compose additional identity files
-	const identityExtras = ["SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"]
-		.map((name) => {
-			const p = join(AGENTS_DIR, name);
-			if (!existsSync(p)) return "";
-			try {
-				const c = readFileSync(p, "utf-8").trim();
-				if (!c) return "";
-				const header = name.replace(".md", "");
-				return `\n## ${header}\n\n${c}`;
-			} catch {
-				return "";
-			}
-		})
+	const identityExtras = (
+		await Promise.all(
+			["SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"].map(async (name) => {
+				const identityPath = join(AGENTS_DIR, name);
+				if (!existsSync(identityPath)) return "";
+				try {
+					const fileContent = (await Bun.file(identityPath).text()).trim();
+					if (!fileContent) return "";
+					const header = name.replace(".md", "");
+					return `\n## ${header}\n\n${fileContent}`;
+				} catch {
+					return "";
+				}
+			}),
+		)
+	)
 		.filter(Boolean)
 		.join("\n");
 
@@ -9758,34 +10626,55 @@ ${fileList}
 	const opencodeDir = join(homedir(), ".config", "opencode");
 	if (existsSync(opencodeDir)) {
 		try {
-			writeFileSync(join(opencodeDir, "AGENTS.md"), buildHeader("AGENTS.md") + composed);
-			logger.sync.harness("opencode", "~/.config/opencode/AGENTS.md");
-		} catch (e) {
-			logger.sync.failed("opencode", e as Error);
+			const opencodeAgentsPath = join(opencodeDir, "AGENTS.md");
+			if (await writeFileIfChangedAsync(opencodeAgentsPath, buildHeader("AGENTS.md") + composed)) {
+				logger.sync.harness("opencode", "~/.config/opencode/AGENTS.md");
+			}
+		} catch (error) {
+			logger.sync.failed("opencode", error instanceof Error ? error : new Error(String(error)));
 		}
 	}
 
-	ensureArchitectureDoc();
+	// Sync per-agent workspace dirs for OpenClaw multi-agent support
+	await syncAgentWorkspaces({
+		agentsDir: AGENTS_DIR,
+		onWorkspaceSynced: (name, workspaceAgentsPath) => {
+			logger.sync.harness(`openclaw:${name}`, workspaceAgentsPath);
+		},
+		onError: (name, error) => {
+			logger.error("sync", `Failed to sync agent workspace: ${name}`, error);
+		},
+	});
+	await ensureArchitectureDoc();
 }
 
 /** Write SIGNET-ARCHITECTURE.md if missing or outdated. */
-function ensureArchitectureDoc(): void {
+async function ensureArchitectureDoc(): Promise<void> {
 	const archPath = join(AGENTS_DIR, "SIGNET-ARCHITECTURE.md");
 	try {
-		const archContent = buildArchitectureDoc();
-		const existing = existsSync(archPath) ? readFileSync(archPath, "utf-8") : "";
-		if (existing !== archContent) {
-			writeFileSync(archPath, archContent);
+		const archContent = buildArchitectureDoc(AGENTS_DIR);
+		if (await writeFileIfChangedAsync(archPath, archContent)) {
 			logger.info("sync", "SIGNET-ARCHITECTURE.md updated");
 		}
-	} catch (e) {
-		logger.error("sync", "Failed to write SIGNET-ARCHITECTURE.md", e as Error);
+	} catch (error) {
+		logger.error(
+			"sync",
+			"Failed to write SIGNET-ARCHITECTURE.md",
+			error instanceof Error ? error : new Error(String(error)),
+		);
 	}
 }
 
-let syncPending = false;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 const SYNC_DEBOUNCE_MS = 2000;
+const syncRunner = createSingleFlightRunner(
+	async () => {
+		await syncHarnessConfigs();
+	},
+	(error) => {
+		logger.error("sync", "Harness sync failed", error);
+	},
+);
 
 function scheduleSyncHarnessConfigs() {
 	if (syncTimer) {
@@ -9793,10 +10682,11 @@ function scheduleSyncHarnessConfigs() {
 	}
 
 	syncTimer = setTimeout(async () => {
-		if (syncPending) return;
-		syncPending = true;
-		await syncHarnessConfigs();
-		syncPending = false;
+		if (syncRunner.running) {
+			syncRunner.requestRerun();
+			return;
+		}
+		await syncRunner.execute();
 	}, SYNC_DEBOUNCE_MS);
 }
 
@@ -9811,6 +10701,7 @@ function startFileWatcher() {
 			join(AGENTS_DIR, "USER.md"),
 			join(AGENTS_DIR, "SIGNET-ARCHITECTURE.md"),
 			join(AGENTS_DIR, "memory"), // Watch entire memory directory for new/changed .md files
+			join(AGENTS_DIR, "agents"), // Watch agent subdirectories for multi-agent identity changes
 		],
 		{
 			persistent: true,
@@ -9844,6 +10735,9 @@ function startFileWatcher() {
 				authAdminLimiter = rl.admin
 					? new AuthRateLimiter(rl.admin.windowMs, rl.admin.max)
 					: new AuthRateLimiter(60_000, 10);
+				authRecallLlmLimiter = rl.recallLlm
+					? new AuthRateLimiter(rl.recallLlm.windowMs, rl.recallLlm.max)
+					: new AuthRateLimiter(60_000, 60);
 				logger.info("config", "Auth config reloaded from disk");
 			} catch (e) {
 				logger.error("config", "Failed to reload auth config", e as Error);
@@ -9852,7 +10746,9 @@ function startFileWatcher() {
 
 		// If any identity file changed, sync to harness configs
 		const SYNC_TRIGGER_FILES = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"];
-		if (SYNC_TRIGGER_FILES.some((f) => path.endsWith(f))) {
+		const normalizedForSync = path.replace(/\\/g, "/");
+		const isAgentSubdir = normalizedForSync.includes(`${AGENTS_DIR.replace(/\\/g, "/")}/agents/`);
+		if (SYNC_TRIGGER_FILES.some((f) => path.endsWith(f)) || isAgentSubdir) {
 			scheduleSyncHarnessConfigs();
 		}
 
@@ -9877,7 +10773,7 @@ function startFileWatcher() {
 		logger.info("watcher", "File removed", { path });
 		// Recreate the architecture doc immediately if deleted at runtime
 		if (path.endsWith("SIGNET-ARCHITECTURE.md")) {
-			ensureArchitectureDoc();
+			void ensureArchitectureDoc();
 		}
 		scheduleAutoCommit(path);
 	});
@@ -10345,7 +11241,49 @@ async function importExistingMemoryFiles(): Promise<number> {
 // ============================================================================
 
 async function cleanup() {
+	shuttingDown = true;
 	logger.info("daemon", "Shutting down");
+
+	// ------------------------------------------------------------------
+	// Phase 0: Stop accepting new requests — close HTTP server first so
+	// in-flight session-end hooks can still complete before we tear down
+	// state, but no new requests arrive during shutdown. The 15s timeout
+	// exceeds OpenClaw's WRITE_TIMEOUT (10s) so session-end hooks can
+	// finish and respond before we force-close.
+	// ------------------------------------------------------------------
+	if (httpServer) {
+		const srv = httpServer;
+		await new Promise<void>((resolve) => {
+			const timeout = setTimeout(() => {
+				logger.warn("daemon", "HTTP server drain timed out, forcing close");
+				if ("closeAllConnections" in srv && typeof srv.closeAllConnections === "function") {
+					srv.closeAllConnections();
+				}
+				resolve();
+			}, 15_000);
+			srv.close(() => {
+				clearTimeout(timeout);
+				resolve();
+			});
+		});
+		httpServer = null;
+	}
+
+	// ------------------------------------------------------------------
+	// Phase 1: Cancel debounce timers — prevents callbacks from firing
+	// after DB is closed. Must happen before any async awaits that could
+	// let the event loop drain pending timeouts.
+	// ------------------------------------------------------------------
+	if (commitTimer) {
+		clearTimeout(commitTimer);
+		commitTimer = null;
+	}
+	commitPending = false;
+
+	if (syncTimer) {
+		clearTimeout(syncTimer);
+		syncTimer = null;
+	}
 
 	// Flush telemetry before closing DB
 	if (heartbeatTimer) {
@@ -10365,42 +11303,6 @@ async function cleanup() {
 		telemetryRef = undefined;
 	}
 
-	// Stop skill reconciler
-	if (skillReconcilerHandle) {
-		skillReconcilerHandle.stop();
-		skillReconcilerHandle = null;
-	}
-
-	// Kill shadow daemon if running
-	if (shadowProcess) {
-		try {
-			shadowProcess.kill();
-		} catch {
-			// best-effort
-		}
-		shadowProcess = null;
-	}
-
-	// Stop predictor sidecar before pipeline/DB teardown
-	if (predictorClientRef) {
-		try {
-			await predictorClientRef.stop();
-		} catch {
-			// best-effort
-		}
-		predictorClientRef = null;
-	}
-
-	// Stop embedding tracker before pipeline/DB teardown
-	if (embeddingTrackerHandle) {
-		try {
-			await embeddingTrackerHandle.stop();
-		} catch {
-			// best-effort
-		}
-		embeddingTrackerHandle = null;
-	}
-
 	// Flush any pending checkpoint writes before closing DB
 	try {
 		flushPendingCheckpoints();
@@ -10408,12 +11310,7 @@ async function cleanup() {
 		// best-effort
 	}
 
-	// Drain pipeline before closing DB so in-flight jobs finish writes
-	try {
-		await stopPipeline();
-	} catch {
-		// best-effort
-	}
+	await stopPipelineRuntime();
 
 	// Shut down native embedding WASM runtime
 	try {
@@ -10423,17 +11320,22 @@ async function cleanup() {
 		// best-effort — module may not have been loaded
 	}
 
-	closeLlmProvider();
-	closeSynthesisProvider();
-	closeWidgetProvider();
-	stopOpenCodeServer();
-	stopModelRegistry();
+	// ------------------------------------------------------------------
+	// Phase 2: Release all session claims and presence so other daemons
+	// and connectors see clean state immediately rather than waiting for
+	// stale-session expiry (4h).
+	// ------------------------------------------------------------------
+	const released = releaseAllSessions();
+	const cleared = clearAllPresence();
+	if (released > 0 || cleared > 0) {
+		logger.info("daemon", "Cleaned cross-agent state", { sessions: released, presence: cleared });
+	}
 
 	// Stop session cleanup timer before closing DB (in-flight cleanup may query DB)
 	stopSessionCleanup();
 
-	// Stop git sync timer
-	stopGitSyncTimer();
+	// Stop git sync timer and await in-flight sync
+	await stopGitSyncTimer();
 	stopUpdateTimer();
 
 	closeDbAccessor();
@@ -10471,45 +11373,131 @@ process.on("uncaughtException", (err) => {
 // initMemorySchema is no longer needed — the migration runner in
 // db-accessor.ts is the sole schema authority. See migrations/ in @signet/core.
 
-async function main() {
-	logger.info("daemon", "Signet Daemon starting");
-	logger.info("daemon", "Agents directory", { path: AGENTS_DIR });
-	logger.info("daemon", "Network configured", { port: PORT, host: HOST, bindHost: BIND_HOST });
+/**
+ * Sync the agent roster from the manifest into the agents table.
+ * Upserts each entry; preserves rows not in the roster.
+ */
+function syncAgentRoster(agentsDir: string): void {
+	const paths = [join(agentsDir, "agent.yaml"), join(agentsDir, "AGENT.yaml")];
+	let roster: readonly AgentDefinition[] = [];
+	for (const p of paths) {
+		if (!existsSync(p)) continue;
+		try {
+			const yaml = parseSimpleYaml(readFileSync(p, "utf-8")) as Record<string, unknown>;
+			const agents = yaml.agents as Record<string, unknown> | undefined;
+			const raw = agents?.roster;
+			if (Array.isArray(raw)) {
+				roster = raw as AgentDefinition[];
+			}
+		} catch {
+			// malformed yaml — skip
+		}
+		break;
+	}
+	if (roster.length === 0) return;
 
-	// Ensure daemon directory exists
-	mkdirSync(DAEMON_DIR, { recursive: true });
-	mkdirSync(LOG_DIR, { recursive: true });
+	const db = getDbAccessor();
+	const now = new Date().toISOString();
+	db.withWriteTx((w) => {
+		const stmt = w.prepare(
+			`INSERT INTO agents (id, name, read_policy, policy_group, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   read_policy = excluded.read_policy,
+			   policy_group = excluded.policy_group,
+			   updated_at = excluded.updated_at`,
+		);
+		for (const entry of roster) {
+			const policy = entry.memory?.read_policy;
+			let readPolicy: string;
+			let group: string | null = null;
+			if (typeof policy === "string") {
+				readPolicy = policy;
+			} else if (policy && typeof policy === "object" && policy.type === "group") {
+				readPolicy = "group";
+				group = typeof policy.group === "string" ? policy.group : null;
+			} else {
+				readPolicy = "isolated";
+			}
+			stmt.run(entry.name, entry.name, readPolicy, group, now, now);
+		}
+	});
+	logger.info("daemon", "Agent roster synced", { count: roster.length });
+}
 
-	// Initialise singleton DB accessor (opens write connection, sets pragmas,
-	// runs migrations). This is the sole schema authority.
-	initDbAccessor(MEMORY_DB);
+function readPipelineMode(cfg: ResolvedMemoryConfig["pipelineV2"]): string {
+	if (!cfg.enabled) return "disabled";
+	if (cfg.paused) return "paused";
+	if (cfg.mutationsFrozen) return "frozen";
+	if (cfg.nativeShadowEnabled) return "shadow";
+	if (cfg.shadowMode) return "shadow";
+	return "controlled-write";
+}
 
-	// Migrations may have created traversal tables — clear the cache
-	invalidateTraversalCache();
+function clearStructuralBackfillTimer(): void {
+	if (!structuralBackfillTimer) return;
+	clearTimeout(structuralBackfillTimer);
+	structuralBackfillTimer = null;
+}
 
-	// Write PID file
-	writeFileSync(PID_FILE, process.pid.toString());
-	logger.info("daemon", "Process ID", { pid: process.pid });
+async function stopPipelineRuntime(): Promise<void> {
+	clearStructuralBackfillTimer();
 
-	// Migrate config defaults before watcher starts (one-time, guarded by configVersion)
-	try {
-		migrateConfig(AGENTS_DIR);
-	} catch (err) {
-		logger.warn("config-migration", "Config migration failed; continuing startup", {
-			error: err instanceof Error ? err.message : String(err),
-		});
+	if (skillReconcilerHandle) {
+		skillReconcilerHandle.stop();
+		skillReconcilerHandle = null;
 	}
 
-	// Start file watcher
-	startFileWatcher();
-	logger.info("watcher", "File watcher started");
+	if (shadowProcess) {
+		try {
+			shadowProcess.kill();
+		} catch {
+			// best-effort
+		}
+		shadowProcess = null;
+	}
 
-	// Ensure SIGNET-ARCHITECTURE.md exists on startup (file watcher uses
-	// ignoreInitial:true so it won't recreate missing files on its own)
-	ensureArchitectureDoc();
+	if (predictorClientRef) {
+		try {
+			await predictorClientRef.stop();
+		} catch {
+			// best-effort
+		}
+		predictorClientRef = null;
+	}
 
-	// Load config and log resolved embedding settings for diagnostics
-	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
+	if (embeddingTrackerHandle) {
+		try {
+			await embeddingTrackerHandle.stop();
+		} catch {
+			// best-effort
+		}
+		embeddingTrackerHandle = null;
+	}
+
+	try {
+		await stopPipeline();
+	} catch {
+		// best-effort
+	}
+
+	closeLlmProvider();
+	closeSynthesisProvider();
+	closeWidgetProvider();
+	stopOpenCodeServer();
+	stopModelRegistry();
+	invalidateDiagnosticsCache();
+}
+
+async function restartPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?: TelemetryCollector): Promise<void> {
+	await stopPipelineRuntime();
+	await startPipelineRuntime(memoryCfg, telemetry);
+}
+
+async function startPipelineRuntime(memoryCfg: ResolvedMemoryConfig, telemetry?: TelemetryCollector): Promise<void> {
+	const pipelinePaused = memoryCfg.pipelineV2.paused;
+	clearStructuralBackfillTimer();
 	logger.info("config", "Resolved embedding config", {
 		provider: memoryCfg.embedding.provider,
 		model: memoryCfg.embedding.model,
@@ -10533,13 +11521,36 @@ async function main() {
 	if (rl.admin) authAdminLimiter = new AuthRateLimiter(rl.admin.windowMs, rl.admin.max);
 
 	const providerHints = getConfiguredProviderHints(AGENTS_DIR);
-	const validExtractionProviders = new Set(["none", "ollama", "claude-code", "opencode", "codex", "anthropic", "openrouter"]);
-	const validSynthesisProviders = new Set(["none", "ollama", "claude-code", "opencode", "anthropic", "openrouter"]);
+	const validExtractionProviders = new Set([
+		"none",
+		"ollama",
+		"claude-code",
+		"opencode",
+		"codex",
+		"anthropic",
+		"openrouter",
+		"command",
+	]);
+	const validSynthesisProviders = new Set([
+		"none",
+		"ollama",
+		"claude-code",
+		"codex",
+		"opencode",
+		"anthropic",
+		"openrouter",
+	]);
 
 	providerRuntimeResolution.extraction = {
 		configured: providerHints.extraction,
 		resolved: memoryCfg.pipelineV2.extraction.provider,
 		effective: memoryCfg.pipelineV2.extraction.provider,
+		fallbackProvider: memoryCfg.pipelineV2.extraction.fallbackProvider,
+		status: "active",
+		degraded: false,
+		fallbackApplied: false,
+		reason: null,
+		since: null,
 	};
 	providerRuntimeResolution.synthesis = {
 		configured: providerHints.synthesis,
@@ -10563,9 +11574,13 @@ async function main() {
 		});
 	}
 
-	// Auto-detect extraction provider: verify the configured provider is
-	// available, falling back to ollama with a warning if not.
+	const extractionFallbackProvider = memoryCfg.pipelineV2.extraction.fallbackProvider;
 	let effectiveExtractionProvider = memoryCfg.pipelineV2.extraction.provider;
+	let extractionStatus: "active" | "degraded" | "blocked" | "disabled" | "paused" = "active";
+	let extractionDegraded = false;
+	let extractionFallbackApplied = false;
+	let extractionReason: string | null = null;
+	let extractionSince: string | null = null;
 	const extractionOllamaBaseUrl = normalizeRuntimeBaseUrl(
 		memoryCfg.pipelineV2.extraction.endpoint,
 		"http://127.0.0.1:11434",
@@ -10582,14 +11597,39 @@ async function main() {
 	);
 	const ollamaFallbackMaxContextTokens = resolveDefaultOllamaFallbackMaxContextTokens();
 	const extractionOpenCodeShouldManage = isManagedOpenCodeLocalEndpoint(extractionOpenCodeBaseUrl);
-	if (effectiveExtractionProvider === "none") {
+
+	const markExtractionUnavailable = (reason: string): void => {
+		extractionReason = reason;
+		extractionSince = new Date().toISOString();
+		extractionDegraded = true;
+		if (extractionFallbackProvider === "ollama" && effectiveExtractionProvider !== "ollama") {
+			effectiveExtractionProvider = "ollama";
+			extractionStatus = "degraded";
+			extractionFallbackApplied = true;
+			return;
+		}
+		effectiveExtractionProvider = "none";
+		extractionStatus = "blocked";
+		extractionFallbackApplied = false;
+	};
+
+	if (pipelinePaused) {
+		logger.info("config", "Pipeline paused; extraction provider startup deferred");
+		effectiveExtractionProvider = "none";
+		extractionStatus = "paused";
+	} else if (effectiveExtractionProvider === "none") {
 		logger.info("config", "Extraction provider set to 'none', pipeline LLM disabled");
+		extractionStatus = "disabled";
+	} else if (effectiveExtractionProvider === "command") {
+		logger.info(
+			"config",
+			"Extraction provider set to 'command'; summary worker will execute pipelineV2.extraction.command",
+		);
 	} else if (effectiveExtractionProvider === "opencode") {
 		if (extractionOpenCodeShouldManage) {
 			const serverReady = await ensureOpenCodeServer(4096);
 			if (!serverReady) {
-				logger.warn("config", "OpenCode server not available, falling back to ollama for extraction");
-				effectiveExtractionProvider = "ollama";
+				markExtractionUnavailable("OpenCode server not available for extraction startup preflight");
 			}
 		} else {
 			logger.info("config", "Using external OpenCode endpoint for extraction", {
@@ -10600,8 +11640,7 @@ async function main() {
 		// Resolve full path so .cmd wrappers on Windows are found correctly.
 		const resolvedClaude = Bun.which("claude");
 		if (resolvedClaude === null) {
-			logger.warn("config", "Claude Code CLI not found, falling back to ollama for extraction");
-			effectiveExtractionProvider = "ollama";
+			markExtractionUnavailable("Claude Code CLI not found during extraction startup preflight");
 		} else {
 			try {
 				const exitCode = await new Promise<number>((resolve) => {
@@ -10615,15 +11654,13 @@ async function main() {
 				});
 				if (exitCode !== 0) throw new Error("non-zero exit");
 			} catch {
-				logger.warn("config", "Claude Code CLI not found, falling back to ollama for extraction");
-				effectiveExtractionProvider = "ollama";
+				markExtractionUnavailable("Claude Code CLI failed extraction startup preflight");
 			}
 		}
 	} else if (effectiveExtractionProvider === "codex") {
 		const resolvedCodex = Bun.which("codex");
 		if (resolvedCodex === null) {
-			logger.warn("config", "Codex CLI not found, falling back to ollama for extraction");
-			effectiveExtractionProvider = "ollama";
+			markExtractionUnavailable("Codex CLI not found during extraction startup preflight");
 		} else {
 			try {
 				const exitCode = await new Promise<number>((resolve) => {
@@ -10641,8 +11678,7 @@ async function main() {
 				});
 				if (exitCode !== 0) throw new Error("non-zero exit");
 			} catch {
-				logger.warn("config", "Codex CLI not found, falling back to ollama for extraction");
-				effectiveExtractionProvider = "ollama";
+				markExtractionUnavailable("Codex CLI failed extraction startup preflight");
 			}
 		}
 	}
@@ -10673,7 +11709,7 @@ async function main() {
 				"ANTHROPIC_API_KEY not found — falling back to ollama. Set via env or `signet secrets set ANTHROPIC_API_KEY`",
 			);
 			if (effectiveExtractionProvider === "anthropic") {
-				effectiveExtractionProvider = "ollama";
+				markExtractionUnavailable("ANTHROPIC_API_KEY not found for extraction startup preflight");
 			}
 		}
 	}
@@ -10690,35 +11726,140 @@ async function main() {
 				"OPENROUTER_API_KEY not found — falling back to ollama. Set via env or `signet secrets set OPENROUTER_API_KEY`",
 			);
 			if (effectiveExtractionProvider === "openrouter") {
-				effectiveExtractionProvider = "ollama";
+				markExtractionUnavailable("OPENROUTER_API_KEY not found for extraction startup preflight");
 			}
 		}
 	}
 
-	// When falling back to ollama, reset model so ollama uses its own default
-	// instead of inheriting an anthropic-specific alias like "haiku".
-	let effectiveExtractionModel: string | undefined = memoryCfg.pipelineV2.extraction.model;
-	if (effectiveExtractionProvider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama") {
-		effectiveExtractionModel = undefined;
+	const createExtractionProvider = (provider: RuntimeProviderName) => {
+		const model = resolveRuntimeModel(
+			provider,
+			memoryCfg.pipelineV2.extraction.provider,
+			memoryCfg.pipelineV2.extraction.model,
+		);
+		const usingExtractionOllamaFallback =
+			provider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama";
+		if (provider === "none") return null;
+		if (provider === "anthropic") {
+			if (!anthropicApiKey) return null;
+			return createAnthropicProvider({
+				model: model || "haiku",
+				apiKey: anthropicApiKey,
+				defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			});
+		}
+		if (provider === "openrouter") {
+			if (!openRouterApiKey) return null;
+			return createOpenRouterProvider({
+				model: model || "openai/gpt-4o-mini",
+				apiKey: openRouterApiKey,
+				baseUrl: extractionOpenRouterBaseUrl,
+				referer: readEnvTrimmed("OPENROUTER_HTTP_REFERER"),
+				title: readEnvTrimmed("OPENROUTER_TITLE"),
+				defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			});
+		}
+		if (provider === "opencode") {
+			return createOpenCodeProvider({
+				model: model || "anthropic/claude-haiku-4-5-20251001",
+				baseUrl: extractionOpenCodeBaseUrl,
+				ollamaFallbackBaseUrl: extractionOllamaFallbackBaseUrl,
+				ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
+				defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			});
+		}
+		if (provider === "claude-code") {
+			return createClaudeCodeProvider({
+				model: model || "haiku",
+				defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			});
+		}
+		if (provider === "codex") {
+			return createCodexProvider({
+				model: model || "gpt-5-codex-mini",
+				defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			});
+		}
+		return createOllamaProvider({
+			...(model ? { model } : {}),
+			baseUrl: extractionOllamaFallbackBaseUrl,
+			defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
+			...(usingExtractionOllamaFallback
+				? {
+						maxContextTokens: ollamaFallbackMaxContextTokens,
+					}
+				: {}),
+		});
+	};
+
+	let llmProvider = createExtractionProvider(effectiveExtractionProvider);
+	if (llmProvider) {
+		const preflightOk = await llmProvider.available();
+		if (!preflightOk) {
+			const failedProvider = effectiveExtractionProvider;
+			const failedReason = extractionReason ?? `Extraction provider ${failedProvider} failed startup preflight`;
+			if (failedProvider !== "ollama" && extractionFallbackProvider === "ollama") {
+				extractionReason = failedReason;
+				extractionSince = extractionSince ?? new Date().toISOString();
+				extractionDegraded = true;
+				extractionFallbackApplied = true;
+				extractionStatus = "degraded";
+				effectiveExtractionProvider = "ollama";
+				llmProvider = createExtractionProvider("ollama");
+				if (!llmProvider || !(await llmProvider.available())) {
+					effectiveExtractionProvider = "none";
+					extractionStatus = "blocked";
+					extractionFallbackApplied = false;
+					extractionReason = `${failedReason}; ollama fallback startup preflight failed`;
+					llmProvider = null;
+				}
+			} else {
+				effectiveExtractionProvider = "none";
+				extractionStatus = "blocked";
+				extractionDegraded = true;
+				extractionFallbackApplied = false;
+				extractionReason =
+					extractionFallbackProvider === "none" ? `${failedReason}; fallbackProvider is none` : failedReason;
+				extractionSince = extractionSince ?? new Date().toISOString();
+				llmProvider = null;
+			}
+		}
 	}
-	const usingExtractionOllamaFallback =
-		effectiveExtractionProvider === "ollama" && memoryCfg.pipelineV2.extraction.provider !== "ollama";
+
+	const effectiveExtractionModel = resolveRuntimeModel(
+		effectiveExtractionProvider,
+		memoryCfg.pipelineV2.extraction.provider,
+		memoryCfg.pipelineV2.extraction.model,
+	);
 	providerRuntimeResolution.extraction = {
 		configured: providerHints.extraction,
 		resolved: memoryCfg.pipelineV2.extraction.provider,
 		effective: effectiveExtractionProvider,
+		fallbackProvider: extractionFallbackProvider,
+		status: extractionStatus,
+		degraded: extractionDegraded,
+		fallbackApplied: extractionFallbackApplied,
+		reason: extractionReason,
+		since: extractionSince,
 	};
 	if (providerHints.extraction && providerHints.extraction !== effectiveExtractionProvider) {
 		logger.warn("config", "Extraction provider resolved differently than configured", {
 			configured: providerHints.extraction,
 			resolved: memoryCfg.pipelineV2.extraction.provider,
 			effective: effectiveExtractionProvider,
+			fallbackProvider: extractionFallbackProvider,
+			status: extractionStatus,
+			reason: extractionReason,
 		});
 	}
 	logger.info("config", "Extraction provider", {
 		configured: providerHints.extraction,
 		resolved: memoryCfg.pipelineV2.extraction.provider,
 		effective: effectiveExtractionProvider,
+		fallbackProvider: extractionFallbackProvider,
+		status: extractionStatus,
+		degraded: extractionDegraded,
+		reason: extractionReason,
 		endpoint: redactUrlForLogs(
 			effectiveExtractionProvider === "ollama"
 				? extractionOllamaFallbackBaseUrl
@@ -10729,59 +11870,63 @@ async function main() {
 						: undefined,
 		),
 	});
+	const extractionModelName = effectiveExtractionModel ?? memoryCfg.pipelineV2.extraction.model;
+	if (
+		effectiveExtractionProvider === "anthropic" ||
+		effectiveExtractionProvider === "openrouter" ||
+		effectiveExtractionProvider === "opencode"
+	) {
+		logger.warn(
+			"config",
+			"Extraction is intended for Claude Code (Haiku), Codex CLI (GPT Mini) on Pro/Max, or local Ollama qwen3:4b+. Remote API extraction can create extreme fees fast. Set provider to 'none' to disable it on a VPS.",
+			{
+				provider: effectiveExtractionProvider,
+				model: extractionModelName,
+			},
+		);
+	}
+	if (
+		effectiveExtractionProvider === "claude-code" &&
+		extractionModelName &&
+		!extractionModelName.toLowerCase().includes("haiku")
+	) {
+		logger.warn("config", "Claude Code extraction is safest on Haiku. Larger models increase cost significantly.", {
+			model: extractionModelName,
+		});
+	}
+	if (
+		effectiveExtractionProvider === "codex" &&
+		extractionModelName &&
+		!extractionModelName.toLowerCase().includes("mini")
+	) {
+		logger.warn("config", "Codex extraction is safest on GPT Mini. Larger models increase cost significantly.", {
+			model: extractionModelName,
+		});
+	}
 
-	// Create LLM provider once, register as daemon-wide singleton
-	const llmProvider = effectiveExtractionProvider === "none"
-		? null
-		: effectiveExtractionProvider === "anthropic" && anthropicApiKey
-			? createAnthropicProvider({
-					model: effectiveExtractionModel || "haiku",
-					apiKey: anthropicApiKey,
-					defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-				})
-			: effectiveExtractionProvider === "openrouter" && openRouterApiKey
-				? createOpenRouterProvider({
-						model: effectiveExtractionModel || "openai/gpt-4o-mini",
-						apiKey: openRouterApiKey,
-						baseUrl: extractionOpenRouterBaseUrl,
-						referer: readEnvTrimmed("OPENROUTER_HTTP_REFERER"),
-						title: readEnvTrimmed("OPENROUTER_TITLE"),
-						defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-					})
-				: effectiveExtractionProvider === "opencode"
-					? createOpenCodeProvider({
-							model: effectiveExtractionModel || "anthropic/claude-haiku-4-5-20251001",
-							baseUrl: extractionOpenCodeBaseUrl,
-							ollamaFallbackBaseUrl: extractionOllamaFallbackBaseUrl,
-							ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
-							defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-						})
-					: effectiveExtractionProvider === "claude-code"
-						? createClaudeCodeProvider({
-								model: effectiveExtractionModel || "haiku",
-								defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-							})
-						: effectiveExtractionProvider === "codex"
-							? createCodexProvider({
-									model: effectiveExtractionModel || "gpt-5.3-codex",
-									defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-								})
-							: createOllamaProvider({
-									...(effectiveExtractionModel ? { model: effectiveExtractionModel } : {}),
-									baseUrl: extractionOllamaFallbackBaseUrl,
-									defaultTimeoutMs: memoryCfg.pipelineV2.extraction.timeout,
-									...(usingExtractionOllamaFallback
-										? {
-												maxContextTokens: ollamaFallbackMaxContextTokens,
-											}
-										: {}),
-								});
+	const startupExtractionBlocked = extractionStatus === "blocked" && extractionReason !== null;
+	if (startupExtractionBlocked && !llmProvider) {
+		const blockedReason = extractionReason ?? "Extraction provider unavailable during startup preflight";
+		// Startup preflight blocked extraction with no viable provider.
+		// Dead-letter any already-pending extraction jobs so they do not
+		// remain silently pending after boot.
+		const deadLettered = deadLetterPendingExtractionJobs(getDbAccessor(), {
+			reason: blockedReason,
+			extractionModel: effectiveExtractionModel || undefined,
+		});
+		if (deadLettered > 0) {
+			logger.warn("pipeline", "Dead-lettered pending extraction jobs at startup", {
+				count: deadLettered,
+				reason: blockedReason,
+			});
+		}
+	}
 	if (llmProvider) {
 		initLlmProvider(llmProvider);
 	}
 
 	// Initialize model registry for dynamic model discovery
-	if (memoryCfg.pipelineV2.modelRegistry.enabled) {
+	if (memoryCfg.pipelineV2.modelRegistry.enabled && !pipelinePaused) {
 		const registryAnthropicApiKey = anthropicApiKey ?? (await getKey("ANTHROPIC_API_KEY"));
 		const registryOpenRouterApiKey = openRouterApiKey ?? (await getKey("OPENROUTER_API_KEY"));
 		initModelRegistry(
@@ -10795,7 +11940,14 @@ async function main() {
 
 	// Create synthesis provider — separate from extraction because synthesis
 	// needs a smarter model that can reason across long context
-	if (memoryCfg.pipelineV2.synthesis.provider === "none") {
+	if (pipelinePaused) {
+		providerRuntimeResolution.synthesis = {
+			configured: providerHints.synthesis,
+			resolved: memoryCfg.pipelineV2.synthesis.enabled ? memoryCfg.pipelineV2.synthesis.provider : null,
+			effective: null,
+		};
+		logger.info("config", "Pipeline paused; synthesis provider startup deferred");
+	} else if (memoryCfg.pipelineV2.synthesis.provider === "none") {
 		logger.info("config", "Synthesis provider set to 'none', synthesis disabled");
 	} else if (memoryCfg.pipelineV2.synthesis.enabled) {
 		let effectiveSynthesisProvider = memoryCfg.pipelineV2.synthesis.provider;
@@ -10859,6 +12011,32 @@ async function main() {
 					effectiveSynthesisProvider = "ollama";
 				}
 			}
+		} else if (effectiveSynthesisProvider === "codex") {
+			const resolvedCodex = Bun.which("codex");
+			if (resolvedCodex === null) {
+				logger.warn("config", "Codex CLI not found, falling back to ollama for synthesis");
+				effectiveSynthesisProvider = "ollama";
+			} else {
+				try {
+					const exitCode = await new Promise<number>((resolve) => {
+						const proc = spawn(resolvedCodex, ["--version"], {
+							stdio: "pipe",
+							windowsHide: true,
+							env: {
+								...process.env,
+								SIGNET_NO_HOOKS: "1",
+								SIGNET_CODEX_BYPASS_WRAPPER: "1",
+							},
+						});
+						proc.on("close", (code) => resolve(code ?? 1));
+						proc.on("error", () => resolve(1));
+					});
+					if (exitCode !== 0) throw new Error("non-zero exit");
+				} catch {
+					logger.warn("config", "Codex CLI not found, falling back to ollama for synthesis");
+					effectiveSynthesisProvider = "ollama";
+				}
+			}
 		}
 		providerRuntimeResolution.synthesis = {
 			configured: providerHints.synthesis,
@@ -10888,10 +12066,11 @@ async function main() {
 		});
 
 		// When falling back to ollama, reset model so ollama uses its own default
-		let effectiveSynthesisModel: string | undefined = memoryCfg.pipelineV2.synthesis.model;
-		if (effectiveSynthesisProvider === "ollama" && memoryCfg.pipelineV2.synthesis.provider !== "ollama") {
-			effectiveSynthesisModel = undefined;
-		}
+		const effectiveSynthesisModel = resolveRuntimeModel(
+			effectiveSynthesisProvider,
+			memoryCfg.pipelineV2.synthesis.provider,
+			memoryCfg.pipelineV2.synthesis.model,
+		);
 		const usingSynthesisOllamaFallback =
 			effectiveSynthesisProvider === "ollama" && memoryCfg.pipelineV2.synthesis.provider !== "ollama";
 
@@ -10919,21 +12098,26 @@ async function main() {
 								ollamaFallbackMaxContextTokens: ollamaFallbackMaxContextTokens,
 								defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 							})
-						: effectiveSynthesisProvider === "claude-code"
-							? createClaudeCodeProvider({
-									model: effectiveSynthesisModel || "haiku",
+						: effectiveSynthesisProvider === "codex"
+							? createCodexProvider({
+									model: effectiveSynthesisModel || "gpt-5-codex-mini",
 									defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
 								})
-							: createOllamaProvider({
-									...(effectiveSynthesisModel ? { model: effectiveSynthesisModel } : {}),
-									baseUrl: synthesisOllamaFallbackBaseUrl,
-									defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
-									...(usingSynthesisOllamaFallback
-										? {
-												maxContextTokens: ollamaFallbackMaxContextTokens,
-											}
-										: {}),
-								});
+							: effectiveSynthesisProvider === "claude-code"
+								? createClaudeCodeProvider({
+										model: effectiveSynthesisModel || "haiku",
+										defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+									})
+								: createOllamaProvider({
+										...(effectiveSynthesisModel ? { model: effectiveSynthesisModel } : {}),
+										baseUrl: synthesisOllamaFallbackBaseUrl,
+										defaultTimeoutMs: memoryCfg.pipelineV2.synthesis.timeout,
+										...(usingSynthesisOllamaFallback
+											? {
+													maxContextTokens: ollamaFallbackMaxContextTokens,
+												}
+											: {}),
+									});
 		initSynthesisProvider(synthesisProvider);
 		// Widget provider defaults to synthesis provider (needs smart model for HTML gen)
 		initWidgetProvider(synthesisProvider);
@@ -10946,57 +12130,9 @@ async function main() {
 		logger.info("config", "Synthesis disabled");
 	}
 
-	// Telemetry collector (opt-in, anonymous)
-	let telemetryCollector: TelemetryCollector | undefined;
-	if (memoryCfg.pipelineV2.telemetryEnabled) {
-		// Resolve PostHog API key: secrets first, then inline config
-		const secretKey = !memoryCfg.pipelineV2.telemetry.posthogApiKey
-			? (getSecret("POSTHOG_API_KEY") ?? "")
-			: memoryCfg.pipelineV2.telemetry.posthogApiKey;
-		const resolvedTelemetryCfg = {
-			...memoryCfg.pipelineV2.telemetry,
-			posthogApiKey: secretKey,
-		};
-		telemetryCollector = createTelemetryCollector(getDbAccessor(), resolvedTelemetryCfg, CURRENT_VERSION);
-		telemetryCollector.start();
-		telemetryRef = telemetryCollector;
-
-		// Heartbeat: record daemon stats every 5 minutes
-		const daemonStartTime = Date.now();
-		heartbeatTimer = setInterval(
-			() => {
-				if (!telemetryRef) return;
-				try {
-					const memoryCount = getDbAccessor().withReadDb((db) => {
-						const row = db
-							.prepare("SELECT COUNT(*) as cnt FROM memories WHERE is_deleted = 0 OR is_deleted IS NULL")
-							.get() as { cnt: number } | undefined;
-						return row?.cnt ?? 0;
-					});
-					const connectors = listConnectors();
-					telemetryRef.record("daemon.heartbeat", {
-						uptimeMs: Date.now() - daemonStartTime,
-						memoryCount,
-						connectorsActive: connectors.filter((cn) => cn.status === "active").length,
-						pipelineMode: memoryCfg.pipelineV2.enabled
-							? memoryCfg.pipelineV2.shadowMode
-								? "shadow"
-								: "controlled-write"
-							: "disabled",
-						extractionProvider: memoryCfg.pipelineV2.extraction.provider,
-						embeddingProvider: memoryCfg.embedding.provider,
-					});
-				} catch {
-					// best effort
-				}
-			},
-			5 * 60 * 1000,
-		);
-	}
-
 	// Start extraction pipeline only when explicitly enabled and an LLM is available.
 	// shadowMode controls behavior inside the enabled pipeline.
-	if (memoryCfg.pipelineV2.enabled && effectiveExtractionProvider !== "none") {
+	if (memoryCfg.pipelineV2.enabled && !pipelinePaused && effectiveExtractionProvider !== "none") {
 		startPipeline(
 			getDbAccessor(),
 			memoryCfg.pipelineV2,
@@ -11005,16 +12141,16 @@ async function main() {
 			memoryCfg.search,
 			providerTracker,
 			analyticsCollector,
-			telemetryCollector,
+			telemetry,
 		);
 	} else {
 		// Retention worker runs unconditionally — cleans up tombstones,
 		// expired history, and dead jobs even without the full pipeline.
-		startRetentionWorker(getDbAccessor(), DEFAULT_RETENTION);
+		ensureRetentionWorker(getDbAccessor(), DEFAULT_RETENTION);
 	}
 
 	// Start embedding tracker if provider is configured and tracker enabled
-	if (memoryCfg.embedding.provider !== "none" && memoryCfg.pipelineV2.embeddingTracker.enabled) {
+	if (memoryCfg.embedding.provider !== "none" && memoryCfg.pipelineV2.embeddingTracker.enabled && !pipelinePaused) {
 		embeddingTrackerHandle = startEmbeddingTracker(
 			getDbAccessor(),
 			memoryCfg.embedding,
@@ -11027,13 +12163,14 @@ async function main() {
 	// One-time structural backfill: populate entity_aspects/attributes for
 	// existing entities that predate the knowledge architecture migrations.
 	// Runs in the background, rate-limited, so it doesn't block startup.
-	if (memoryCfg.pipelineV2.graph.enabled && memoryCfg.pipelineV2.structural.enabled) {
+	if (memoryCfg.pipelineV2.graph.enabled && memoryCfg.pipelineV2.structural.enabled && !pipelinePaused) {
 		const backfillCtx: RepairContext = {
 			reason: "post-upgrade structural backfill",
 			actor: "daemon",
 			actorType: "daemon",
 		};
-		setTimeout(() => {
+		structuralBackfillTimer = setTimeout(() => {
+			structuralBackfillTimer = null;
 			try {
 				const result = structuralBackfill(getDbAccessor(), memoryCfg.pipelineV2, backfillCtx, repairLimiter, {
 					batchSize: 50,
@@ -11049,11 +12186,11 @@ async function main() {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			}
-		}, 10_000); // 10s delay — let the pipeline warm up first
+		}, 10_000);
 	}
 
 	// Spawn predictor sidecar if enabled
-	if (memoryCfg.pipelineV2.predictor?.enabled) {
+	if (memoryCfg.pipelineV2.predictor?.enabled && !pipelinePaused) {
 		const predictorCfg = memoryCfg.pipelineV2.predictor;
 		try {
 			const client = createPredictorClient(predictorCfg, "default", memoryCfg.embedding.dimensions);
@@ -11089,7 +12226,7 @@ async function main() {
 	}
 
 	// Start skill reconciler if procedural memory is enabled
-	if (memoryCfg.pipelineV2.procedural.enabled) {
+	if (memoryCfg.pipelineV2.procedural.enabled && !pipelinePaused) {
 		skillReconcilerHandle = startReconciler({
 			accessor: getDbAccessor(),
 			pipelineConfig: memoryCfg.pipelineV2,
@@ -11105,6 +12242,103 @@ async function main() {
 			agentsDir: AGENTS_DIR,
 		});
 	}
+
+	invalidateDiagnosticsCache();
+}
+
+async function main() {
+	logger.info("daemon", "Signet Daemon starting");
+	logger.info("daemon", "Agents directory", { path: AGENTS_DIR });
+	logger.info("daemon", "Network configured", { port: PORT, host: HOST, bindHost: BIND_HOST });
+
+	// Ensure daemon directory exists
+	mkdirSync(DAEMON_DIR, { recursive: true });
+	mkdirSync(LOG_DIR, { recursive: true });
+
+	// Initialise singleton DB accessor (opens write connection, sets pragmas,
+	// runs migrations). This is the sole schema authority and the only
+	// production Bun SQLite constructor path, which keeps macOS custom
+	// SQLite selection ahead of any live connection.
+	initDbAccessor(MEMORY_DB, { agentsDir: AGENTS_DIR });
+
+	// Sync agent roster from manifest into the agents table.
+	syncAgentRoster(AGENTS_DIR);
+
+	// Migrations may have created traversal tables — clear the cache
+	invalidateTraversalCache();
+
+	// Write PID file
+	writeFileSync(PID_FILE, process.pid.toString());
+	logger.info("daemon", "Process ID", { pid: process.pid });
+
+	// Migrate config defaults before watcher starts (one-time, guarded by configVersion)
+	try {
+		migrateConfig(AGENTS_DIR);
+	} catch (err) {
+		logger.warn("config-migration", "Config migration failed; continuing startup", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+
+	// Start file watcher
+	startFileWatcher();
+	logger.info("watcher", "File watcher started");
+
+	// Ensure SIGNET-ARCHITECTURE.md exists on startup (file watcher uses
+	// ignoreInitial:true so it won't recreate missing files on its own)
+	await ensureArchitectureDoc();
+
+	// Load config and initialize telemetry before starting runtime.
+	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
+	let telemetryCollector: TelemetryCollector | undefined;
+	if (memoryCfg.pipelineV2.telemetryEnabled) {
+		let posthogApiKey = memoryCfg.pipelineV2.telemetry.posthogApiKey;
+		if (!posthogApiKey) {
+			try {
+				posthogApiKey = await getSecret("POSTHOG_API_KEY");
+			} catch {
+				posthogApiKey = "";
+			}
+		}
+		const resolvedTelemetryCfg = {
+			...memoryCfg.pipelineV2.telemetry,
+			posthogApiKey,
+		};
+		telemetryCollector = createTelemetryCollector(getDbAccessor(), resolvedTelemetryCfg, CURRENT_VERSION);
+		telemetryCollector.start();
+		telemetryRef = telemetryCollector;
+
+		// Heartbeat: record daemon stats every 5 minutes using live config.
+		const daemonStartTime = Date.now();
+		heartbeatTimer = setInterval(
+			() => {
+				if (!telemetryRef) return;
+				try {
+					const liveCfg = loadMemoryConfig(AGENTS_DIR);
+					const memoryCount = getDbAccessor().withReadDb((db) => {
+						const row = db
+							.prepare("SELECT COUNT(*) as cnt FROM memories WHERE is_deleted = 0 OR is_deleted IS NULL")
+							.get() as { cnt: number } | undefined;
+						return row?.cnt ?? 0;
+					});
+					const connectors = listConnectors();
+					telemetryRef.record("daemon.heartbeat", {
+						uptimeMs: Date.now() - daemonStartTime,
+						memoryCount,
+						connectorsActive: connectors.filter((cn) => cn.status === "active").length,
+						pipelineMode: readPipelineMode(liveCfg.pipelineV2),
+						extractionProvider: liveCfg.pipelineV2.extraction.provider,
+						embeddingProvider: liveCfg.embedding.provider,
+					});
+				} catch {
+					// best-effort
+				}
+			},
+			5 * 60 * 1000,
+		);
+	}
+
+	await startPipelineRuntime(memoryCfg, telemetryCollector);
 
 	// Initialize checkpoint flush queue for continuity protocol
 	initCheckpointFlush(getDbAccessor());
@@ -11199,7 +12433,7 @@ async function main() {
 		return server;
 	};
 
-	serve(
+	httpServer = serve(
 		{
 			fetch: app.fetch,
 			port: PORT,

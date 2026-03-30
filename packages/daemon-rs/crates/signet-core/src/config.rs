@@ -20,12 +20,25 @@ pub struct DaemonConfig {
 }
 
 impl DaemonConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let base = std::env::var("SIGNET_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| dirs_home().join(".agents"));
 
-        let manifest = load_manifest(&base).unwrap_or_default();
+        let manifest = match load_manifest(&base) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => AgentManifest::default(),
+            Err(ManifestLoadError::Fatal(error)) => {
+                return Err(format!("Invalid agent.yaml: {error}"));
+            }
+            Err(ManifestLoadError::Recoverable(error)) => {
+                tracing::warn!(
+                    error = %error,
+                    "invalid or unreadable agent.yaml; falling back to default manifest"
+                );
+                AgentManifest::default()
+            }
+        };
         let (cfg_host, cfg_bind) = resolve_network_binding(
             manifest
                 .network
@@ -49,14 +62,14 @@ impl DaemonConfig {
             }
         });
 
-        Self {
+        Ok(Self {
             base_path: base,
             db_path: db,
             port,
             host,
             bind,
             manifest,
-        }
+        })
     }
 
     pub fn memory_dir(&self) -> PathBuf {
@@ -88,10 +101,399 @@ fn dirs_home() -> PathBuf {
         })
 }
 
-fn load_manifest(base: &Path) -> Option<AgentManifest> {
+enum ManifestLoadError {
+    Recoverable(String),
+    Fatal(String),
+}
+
+fn should_fail_fast_for_manifest_error_context(raw: &serde_yml::Value, error: &str) -> bool {
+    let raw_pipeline = raw_child(raw, "memory").and_then(|value| raw_child(value, "pipelineV2"));
+    let extraction_provider = raw_pipeline
+        .and_then(|value| raw_child(value, "extraction"))
+        .and_then(|value| raw_string(value, "provider"))
+        .or_else(|| raw_pipeline.and_then(|value| raw_string(value, "extractionProvider")));
+    let synthesis_provider = raw_pipeline
+        .and_then(|value| raw_child(value, "synthesis"))
+        .and_then(|value| raw_string(value, "provider"))
+        .or_else(|| raw_pipeline.and_then(|value| raw_string(value, "synthesisProvider")));
+
+    extraction_provider.is_some_and(|provider| provider == "command")
+        || synthesis_provider.is_some_and(|provider| provider == "command")
+        || error.contains("memory.pipelineV2.extraction.command")
+        || error.contains("memory.pipelineV2.synthesis.provider='command'")
+        || error.contains("invalid extraction fallbackProvider")
+}
+
+fn load_manifest(base: &Path) -> Result<Option<AgentManifest>, ManifestLoadError> {
     let path = base.join("agent.yaml");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_yml::from_str(&content).ok()
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(ManifestLoadError::Recoverable(format!(
+                "failed to read {}: {err}",
+                path.to_string_lossy()
+            )))
+        }
+    };
+    let raw: serde_yml::Value = serde_yml::from_str(&content)
+        .map_err(|err| ManifestLoadError::Recoverable(format!("YAML parse error: {err}")))?;
+    parse_manifest_from_raw(&content, &raw)
+        .map(Some)
+        .map_err(|error| {
+            if should_fail_fast_for_manifest_error_context(&raw, &error) {
+                ManifestLoadError::Fatal(error)
+            } else {
+                ManifestLoadError::Recoverable(error)
+            }
+        })
+}
+
+#[cfg(test)]
+fn parse_manifest(content: &str) -> Option<AgentManifest> {
+    parse_manifest_result(content).ok()
+}
+
+#[cfg(test)]
+fn parse_manifest_result(content: &str) -> Result<AgentManifest, String> {
+    let raw: serde_yml::Value =
+        serde_yml::from_str(content).map_err(|err| format!("YAML parse error: {err}"))?;
+    parse_manifest_from_raw(content, &raw)
+}
+
+fn parse_manifest_from_raw(
+    content: &str,
+    raw: &serde_yml::Value,
+) -> Result<AgentManifest, String> {
+    let manifest: AgentManifest =
+        serde_yml::from_str(content).map_err(|err| format!("manifest shape error: {err}"))?;
+    normalize_manifest(manifest, raw)
+}
+
+fn normalize_manifest(
+    mut manifest: AgentManifest,
+    raw: &serde_yml::Value,
+) -> Result<AgentManifest, String> {
+    let Some(memory) = manifest.memory.as_mut() else {
+        return Ok(manifest);
+    };
+    let Some(pipeline) = memory.pipeline_v2.as_mut() else {
+        return Ok(manifest);
+    };
+    let raw_pipeline = raw_child(raw, "memory").and_then(|value| raw_child(value, "pipelineV2"));
+    normalize_pipeline_extraction(pipeline, raw_pipeline)?;
+    normalize_pipeline_worker(pipeline, raw_pipeline);
+    normalize_pipeline_reranker(pipeline, raw_pipeline);
+    normalize_pipeline_synthesis(pipeline, raw_pipeline)?;
+    Ok(manifest)
+}
+
+fn normalize_pipeline_extraction(
+    pipeline: &mut PipelineV2Config,
+    raw: Option<&serde_yml::Value>,
+) -> Result<(), String> {
+    let nested_fallback = raw
+        .and_then(|value| raw_child(value, "extraction"))
+        .map(|value| raw_optional_string_strict(value, "fallbackProvider"))
+        .transpose()?
+        .flatten();
+    let flat_fallback = raw
+        .map(|value| raw_optional_string_strict(value, "extractionFallbackProvider"))
+        .transpose()?
+        .flatten();
+    let fallback = nested_fallback.or(flat_fallback);
+
+    if let Some(value) = &fallback {
+        if is_extraction_fallback_provider(value) {
+            pipeline.extraction.fallback_provider = value.to_string();
+        } else {
+            return Err(format!(
+                "invalid extraction fallbackProvider '{value}': must be 'ollama' or 'none'"
+            ));
+        }
+    }
+
+    let extraction_raw = raw.and_then(|value| raw_child(value, "extraction"));
+    if pipeline.extraction.provider != "command" {
+        return Ok(());
+    }
+
+    if pipeline.extraction.command.is_none() {
+        let legacy = raw.and_then(|value| raw_string(value, "extractionCommand"));
+        pipeline.extraction.command = legacy.and_then(parse_command_argv);
+    }
+
+    let mut command = pipeline.extraction.command.clone().ok_or_else(|| {
+        "memory.pipelineV2.extraction.command is required when extraction.provider='command'"
+            .to_string()
+    })?;
+    command.bin = command.bin.trim().to_string();
+    if command.bin.is_empty() {
+        return Err(
+            "memory.pipelineV2.extraction.command.bin is required when extraction.provider='command'"
+                .to_string(),
+        );
+    }
+    if command.args.iter().any(|arg| arg.trim().is_empty()) {
+        command.args.retain(|arg| !arg.trim().is_empty());
+    }
+
+    if command.env.is_none() {
+        if let Some(raw_env) = extraction_raw
+            .and_then(|value| raw_child(value, "command"))
+            .and_then(|value| raw_child(value, "env"))
+            .and_then(|value| value.as_mapping())
+        {
+            let mut env = HashMap::new();
+            for (key, value) in raw_env {
+                let Some(k) = key.as_str() else {
+                    continue;
+                };
+                if !is_valid_env_key(k) {
+                    continue;
+                }
+                let Some(v) = value.as_str() else {
+                    continue;
+                };
+                env.insert(k.to_string(), v.to_string());
+            }
+            if !env.is_empty() {
+                command.env = Some(env);
+            }
+        }
+    } else if let Some(env) = command.env.as_mut() {
+        env.retain(|key, _| is_valid_env_key(key));
+        if env.is_empty() {
+            command.env = None;
+        }
+    }
+
+    pipeline.extraction.command = Some(command);
+    Ok(())
+}
+
+fn normalize_pipeline_worker(pipeline: &mut PipelineV2Config, raw: Option<&serde_yml::Value>) {
+    let max_load_per_cpu = raw
+        .and_then(|value| raw_child(value, "worker"))
+        .and_then(|value| raw_f64(value, "maxLoadPerCpu"))
+        .or_else(|| raw.and_then(|value| raw_f64(value, "workerMaxLoadPerCpu")));
+    if let Some(value) = max_load_per_cpu {
+        pipeline.worker.max_load_per_cpu = value.clamp(0.1, 8.0);
+    }
+
+    let overload_backoff_ms = raw
+        .and_then(|value| raw_child(value, "worker"))
+        .and_then(|value| raw_u64(value, "overloadBackoffMs"))
+        .or_else(|| raw.and_then(|value| raw_u64(value, "workerOverloadBackoffMs")));
+    if let Some(value) = overload_backoff_ms {
+        pipeline.worker.overload_backoff_ms = value.clamp(1_000, 300_000);
+    }
+}
+
+fn normalize_pipeline_reranker(
+    pipeline: &mut PipelineV2Config,
+    raw: Option<&serde_yml::Value>,
+) {
+    let nested = raw
+        .and_then(|value| raw_child(value, "reranker"))
+        .and_then(|value| raw_child(value, "useExtractionModel"))
+        .and_then(serde_yml::Value::as_bool);
+    let flat = raw
+        .and_then(|value| raw_child(value, "rerankerUseExtractionModel"))
+        .and_then(serde_yml::Value::as_bool);
+    if let Some(value) = nested.or(flat) {
+        pipeline.reranker.use_extraction_model = value;
+    }
+}
+
+fn normalize_pipeline_synthesis(
+    pipeline: &mut PipelineV2Config,
+    raw: Option<&serde_yml::Value>,
+) -> Result<(), String> {
+    let extraction = pipeline.extraction.clone();
+    let fallback = SynthesisConfig::default();
+    let inherits_extraction = extraction.provider != "command";
+    let synthesis_raw = raw.and_then(|value| raw_child(value, "synthesis"));
+    if synthesis_raw
+        .and_then(|value| raw_string(value, "provider"))
+        .is_some_and(|provider| provider == "command")
+    {
+        return Err(
+            "memory.pipelineV2.synthesis.provider='command' is not supported. Use extraction.provider='command' instead."
+                .to_string(),
+        );
+    }
+    let provider = raw
+        .and_then(|value| raw_child(value, "synthesis"))
+        .and_then(|value| raw_string(value, "provider"))
+        .filter(|value| is_synthesis_provider(value));
+    let model = raw
+        .and_then(|value| raw_child(value, "synthesis"))
+        .and_then(|value| raw_string(value, "model"));
+    let endpoint = raw
+        .and_then(|value| raw_child(value, "synthesis"))
+        .and_then(|value| {
+            raw_string(value, "endpoint").or_else(|| raw_string(value, "base_url"))
+        });
+    let timeout = raw
+        .and_then(|value| raw_child(value, "synthesis"))
+        .and_then(|value| raw_u64(value, "timeout"));
+    let provider_won = provider.is_some();
+
+    pipeline.synthesis.provider = provider
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            if inherits_extraction {
+                extraction.provider.clone()
+            } else {
+                fallback.provider.clone()
+            }
+        });
+    pipeline.synthesis.model = model.map(ToOwned::to_owned).unwrap_or_else(|| {
+        if provider_won {
+            default_pipeline_model(&pipeline.synthesis.provider).to_string()
+        } else if inherits_extraction {
+            extraction.model.clone()
+        } else {
+            fallback.model.clone()
+        }
+    });
+    pipeline.synthesis.endpoint = endpoint.map(ToOwned::to_owned).or_else(|| {
+        if provider_won || !inherits_extraction {
+            None
+        } else {
+            extraction.endpoint.clone()
+        }
+    });
+    pipeline.synthesis.timeout = timeout.unwrap_or_else(|| {
+        if provider_won || !inherits_extraction {
+            fallback.timeout
+        } else {
+            extraction.timeout
+        }
+    });
+    if pipeline.synthesis.provider == "none" {
+        pipeline.synthesis.enabled = false;
+    }
+    Ok(())
+}
+
+fn raw_child<'a>(value: &'a serde_yml::Value, key: &str) -> Option<&'a serde_yml::Value> {
+    value
+        .as_mapping()?
+        .get(serde_yml::Value::String(key.to_string()))
+}
+
+fn raw_string<'a>(value: &'a serde_yml::Value, key: &str) -> Option<&'a str> {
+    raw_child(value, key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn raw_optional_string_strict<'a>(
+    value: &'a serde_yml::Value,
+    key: &'static str,
+) -> Result<Option<&'a str>, String> {
+    let Some(raw) = raw_child(value, key) else {
+        return Ok(None);
+    };
+    let as_str = raw
+        .as_str()
+        .ok_or_else(|| format!("invalid extraction fallbackProvider type at '{key}': expected a string ('ollama' or 'none')"))?;
+    let trimmed = as_str.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
+fn raw_u64(value: &serde_yml::Value, key: &str) -> Option<u64> {
+    raw_child(value, key)?.as_u64()
+}
+
+fn raw_f64(value: &serde_yml::Value, key: &str) -> Option<f64> {
+    raw_child(value, key)?.as_f64()
+}
+
+fn parse_command_argv(raw: &str) -> Option<ExtractionCommandConfig> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for ch in raw.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let bin = tokens.first()?.trim().to_string();
+    if bin.is_empty() {
+        return None;
+    }
+    let args = tokens
+        .iter()
+        .skip(1)
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    Some(ExtractionCommandConfig {
+        bin,
+        args,
+        cwd: None,
+        env: None,
+    })
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_pipeline_provider(value: &str) -> bool {
+    matches!(
+        value,
+        "none" | "ollama" | "claude-code" | "opencode" | "codex" | "anthropic" | "openrouter" | "command"
+    )
+}
+
+fn is_extraction_fallback_provider(value: &str) -> bool {
+    matches!(value, "ollama" | "none")
+}
+
+fn is_synthesis_provider(value: &str) -> bool {
+    is_pipeline_provider(value) && value != "command"
+}
+
+fn default_pipeline_model(provider: &str) -> &'static str {
+    match provider {
+        "none" => "",
+        "command" => "",
+        "claude-code" | "anthropic" => "haiku",
+        "codex" => "gpt-5-codex-mini",
+        "opencode" => "anthropic/claude-haiku-4-5-20251001",
+        "openrouter" => "openai/gpt-4o-mini",
+        _ => "qwen3:4b",
+    }
 }
 
 fn resolve_network_binding(mode: Option<&str>) -> (&'static str, &'static str) {
@@ -131,6 +533,37 @@ pub struct AgentManifest {
     pub capabilities: Option<Vec<String>>,
     #[serde(rename = "harnessCompatibility")]
     pub harness_compatibility: Option<Vec<String>>,
+    pub hooks: Option<HooksConfig>,
+}
+
+/// Per-hook configuration surfaced in `agent.yaml` under the `hooks` key.
+/// Mirrors the TypeScript `HooksConfig` in `packages/daemon/src/hooks.ts`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HooksConfig {
+    pub user_prompt_submit: UserPromptSubmitHookConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UserPromptSubmitHookConfig {
+    pub enabled: bool,
+    pub recall_limit: usize,
+    pub max_inject_chars: usize,
+    /// Minimum confidence score required to inject memories at prompt time.
+    /// Clamped to [0, 1]. Default 0.8 — mirrors TS `hooks.userPromptSubmit.minScore`.
+    pub min_score: f64,
+}
+
+impl Default for UserPromptSubmitHookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            recall_limit: 10,
+            max_inject_chars: 500,
+            min_score: 0.8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -178,7 +611,10 @@ impl Default for EmbeddingConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{network_mode_from_bind, resolve_network_binding};
+    use super::{
+        network_mode_from_bind, parse_manifest, parse_manifest_result, resolve_network_binding,
+        should_fail_fast_for_manifest_error_context, PipelineV2Config,
+    };
 
     #[test]
     fn resolves_localhost_binding_by_default() {
@@ -197,6 +633,470 @@ mod tests {
     fn infers_network_mode_from_bind_host() {
         assert_eq!(network_mode_from_bind("127.0.0.1"), "localhost");
         assert_eq!(network_mode_from_bind("0.0.0.0"), "tailscale");
+    }
+
+    #[test]
+    fn synthesis_defaults_stay_local_when_pipeline_block_omits_them() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: ollama
+      model: qwen3.5:4b
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.extraction.provider, "ollama");
+        assert_eq!(pipeline.extraction.model, "qwen3.5:4b");
+        assert_eq!(pipeline.synthesis.provider, "ollama");
+        assert_eq!(pipeline.synthesis.model, "qwen3.5:4b");
+        assert_eq!(pipeline.synthesis.timeout, pipeline.extraction.timeout);
+    }
+
+    #[test]
+    fn synthesis_enabled_only_keeps_inheriting_extraction_values() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: ollama
+      model: qwen3.5:4b
+      endpoint: http://127.0.0.1:11434
+      timeout: 75000
+    synthesis:
+      enabled: true
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.synthesis.provider, "ollama");
+        assert_eq!(pipeline.synthesis.model, "qwen3.5:4b");
+        assert_eq!(
+            pipeline.synthesis.endpoint.as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert_eq!(pipeline.synthesis.timeout, 75_000);
+    }
+
+    #[test]
+    fn inherited_none_provider_disables_synthesis() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: none
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.synthesis.provider, "none");
+        assert!(!pipeline.synthesis.enabled);
+    }
+
+    #[test]
+    fn explicit_none_provider_disables_synthesis() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    synthesis:
+      enabled: true
+      provider: none
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.synthesis.provider, "none");
+        assert!(!pipeline.synthesis.enabled);
+    }
+
+    #[test]
+    fn explicit_synthesis_provider_uses_provider_default_model() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: ollama
+      model: qwen3.5:4b
+    synthesis:
+      provider: codex
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.synthesis.provider, "codex");
+        assert_eq!(pipeline.synthesis.model, "gpt-5-codex-mini");
+    }
+
+    #[test]
+    fn extraction_command_provider_parses_command_block() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: command
+      command:
+        bin: node
+        args:
+          - script.mjs
+          - --transcript
+          - $TRANSCRIPT
+        cwd: /tmp/signet
+        env:
+          SIGNET_MODE: pipeline
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.extraction.provider, "command");
+        assert_eq!(pipeline.extraction.timeout, 90_000);
+        let command = pipeline
+            .extraction
+            .command
+            .expect("command config should parse");
+        assert_eq!(command.bin, "node");
+        assert_eq!(
+            command.args,
+            vec![
+                "script.mjs".to_string(),
+                "--transcript".to_string(),
+                "$TRANSCRIPT".to_string()
+            ]
+        );
+        assert_eq!(command.cwd.as_deref(), Some("/tmp/signet"));
+        assert_eq!(
+            command
+                .env
+                .and_then(|env| env.get("SIGNET_MODE").cloned())
+                .as_deref(),
+            Some("pipeline")
+        );
+        assert_eq!(pipeline.synthesis.provider, "ollama");
+        assert_eq!(pipeline.synthesis.model, "qwen3:4b");
+    }
+
+    #[test]
+    fn synthesis_command_provider_is_rejected() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: ollama
+      model: qwen3.5:4b
+    synthesis:
+      provider: command
+"#,
+        );
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn extraction_command_provider_rejects_missing_command_config() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: command
+"#,
+        );
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn extraction_command_provider_parses_legacy_extraction_command() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: command
+    extractionCommand: node ./extract.mjs --transcript "$TRANSCRIPT" --session "$SESSION_KEY"
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        let command = pipeline
+            .extraction
+            .command
+            .expect("legacy extractionCommand should be normalized");
+        assert_eq!(command.bin, "node");
+        assert_eq!(
+            command.args,
+            vec![
+                "./extract.mjs".to_string(),
+                "--transcript".to_string(),
+                "$TRANSCRIPT".to_string(),
+                "--session".to_string(),
+                "$SESSION_KEY".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extraction_fallback_provider_defaults_to_ollama() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+"#,
+        )
+        .expect("parse manifest");
+
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+
+        assert_eq!(pipeline.extraction.fallback_provider, "ollama");
+    }
+
+    #[test]
+    fn extraction_fallback_provider_loads_from_nested_or_flat_keys() {
+        let nested = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+      fallbackProvider: none
+"#,
+        )
+        .expect("parse manifest");
+        let nested_pipeline = nested
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert_eq!(nested_pipeline.extraction.fallback_provider, "none");
+
+        let flat = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    extractionProvider: claude-code
+    extractionFallbackProvider: none
+"#,
+        )
+        .expect("parse manifest");
+        let flat_pipeline = flat
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert_eq!(flat_pipeline.extraction.fallback_provider, "none");
+    }
+
+    #[test]
+    fn worker_load_shedding_fields_load_from_nested_or_flat_keys() {
+        let nested = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    worker:
+      maxLoadPerCpu: 0.6
+      overloadBackoffMs: 45000
+"#,
+        )
+        .expect("parse manifest");
+        let nested_pipeline = nested
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert_eq!(nested_pipeline.worker.max_load_per_cpu, 0.6);
+        assert_eq!(nested_pipeline.worker.overload_backoff_ms, 45_000);
+
+        let flat = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    workerMaxLoadPerCpu: 0.55
+    workerOverloadBackoffMs: 42000
+"#,
+        )
+        .expect("parse manifest");
+        let flat_pipeline = flat
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert_eq!(flat_pipeline.worker.max_load_per_cpu, 0.55);
+        assert_eq!(flat_pipeline.worker.overload_backoff_ms, 42_000);
+    }
+
+    #[test]
+    fn reranker_use_extraction_model_loads_from_nested_or_flat_keys() {
+        let nested = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    reranker:
+      useExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let nested_pipeline = nested
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(nested_pipeline.reranker.use_extraction_model);
+
+        let flat = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    rerankerUseExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let flat_pipeline = flat
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(flat_pipeline.reranker.use_extraction_model);
+    }
+
+    #[test]
+    fn reranker_nested_key_takes_precedence_over_flat_key() {
+        let manifest = parse_manifest(
+            r#"
+memory:
+  pipelineV2:
+    rerankerUseExtractionModel: false
+    reranker:
+      useExtractionModel: true
+"#,
+        )
+        .expect("parse manifest");
+        let pipeline = manifest
+            .memory
+            .and_then(|memory| memory.pipeline_v2)
+            .expect("pipeline config");
+        assert!(pipeline.reranker.use_extraction_model);
+    }
+
+    #[test]
+    fn extraction_fallback_provider_rejects_invalid_string_values() {
+        let error = parse_manifest_result(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+      fallbackProvider: maybe
+"#,
+        )
+        .expect_err("invalid fallbackProvider should fail");
+
+        assert!(
+            error.contains("invalid extraction fallbackProvider 'maybe'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn extraction_fallback_provider_rejects_non_string_values() {
+        let error = parse_manifest_result(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+      fallbackProvider: 1
+"#,
+        )
+        .expect_err("non-string fallbackProvider should fail");
+
+        assert!(
+            error.contains("invalid extraction fallbackProvider type"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn extraction_timeout_default_matches_typescript_timeout() {
+        let pipeline = PipelineV2Config::default();
+        assert_eq!(pipeline.extraction.timeout, 90_000);
+    }
+
+    #[test]
+    fn startup_fail_fast_scopes_to_command_provider_manifest_errors() {
+        let extraction_command_raw: serde_yml::Value = serde_yml::from_str(
+            r#"
+memory:
+  pipelineV2:
+    extraction:
+      provider: command
+      command: []
+"#,
+        )
+        .expect("raw parse");
+        assert!(should_fail_fast_for_manifest_error_context(
+            &extraction_command_raw,
+            "manifest shape error: invalid type: sequence, expected struct ExtractionCommandConfig"
+        ));
+
+        let synthesis_command_raw: serde_yml::Value = serde_yml::from_str(
+            r#"
+memory:
+  pipelineV2:
+    synthesis:
+      provider: command
+"#,
+        )
+        .expect("raw parse");
+        assert!(should_fail_fast_for_manifest_error_context(
+            &synthesis_command_raw,
+            "memory.pipelineV2.synthesis.provider='command' is not supported"
+        ));
+
+        let generic_raw: serde_yml::Value =
+            serde_yml::from_str("agent:\n  name: default\n").expect("raw parse");
+        assert!(!should_fail_fast_for_manifest_error_context(
+            &generic_raw,
+            "manifest shape error: missing field `agent`"
+        ));
     }
 }
 
@@ -274,6 +1174,7 @@ pub struct RateLimitConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct PipelineV2Config {
     pub enabled: bool,
+    pub paused: bool,
     pub shadow_mode: bool,
     /// Spawn the native Rust daemon as a shadow on :3851. Distinct from
     /// `shadow_mode` (extract-without-write). Only meaningful when read
@@ -309,11 +1210,12 @@ impl Default for PipelineV2Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            paused: false,
             shadow_mode: false,
             native_shadow_enabled: false,
             mutations_frozen: false,
             semantic_contradiction_enabled: true,
-            semantic_contradiction_timeout_ms: 45_000,
+            semantic_contradiction_timeout_ms: 120_000,
             telemetry_enabled: false,
             extraction: ExtractionConfig::default(),
             worker: WorkerConfig::default(),
@@ -343,23 +1245,47 @@ impl Default for PipelineV2Config {
 #[serde(default, rename_all = "camelCase")]
 pub struct ExtractionConfig {
     pub provider: String,
+    pub fallback_provider: String,
     pub model: String,
     pub strength: String,
     pub endpoint: Option<String>,
     pub timeout: u64,
     pub min_confidence: f64,
+    pub command: Option<ExtractionCommandConfig>,
     pub escalation: Option<EscalationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ExtractionCommandConfig {
+    pub bin: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Option<HashMap<String, String>>,
+}
+
+impl Default for ExtractionCommandConfig {
+    fn default() -> Self {
+        Self {
+            bin: String::new(),
+            args: Vec::new(),
+            cwd: None,
+            env: None,
+        }
+    }
 }
 
 impl Default for ExtractionConfig {
     fn default() -> Self {
         Self {
             provider: "ollama".to_string(),
+            fallback_provider: "ollama".to_string(),
             model: "qwen3:4b".to_string(),
             strength: "medium".to_string(),
             endpoint: None,
-            timeout: 30_000,
+            timeout: 90_000,
             min_confidence: 0.5,
+            command: None,
             escalation: Some(EscalationConfig::default()),
         }
     }
@@ -389,6 +1315,8 @@ pub struct WorkerConfig {
     pub poll_ms: u64,
     pub max_retries: u32,
     pub lease_timeout_ms: u64,
+    pub max_load_per_cpu: f64,
+    pub overload_backoff_ms: u64,
 }
 
 impl Default for WorkerConfig {
@@ -397,6 +1325,8 @@ impl Default for WorkerConfig {
             poll_ms: 2_000,
             max_retries: 3,
             lease_timeout_ms: 60_000,
+            max_load_per_cpu: 0.8,
+            overload_backoff_ms: 30_000,
         }
     }
 }
@@ -451,8 +1381,19 @@ impl Default for TraversalConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct RerankerConfig {
     pub enabled: bool,
+    /// Model name for the non-extraction reranker path. Only read when
+    /// `use_extraction_model` is false and a non-LLM reranker is wired up.
     pub model: String,
+    /// When true, uses the extraction LLM for reranking and recall summary.
+    /// `top_n`, `timeout_ms`, and `model` below are only read in this path.
+    /// Existing behavior (use_extraction_model: false) is unaffected by their
+    /// values. Defaults match the TS daemon.
+    pub use_extraction_model: bool,
+    /// Max candidates passed to the LLM reranker. Only used when
+    /// `use_extraction_model: true`. Default matches TS daemon (topN: 20).
     pub top_n: usize,
+    /// Shared timeout budget for rerank + summary LLM calls (ms). Only used
+    /// when `use_extraction_model: true`. Default matches TS daemon (2000 ms).
     pub timeout_ms: u64,
 }
 
@@ -460,9 +1401,14 @@ impl Default for RerankerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            model: "nomic-embed-text".to_string(),
-            top_n: 10,
-            timeout_ms: 5_000,
+            model: String::new(),
+            use_extraction_model: false,
+            // top_n and timeout_ms match TS daemon defaults (topN: 20,
+            // timeoutMs: 2000). These fields are only read when
+            // use_extraction_model is true, so existing behavior is
+            // unaffected when the toggle is off.
+            top_n: 20,
+            timeout_ms: 2_000,
         }
     }
 }

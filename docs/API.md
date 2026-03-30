@@ -91,7 +91,9 @@ No authentication required. Lightweight liveness check.
 ### GET /api/status
 
 Full daemon status including pipeline config, embedding provider, and a
-composite health score derived from diagnostics.
+composite health score derived from diagnostics. Extraction provider
+runtime resolution persists startup degradation so operators can detect
+silent fallback or hard-blocked extraction after boot.
 
 **Response**
 
@@ -108,11 +110,36 @@ composite health score derived from diagnostics.
   "memoryDb": true,
   "pipelineV2": {
     "enabled": true,
+    "paused": false,
     "shadowMode": false,
     "mutationsFrozen": false,
     "graphEnabled": false,
     "autonomousEnabled": false,
     "extractionModel": "qwen3:4b"
+  },
+  "pipeline": {
+    "extraction": {
+      "running": true,
+      "overloaded": false,
+      "loadPerCpu": 0.42,
+      "maxLoadPerCpu": 0.8,
+      "overloadBackoffMs": 30000,
+      "overloadSince": null,
+      "nextTickInMs": 1200
+    }
+  },
+  "providerResolution": {
+    "extraction": {
+      "configured": "claude-code",
+      "resolved": "claude-code",
+      "effective": "ollama",
+      "fallbackProvider": "ollama",
+      "status": "degraded",
+      "degraded": true,
+      "fallbackApplied": true,
+      "reason": "Claude Code CLI not found during extraction startup preflight",
+      "since": "2026-03-26T06:00:00.000Z"
+    }
   },
   "health": { "score": 0.97, "status": "healthy" },
   "embedding": {
@@ -126,6 +153,10 @@ composite health score derived from diagnostics.
 
 The `bypassedSessions` field reports how many active sessions currently have
 bypass enabled (see [[#Sessions]]).
+Monitor `providerResolution.extraction.status` for `degraded` or `blocked`
+states when the configured extraction provider is unavailable at startup.
+When `pipeline.extraction.overloaded` is `true`, the extraction worker is
+intentionally backing off for `overloadBackoffMs` between polls.
 
 
 ### GET /api/features
@@ -330,11 +361,18 @@ Body-level fields override prefix-parsed values.
   "tags": "preference,editor",
   "pinned": false,
   "sourceType": "manual",
-  "sourceId": "optional-external-id"
+  "sourceId": "optional-external-id",
+  "agentId": "alice",
+  "visibility": "global"
 }
 ```
 
-Only `content` is required.
+Only `content` is required. Multi-agent fields:
+
+| Field        | Description |
+|--------------|-------------|
+| `agentId`    | Agent that owns this memory. Defaults to `"default"`. |
+| `visibility` | `"global"` (any permitted agent can read), `"private"` (owner only). Defaults to `"global"`. |
 
 **Response**
 
@@ -726,7 +764,8 @@ Requires `recall` permission.
   "who": "claude-code",
   "pinned": false,
   "importance_min": 0.5,
-  "since": "2026-01-01T00:00:00Z"
+  "since": "2026-01-01T00:00:00Z",
+  "agentId": "alice"
 }
 ```
 
@@ -756,8 +795,32 @@ Only `query` is required.
 }
 ```
 
-`source` per result is one of `hybrid`, `vector`, or `keyword`. `method` on
-the response reflects whether vector search was available for this call.
+`source` per result is one of `hybrid`, `vector`, `keyword`, or `llm_summary`.
+`method` on the response reflects whether vector search was available for
+this call.
+
+When `memory.pipelineV2.reranker.useExtractionModel` is enabled, an
+additional synthesized summary card may be prepended to results. This card
+has `source: "llm_summary"`, `supplementary: true`, and an id of the form
+`summary:<sha1-12>`. It is only injected when `limit >= 2` so callers
+always receive at least one real memory to verify the summary against. The
+card is not stored in the database and does not affect access-time tracking.
+
+**Operational note**: `useExtractionModel` moves recall onto a live LLM
+call path. When auth mode is not `local`, the daemon enforces a dedicated
+rate-limit bucket — `auth.rateLimits.recallLlm` (default: 60 req/min per
+token). Configure it in `agent.yaml` alongside the other operation limits:
+
+```yaml
+auth:
+  mode: team
+  rateLimits:
+    recallLlm:
+      windowMs: 60000
+      max: 30
+```
+
+No additional permission level is required beyond `recall`.
 
 ### GET /api/memory/search
 
@@ -1206,6 +1269,88 @@ Lightweight health check for a connector, including document count.
 ```
 
 
+Agents
+------
+
+Multi-agent endpoints for managing the agent roster. All agents share one
+SQLite database; memories are scoped by `agent_id` and `visibility`. The
+read policy controls which other agents' global memories each agent can see.
+
+### GET /api/agents
+
+List all registered agents. Requires no permission (local mode) or `recall`.
+
+**Response**
+
+```json
+{
+  "agents": [
+    {
+      "id": "default",
+      "name": "default",
+      "read_policy": "shared",
+      "policy_group": null,
+      "created_at": "2026-03-24T00:00:00.000Z",
+      "updated_at": "2026-03-24T00:00:00.000Z"
+    },
+    {
+      "id": "alice",
+      "name": "alice",
+      "read_policy": "isolated",
+      "policy_group": null,
+      "created_at": "2026-03-24T12:00:00.000Z",
+      "updated_at": "2026-03-24T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+`read_policy` is one of:
+- `isolated` — agent sees only its own memories
+- `shared` — agent sees all `visibility=global` memories from any agent
+- `group` — agent sees `visibility=global` memories from agents in the same `policy_group`
+
+### GET /api/agents/:name
+
+Get a single agent by name. Returns `404` if not found.
+
+**Response** — same shape as a single entry in `GET /api/agents`.
+
+### POST /api/agents
+
+Register a new agent. Requires `remember` permission.
+
+**Request body**
+
+```json
+{
+  "name": "alice",
+  "read_policy": "isolated",
+  "policy_group": null
+}
+```
+
+Only `name` is required. `read_policy` defaults to `"isolated"`.
+
+**Response** — the created agent record.
+
+### DELETE /api/agents/:name
+
+Remove an agent from the roster. Memories owned by the agent are marked
+`visibility='archived'` (not deleted). Requires `admin` permission.
+
+**Query parameters**
+
+| Parameter | Description |
+|-----------|-------------|
+| `purge`   | Set to `true` to permanently delete all memories where `agent_id = name`. |
+
+**Response**
+
+```json
+{ "success": true, "purged": false }
+```
+
 Skills
 ------
 
@@ -1529,15 +1674,24 @@ for in-context injection.
 ```json
 {
   "harness": "claude-code",
+  "userMessage": "How do I set up dark mode?",
   "userPrompt": "How do I set up dark mode?",
   "lastAssistantMessage": "Earlier we discussed using CSS variables for theme tokens.",
   "sessionKey": "session-uuid",
+  "transcriptPath": "/tmp/signet/session-transcript.txt",
   "runtimePath": "plugin"
 }
 ```
 
-`harness` and `userPrompt` are required.
-`lastAssistantMessage` is optional and improves recall matching.
+`harness` is required.
+`userMessage` is preferred when the harness can provide a cleaned user turn.
+`userPrompt`, `lastAssistantMessage`, `transcriptPath`, and inline `transcript`
+are optional.
+
+Prompt-submit retrieval prefers structured memory recall. When structured
+recall is weak or empty, the daemon first attempts temporal-summary
+fallback (session DAG artifacts) and then transcript fallback from prior
+session transcripts instead of returning no context.
 
 ### POST /api/hooks/session-end
 
@@ -1551,11 +1705,25 @@ Releases the session's runtime path claim.
   "harness": "claude-code",
   "sessionKey": "session-uuid",
   "sessionId": "session-uuid",
+  "transcriptPath": "/tmp/signet/session-transcript.txt",
   "runtimePath": "plugin"
 }
 ```
 
 `harness` is required.
+`transcriptPath` or inline `transcript` may be provided for lossless transcript
+capture.
+
+When transcript text is available, the daemon first writes canonical
+workspace-root-relative markdown lineage files under
+`$SIGNET_WORKSPACE/memory/`:
+
+- `{captured_at}--{session_token}--transcript.md`
+- `{captured_at}--{session_token}--manifest.md`
+
+The manifest is mutable and may later gain a `compaction_path`; transcript
+artifacts are immutable once written. The async summary worker later writes the
+matching immutable `--summary.md` artifact for normal `session-end` jobs.
 
 ### POST /api/hooks/remember
 
@@ -1610,7 +1778,9 @@ the compaction prompt.
 
 ### POST /api/hooks/compaction-complete
 
-Save a compaction summary as a `session_summary` memory.
+Save a compaction summary as a memory row, as a temporal DAG artifact, and as a
+canonical immutable markdown compaction artifact linked back through the
+session manifest.
 
 **Request body**
 
@@ -1619,17 +1789,95 @@ Save a compaction summary as a `session_summary` memory.
   "harness": "claude-code",
   "summary": "Session covered dark mode setup and vim configuration...",
   "sessionKey": "session-uuid",
+  "project": "/workspace/repo",
   "runtimePath": "plugin"
 }
 ```
 
 `harness` and `summary` are required.
 
+If `sessionKey` is present, the daemon uses it to preserve lineage:
+
+- the memory row is agent-scoped
+- `source_id` points back to the session lineage
+- the temporal node keeps `session_key`
+- the artifact can later be expanded through the temporal drill-down API
+- transcript and temporal summary persistence are keyed by `agentId +
+  sessionKey`, so identical session keys from different agents do not collide
+- the canonical compaction file is written to
+  `memory/{captured_at}--{session_token}--compaction.md`
+- the mutable manifest for that session is backfilled with `compaction_path`
+
+If compaction fires before transcript persistence lands, callers should also
+send `project`. The daemon uses that explicit project as the fallback lineage
+scope until transcript storage catches up.
+
 **Response**
 
 ```json
 { "success": true, "memoryId": "uuid" }
 ```
+
+### POST /api/hooks/session-checkpoint-extract
+
+Trigger a mid-session memory extraction for long-lived sessions (Discord bots,
+persistent agents) that never call `session-end`. Computes a delta since the
+last extraction cursor and enqueues a summary job without releasing the session
+claim.
+
+**Request body**
+
+```json
+{
+  "harness": "openclaw",
+  "sessionKey": "session-uuid",
+  "agentId": "agent-id",
+  "project": "/workspace/repo",
+  "transcriptPath": "/path/to/session.jsonl",
+  "runtimePath": "plugin"
+}
+```
+
+`harness` and `sessionKey` are required. `transcript` (inline string) takes
+precedence over `transcriptPath`; both fall back to the stored session
+transcript from a prior `session-end` or `user-prompt-submit` call.
+
+The endpoint skips silently when:
+- The delta since the last extraction cursor is < 500 characters
+- No transcript is available
+- The session is bypassed
+
+On success the extraction cursor advances so the next call only processes
+new content.
+
+**Response**
+
+```json
+{ "queued": true, "jobId": "uuid" }
+```
+
+`queued: true` means a summary job was enqueued; `jobId` identifies the
+async job. The job extracts the delta and writes a temporal node scored
+at 0.85 (below compaction summaries at 0.95, above chunks at 0.55). Checkpoint
+jobs stay DB-native, they do not create canonical `--summary.md` session
+artifacts.
+
+```json
+{ "skipped": true }
+```
+
+Returned when delta < 500 chars, no transcript is available, or the
+session is bypassed.
+
+```json
+{ "queued": false }
+```
+
+Returned by daemon implementations where summary job enqueueing is not
+yet available (Phase 5). The delta was found and is above the threshold
+but no job was enqueued. Callers may treat this identically to
+`{skipped: true}` for retry purposes — the content is not consumed and
+will be re-evaluated on the next call.
 
 ### GET /api/hooks/synthesis/config
 
@@ -1640,18 +1888,50 @@ Return the current synthesis configuration (thresholds, model, schedule).
 Request a `MEMORY.md` synthesis run. Implementation-defined request body
 and response from `handleSynthesisRequest`.
 
+Current `MEMORY.md` generation is a deterministic projection, not a free-form
+LLM rewrite:
+
+- scored durable memories come from the memory database
+- rolling session-ledger rows come from canonical artifact frontmatter in
+  `memory_artifacts`
+- temporal context comes from `session_summaries` DAG artifacts
+- the response keeps the rendered markdown in `prompt` for backward
+  compatibility, with `model: "projection"`
+- `indexBlock` contains the exact `## Temporal Index` block already included in
+  the rendered projection
+
+The rendered file contains these required sections:
+
+- `## Global Head (Tier 1)`
+- `## Thread Heads (Tier 2)`
+- `## Session Ledger (Last 30 Days)`
+- `## Open Threads`
+- `## Durable Notes & Constraints`
+- `## Temporal Index`
+
+Optional `agentId` / `sessionKey` inputs may be provided so synthesis resolves
+the correct agent-scoped head.
+
 ### POST /api/hooks/synthesis/complete
 
 Write a newly synthesized `MEMORY.md`. Backs up the existing file before
-overwriting.
+overwriting and records DB-backed head metadata used for same-agent
+merge protection.
 
 **Request body**
 
 ```json
-{ "content": "# Memory\n\n..." }
+{
+  "content": "# Memory\n\n...",
+  "agentId": "optional-agent-id",
+  "sessionKey": "optional-session-key"
+}
 ```
 
 `content` is required.
+
+If another writer currently holds the active `MEMORY.md` lease for the same
+agent head, this route returns `409`.
 
 **Response**
 
@@ -1670,7 +1950,11 @@ memory_store, etc.) continue to work normally.
 
 ### GET /api/sessions
 
-List all active sessions with their bypass status.
+List active sessions for the requesting agent with their bypass status.
+The response merges live tracker claims with live cross-agent presence so
+sessions do not disappear just because one surface has not claimed the
+session yet. Results are scoped to the authenticated agent; for
+cross-agent visibility use `GET /api/cross-agent/presence`.
 
 **Response**
 
@@ -1681,6 +1965,7 @@ List all active sessions with their bypass status.
       "key": "session-uuid",
       "runtimePath": "plugin",
       "claimedAt": "2026-03-08T10:00:00.000Z",
+      "expiresAt": "2026-03-08T14:00:00.000Z",
       "bypassed": false
     }
   ],
@@ -1692,6 +1977,8 @@ List all active sessions with their bypass status.
 
 Get a single session's status by its session key.
 
+Both raw keys (`abc123`) and prefixed keys (`session:abc123`) are accepted.
+
 **Response**
 
 ```json
@@ -1699,16 +1986,76 @@ Get a single session's status by its session key.
   "key": "session-uuid",
   "runtimePath": "plugin",
   "claimedAt": "2026-03-08T10:00:00.000Z",
+  "expiresAt": "2026-03-08T14:00:00.000Z",
   "bypassed": false
 }
 ```
 
 Returns `404` if the session key is not found.
 
+### GET /api/sessions/summaries
+
+List temporal summary nodes used for drill-down and `MEMORY.md` synthesis.
+Results are agent-scoped.
+
+**Response**
+
+```json
+{
+  "summaries": [
+    {
+      "id": "sess-1",
+      "kind": "session",
+      "depth": 0,
+      "source_type": "summary",
+      "source_ref": "session-uuid",
+      "meta_json": "{\"source\":\"summary-worker\"}"
+    }
+  ]
+}
+```
+
+### POST /api/sessions/summaries/expand
+
+Expand a temporal node by id. Returns lineage, linked memories, and transcript
+context for `MEMORY.md` drill-down and LCM-style expansion. Expansion is
+agent-scoped.
+
+**Request body**
+
+```json
+{
+  "id": "node-id",
+  "includeTranscript": true,
+  "transcriptCharLimit": 2000
+}
+```
+
+**Response**
+
+```json
+{
+  "node": {
+    "id": "node-id",
+    "kind": "session",
+    "depth": 0,
+    "sourceType": "summary"
+  },
+  "parents": [],
+  "children": [],
+  "linkedMemories": [],
+  "transcript": {
+    "sessionKey": "session-uuid",
+    "excerpt": "..."
+  }
+}
+```
+
 ### POST /api/sessions/:key/bypass
 
 Toggle bypass for a session. When enabled, all hook endpoints for this session
 return empty no-op responses with `bypassed: true`. MCP tools are not affected.
+Both raw keys and `session:<uuid>` forms are accepted.
 
 **Request body**
 
@@ -1956,12 +2303,19 @@ after resolving a pipeline configuration issue.
 ### POST /api/repair/release-leases
 
 Release stale pipeline job leases that have exceeded their timeout. Run this
-if pipeline workers crashed and left jobs locked.
+if pipeline workers crashed and left jobs locked. Stale jobs that still have
+remaining retries are returned to `pending`. Stale jobs that have already
+reached `max_attempts` are moved to `dead` instead of being requeued again.
 
 **Response**
 
 ```json
-{ "action": "releaseStaleLeases", "success": true, "affected": 3, "message": "..." }
+{
+  "action": "releaseStaleLeases",
+  "success": true,
+  "affected": 3,
+  "message": "released 2 stale lease(s) back to pending and dead-lettered 1 exhausted job(s)"
+}
 ```
 
 ### POST /api/repair/check-fts
@@ -2105,6 +2459,9 @@ Composite pipeline status snapshot for dashboard visualization. Returns
 worker status, job queue counts (memory and summary), diagnostics, latency
 histograms, error summary, and the current pipeline mode.
 
+Known `mode` values: `controlled-write`, `shadow`, `frozen`, `paused`,
+`disabled`.
+
 **Response**
 
 ```json
@@ -2121,7 +2478,46 @@ histograms, error summary, and the current pipeline mode.
 }
 ```
 
-Mode is one of: `disabled`, `frozen`, `shadow`, `controlled-write`.
+Mode is one of: `disabled`, `frozen`, `shadow`, `paused`, `controlled-write`.
+
+### POST /api/pipeline/pause
+
+Pause the extraction runtime in-place without restarting the daemon.
+Requires `admin` permission and uses the admin rate limit bucket.
+
+Returns `409` if another pause/resume transition is already running.
+
+**Response**
+
+```json
+{
+  "success": true,
+  "changed": true,
+  "paused": true,
+  "file": "/home/user/.agents/agent.yaml",
+  "mode": "paused"
+}
+```
+
+### POST /api/pipeline/resume
+
+Resume the extraction runtime in-place without restarting the daemon.
+Requires `admin` permission and uses the admin rate limit bucket.
+
+**Response**
+
+```json
+{
+  "success": true,
+  "changed": true,
+  "paused": false,
+  "file": "/home/user/.agents/agent.yaml",
+  "mode": "controlled-write"
+}
+```
+
+`changed` is `false` when the persisted pause flag already matches the
+requested state.
 
 
 Checkpoints

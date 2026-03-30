@@ -8,18 +8,19 @@
  * Follows the DbAccessor pattern established in skill-graph.ts.
  */
 
-import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
 import type {
+	AttributeKind,
+	AttributeStatus,
+	DependencyType,
 	Entity,
 	EntityAspect,
 	EntityAttribute,
 	EntityDependency,
 	TaskMeta,
-	AttributeKind,
-	AttributeStatus,
-	DependencyType,
 	TaskStatus,
 } from "@signet/core";
+import type { DbAccessor, ReadDb, WriteDb } from "./db-accessor";
+import { requireDependencyReason } from "./dependency-history";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,12 +38,10 @@ function rowToEntity(r: Record<string, unknown>): Entity {
 	return {
 		id: r.id as string,
 		name: r.name as string,
-		canonicalName:
-			typeof r.canonical_name === "string" ? r.canonical_name : undefined,
+		canonicalName: typeof r.canonical_name === "string" ? r.canonical_name : undefined,
 		entityType: r.entity_type as string,
 		agentId: r.agent_id as string,
-		description:
-			typeof r.description === "string" ? r.description : undefined,
+		description: typeof r.description === "string" ? r.description : undefined,
 		mentions: typeof r.mentions === "number" ? r.mentions : undefined,
 		pinned: r.pinned === 1,
 		pinnedAt: typeof r.pinned_at === "string" ? r.pinned_at : null,
@@ -125,10 +124,7 @@ export interface UpsertAspectParams {
 	readonly weight?: number;
 }
 
-export function upsertAspect(
-	accessor: DbAccessor,
-	params: UpsertAspectParams,
-): EntityAspect {
+export function upsertAspect(accessor: DbAccessor, params: UpsertAspectParams): EntityAspect {
 	const canonical = toCanonicalName(params.name);
 	const ts = now();
 	const id = crypto.randomUUID();
@@ -143,16 +139,7 @@ export function upsertAspect(
 			   name = excluded.name,
 			   weight = COALESCE(excluded.weight, entity_aspects.weight),
 			   updated_at = excluded.updated_at`,
-		).run(
-			id,
-			params.entityId,
-			params.agentId,
-			params.name,
-			canonical,
-			params.weight ?? 0.5,
-			ts,
-			ts,
-		);
+		).run(id, params.entityId, params.agentId, params.name, canonical, params.weight ?? 0.5, ts, ts);
 
 		// Read back the actual row (may have kept old id on conflict)
 		const row = db
@@ -165,11 +152,7 @@ export function upsertAspect(
 	});
 }
 
-export function getAspectsForEntity(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-): readonly EntityAspect[] {
+export function getAspectsForEntity(accessor: DbAccessor, entityId: string, agentId: string): readonly EntityAspect[] {
 	return accessor.withReadDb((db) => {
 		const rows = db
 			.prepare(
@@ -202,10 +185,7 @@ export interface CreateAttributeParams {
 	readonly importance?: number;
 }
 
-export function createAttribute(
-	accessor: DbAccessor,
-	params: CreateAttributeParams,
-): EntityAttribute {
+export function createAttribute(accessor: DbAccessor, params: CreateAttributeParams): EntityAttribute {
 	const id = crypto.randomUUID();
 	const ts = now();
 	const normalized = params.content.trim().toLowerCase().replace(/\s+/g, " ");
@@ -292,12 +272,7 @@ export function getConstraintsForEntity(
 	});
 }
 
-export function supersedeAttribute(
-	accessor: DbAccessor,
-	id: string,
-	supersededById: string,
-	agentId: string,
-): void {
+export function supersedeAttribute(accessor: DbAccessor, id: string, supersededById: string, agentId: string): void {
 	const ts = now();
 	accessor.withWriteTx((db) => {
 		db.prepare(
@@ -334,10 +309,7 @@ export interface UpsertDependencyParams {
 	readonly reason?: string;
 }
 
-export function upsertDependency(
-	accessor: DbAccessor,
-	params: UpsertDependencyParams,
-): EntityDependency {
+export function upsertDependency(accessor: DbAccessor, params: UpsertDependencyParams): EntityDependency {
 	const ts = now();
 
 	return accessor.withWriteTx((db) => {
@@ -347,15 +319,25 @@ export function upsertDependency(
 				 WHERE source_entity_id = ? AND target_entity_id = ?
 				   AND dependency_type = ? AND agent_id = ?`,
 			)
-			.get(
-				params.sourceEntityId,
-				params.targetEntityId,
-				params.dependencyType,
-				params.agentId,
-			) as Record<string, unknown> | undefined;
+			.get(params.sourceEntityId, params.targetEntityId, params.dependencyType, params.agentId) as
+			| Record<string, unknown>
+			| undefined;
 
 		if (existing) {
-			const reason = params.reason ?? (existing.reason as string | null);
+			const changed =
+				params.strength !== undefined ||
+				params.aspectId !== undefined ||
+				params.confidence !== undefined ||
+				params.reason !== undefined;
+
+			if (!changed) {
+				return rowToDependency(existing);
+			}
+
+			const reason = requireDependencyReason(
+				params.dependencyType,
+				params.reason ?? (typeof existing.reason === "string" ? existing.reason : null),
+			);
 			const conf = params.confidence ?? (typeof existing.confidence === "number" ? existing.confidence : 0.7);
 			db.prepare(
 				`UPDATE entity_dependencies
@@ -381,7 +363,7 @@ export function upsertDependency(
 		}
 
 		const id = crypto.randomUUID();
-		const reason = params.reason ?? null;
+		const reason = requireDependencyReason(params.dependencyType, params.reason);
 		const conf = params.confidence ?? 0.7;
 		db.prepare(
 			`INSERT INTO entity_dependencies
@@ -401,7 +383,6 @@ export function upsertDependency(
 			ts,
 			ts,
 		);
-
 		return {
 			id,
 			sourceEntityId: params.sourceEntityId,
@@ -451,6 +432,9 @@ export function getDependenciesTo(
 }
 
 export function deleteDependency(accessor: DbAccessor, id: string, agentId: string): void {
+	// History is written by the trg_entity_dependencies_audit_delete AFTER DELETE
+	// trigger (migration 050), which covers app deletes, FK cascades, and direct SQL.
+	// No app-layer history write here to avoid duplicate audit rows.
 	accessor.withWriteTx((db) => {
 		db.prepare("DELETE FROM entity_dependencies WHERE id = ? AND agent_id = ?").run(id, agentId);
 	});
@@ -460,11 +444,7 @@ export function deleteDependency(accessor: DbAccessor, id: string, agentId: stri
 // Entity pinning
 // ---------------------------------------------------------------------------
 
-export function pinEntity(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-): void {
+export function pinEntity(accessor: DbAccessor, entityId: string, agentId: string): void {
 	const ts = now();
 	accessor.withWriteTx((db) => {
 		db.prepare(
@@ -475,11 +455,7 @@ export function pinEntity(
 	});
 }
 
-export function unpinEntity(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-): void {
+export function unpinEntity(accessor: DbAccessor, entityId: string, agentId: string): void {
 	const ts = now();
 	accessor.withWriteTx((db) => {
 		db.prepare(
@@ -490,10 +466,7 @@ export function unpinEntity(
 	});
 }
 
-export function getPinnedEntities(
-	accessor: DbAccessor,
-	agentId: string,
-): ReadonlyArray<PinnedEntitySummary> {
+export function getPinnedEntities(accessor: DbAccessor, agentId: string): ReadonlyArray<PinnedEntitySummary> {
 	return accessor.withReadDb((db) => {
 		const rows = db
 			.prepare(
@@ -505,20 +478,14 @@ export function getPinnedEntities(
 			)
 			.all(agentId) as Array<Record<string, unknown>>;
 		return rows.flatMap((row) => {
-			if (
-				typeof row.id !== "string" ||
-				typeof row.name !== "string"
-			) {
+			if (typeof row.id !== "string" || typeof row.name !== "string") {
 				return [];
 			}
 			return [
 				{
 					id: row.id,
 					name: row.name,
-					pinnedAt:
-						typeof row.pinned_at === "string"
-							? row.pinned_at
-							: "",
+					pinnedAt: typeof row.pinned_at === "string" ? row.pinned_at : "",
 				},
 			];
 		});
@@ -537,14 +504,10 @@ export interface UpsertTaskMetaParams {
 	readonly retentionUntil?: string;
 }
 
-export function upsertTaskMeta(
-	accessor: DbAccessor,
-	params: UpsertTaskMetaParams,
-): TaskMeta {
+export function upsertTaskMeta(accessor: DbAccessor, params: UpsertTaskMetaParams): TaskMeta {
 	const ts = now();
 
-	const completedAt =
-		params.status === "done" || params.status === "cancelled" ? ts : null;
+	const completedAt = params.status === "done" || params.status === "cancelled" ? ts : null;
 
 	return accessor.withWriteTx((db) => {
 		// entity_id is PRIMARY KEY, so ON CONFLICT handles the upsert
@@ -581,38 +544,23 @@ export function upsertTaskMeta(
 	});
 }
 
-export function getTaskMeta(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-): TaskMeta | null {
+export function getTaskMeta(accessor: DbAccessor, entityId: string, agentId: string): TaskMeta | null {
 	return accessor.withReadDb((db) => {
-		const row = db
-			.prepare("SELECT * FROM task_meta WHERE entity_id = ? AND agent_id = ?")
-			.get(entityId, agentId) as Record<string, unknown> | undefined;
+		const row = db.prepare("SELECT * FROM task_meta WHERE entity_id = ? AND agent_id = ?").get(entityId, agentId) as
+			| Record<string, unknown>
+			| undefined;
 		return row ? rowToTaskMeta(row) : null;
 	});
 }
 
-export function updateTaskStatus(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-	status: TaskStatus,
-): void {
+export function updateTaskStatus(accessor: DbAccessor, entityId: string, agentId: string, status: TaskStatus): void {
 	const ts = now();
 	accessor.withWriteTx((db) => {
 		db.prepare(
 			`UPDATE task_meta
 			 SET status = ?, completed_at = ?, updated_at = ?
 			 WHERE entity_id = ? AND agent_id = ?`,
-		).run(
-			status,
-			status === "done" || status === "cancelled" ? ts : null,
-			ts,
-			entityId,
-			agentId,
-		);
+		).run(status, status === "done" || status === "cancelled" ? ts : null, ts, entityId, agentId);
 	});
 }
 
@@ -694,6 +642,95 @@ export interface EntityHealth {
 	readonly winRate: number;
 	readonly avgMargin: number;
 	readonly trend: "improving" | "stable" | "declining";
+}
+
+export interface ResolvedNamedEntity {
+	readonly id: string;
+	readonly name: string;
+	readonly canonicalName: string;
+	readonly entityType: string;
+	readonly description: string | null;
+}
+
+export function resolveNamedEntity(
+	accessor: DbAccessor,
+	input: {
+		readonly agentId: string;
+		readonly name: string;
+	},
+): ResolvedNamedEntity | null {
+	const canonical = toCanonicalName(input.name);
+	if (canonical.length === 0) return null;
+
+	return accessor.withReadDb((db) => {
+		const escaped = canonical.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+		const starts = `${escaped}%`;
+		const contains = `%${escaped}%`;
+		const rows = db
+			.prepare(
+				`SELECT
+					id,
+					name,
+					COALESCE(canonical_name, LOWER(name)) AS canonical_name,
+					entity_type,
+					description,
+					mentions,
+					updated_at,
+					CASE
+						WHEN COALESCE(canonical_name, LOWER(name)) = ? THEN 0
+						WHEN LOWER(name) = ? THEN 1
+						WHEN COALESCE(canonical_name, LOWER(name)) LIKE ? ESCAPE '\\' THEN 2
+						WHEN LOWER(name) LIKE ? ESCAPE '\\' THEN 3
+						WHEN COALESCE(canonical_name, LOWER(name)) LIKE ? ESCAPE '\\' THEN 4
+						WHEN LOWER(name) LIKE ? ESCAPE '\\' THEN 5
+						ELSE 6
+					END AS match_rank
+				 FROM entities
+				 WHERE agent_id = ?
+				   AND (
+						COALESCE(canonical_name, LOWER(name)) = ?
+						OR LOWER(name) = ?
+						OR COALESCE(canonical_name, LOWER(name)) LIKE ? ESCAPE '\\'
+						OR LOWER(name) LIKE ? ESCAPE '\\'
+						OR COALESCE(canonical_name, LOWER(name)) LIKE ? ESCAPE '\\'
+						OR LOWER(name) LIKE ? ESCAPE '\\'
+				   )
+				 ORDER BY match_rank ASC, mentions DESC, updated_at DESC, name ASC
+				 LIMIT 1`,
+			)
+			.get(
+				canonical,
+				canonical,
+				starts,
+				starts,
+				contains,
+				contains,
+				input.agentId,
+				canonical,
+				canonical,
+				starts,
+				starts,
+				contains,
+				contains,
+			) as
+			| {
+					id: string;
+					name: string;
+					canonical_name: string;
+					entity_type: string;
+					description: string | null;
+			  }
+			| undefined;
+
+		if (!rows) return null;
+		return {
+			id: rows.id,
+			name: rows.name,
+			canonicalName: rows.canonical_name,
+			entityType: rows.entity_type,
+			description: rows.description,
+		};
+	});
 }
 
 export function listKnowledgeEntities(
@@ -855,18 +892,8 @@ export function getAttributesForAspectFiltered(
 	},
 ): readonly EntityAttribute[] {
 	return accessor.withReadDb((db) => {
-		const conditions = [
-			"asp.entity_id = ?",
-			"asp.id = ?",
-			"asp.agent_id = ?",
-			"ea.agent_id = ?",
-		];
-		const args: Array<string | number> = [
-			params.entityId,
-			params.aspectId,
-			params.agentId,
-			params.agentId,
-		];
+		const conditions = ["asp.entity_id = ?", "asp.id = ?", "asp.agent_id = ?", "ea.agent_id = ?"];
+		const args: Array<string | number> = [params.entityId, params.aspectId, params.agentId, params.agentId];
 		if (params.kind) {
 			conditions.push("ea.kind = ?");
 			args.push(params.kind);
@@ -921,18 +948,13 @@ export function getEntityDependenciesDetailed(
 			)
 			.all(
 				params.agentId,
-				...(params.direction === "incoming" || params.direction === "both"
-					? [params.entityId]
-					: []),
-				...(params.direction === "outgoing" || params.direction === "both"
-					? [params.entityId]
-					: []),
+				...(params.direction === "incoming" || params.direction === "both" ? [params.entityId] : []),
+				...(params.direction === "outgoing" || params.direction === "both" ? [params.entityId] : []),
 			) as Array<Record<string, unknown>>;
 
 		return rows.map((row) => ({
 			id: row.id as string,
-			direction:
-				row.source_entity_id === params.entityId ? "outgoing" : "incoming",
+			direction: row.source_entity_id === params.entityId ? "outgoing" : "incoming",
 			dependencyType: row.dependency_type as string,
 			strength: Number(row.strength ?? 0),
 			aspectId: (row.aspect_id as string) ?? null,
@@ -947,10 +969,7 @@ export function getEntityDependenciesDetailed(
 	});
 }
 
-export function getKnowledgeStats(
-	accessor: DbAccessor,
-	agentId: string,
-): KnowledgeStats {
+export function getKnowledgeStats(accessor: DbAccessor, agentId: string): KnowledgeStats {
 	return accessor.withReadDb((db) => {
 		const scopedMemoryRows = db
 			.prepare(
@@ -966,12 +985,12 @@ export function getKnowledgeStats(
 				   )`,
 			)
 			.get(agentId) as { n: number };
-		const entityCount = db
-			.prepare("SELECT COUNT(*) as n FROM entities WHERE agent_id = ?")
-			.get(agentId) as { n: number };
-		const aspectCount = db
-			.prepare("SELECT COUNT(*) as n FROM entity_aspects WHERE agent_id = ?")
-			.get(agentId) as { n: number };
+		const entityCount = db.prepare("SELECT COUNT(*) as n FROM entities WHERE agent_id = ?").get(agentId) as {
+			n: number;
+		};
+		const aspectCount = db.prepare("SELECT COUNT(*) as n FROM entity_aspects WHERE agent_id = ?").get(agentId) as {
+			n: number;
+		};
 		const attributeCount = db
 			.prepare(
 				`SELECT COUNT(*) as n FROM entity_attributes
@@ -1018,9 +1037,7 @@ export function getKnowledgeStats(
 		};
 
 		const coveragePercent =
-			scopedMemoryRows.n > 0
-				? Math.round((assignedMemoryCount.n / scopedMemoryRows.n) * 1000) / 10
-				: 0;
+			scopedMemoryRows.n > 0 ? Math.round((assignedMemoryCount.n / scopedMemoryRows.n) * 1000) / 10 : 0;
 
 		return {
 			entityCount: entityCount.n,
@@ -1028,16 +1045,10 @@ export function getKnowledgeStats(
 			attributeCount: attributeCount.n,
 			constraintCount: constraintCount.n,
 			dependencyCount: dependencyCount.n,
-			unassignedMemoryCount: Math.max(
-				scopedMemoryRows.n - assignedMemoryCount.n,
-				0,
-			),
+			unassignedMemoryCount: Math.max(scopedMemoryRows.n - assignedMemoryCount.n, 0),
 			coveragePercent,
-			feedbackUpdatedAspectCount: Number(
-				feedbackStats.updated_last_7_days ?? 0,
-			),
-			averageAspectWeight:
-				Math.round(Number(feedbackStats.avg_weight ?? 0) * 1000) / 1000,
+			feedbackUpdatedAspectCount: Number(feedbackStats.updated_last_7_days ?? 0),
+			averageAspectWeight: Math.round(Number(feedbackStats.avg_weight ?? 0) * 1000) / 1000,
 			maxWeightAspectCount: Number(feedbackStats.max_weight_count ?? 0),
 			minWeightAspectCount: Number(feedbackStats.min_weight_count ?? 0),
 		};
@@ -1052,10 +1063,7 @@ export function getEntityHealth(
 ): ReadonlyArray<EntityHealth> {
 	return accessor.withReadDb((db) => {
 		const args: Array<string | number> = [agentId];
-		const sinceClause =
-			typeof since === "string" && since.length > 0
-				? " AND created_at >= ?"
-				: "";
+		const sinceClause = typeof since === "string" && since.length > 0 ? " AND created_at >= ?" : "";
 		if (sinceClause) {
 			args.push(since);
 		}
@@ -1089,8 +1097,7 @@ export function getEntityHealth(
 			const bucket = grouped.get(row.focal_entity_id) ?? [];
 			bucket.push({
 				entityName:
-					typeof row.focal_entity_name === "string" &&
-					row.focal_entity_name.length > 0
+					typeof row.focal_entity_name === "string" && row.focal_entity_name.length > 0
 						? row.focal_entity_name
 						: row.focal_entity_id,
 				predictorWon: Number(row.predictor_won ?? 0),
@@ -1103,27 +1110,16 @@ export function getEntityHealth(
 		for (const [entityId, comparisons] of grouped) {
 			if (comparisons.length < minComparisons) continue;
 
-			const wins = comparisons.reduce(
-				(total, row) => total + (row.predictorWon > 0 ? 1 : 0),
-				0,
-			);
-			const avgMargin =
-				comparisons.reduce((total, row) => total + row.margin, 0) /
-				comparisons.length;
+			const wins = comparisons.reduce((total, row) => total + (row.predictorWon > 0 ? 1 : 0), 0);
+			const avgMargin = comparisons.reduce((total, row) => total + row.margin, 0) / comparisons.length;
 			const midpoint = Math.max(1, Math.floor(comparisons.length / 2));
 			const firstHalf = comparisons.slice(0, midpoint);
 			const secondHalf = comparisons.slice(midpoint);
 			const firstHalfRate =
-				firstHalf.reduce(
-					(total, row) => total + (row.predictorWon > 0 ? 1 : 0),
-					0,
-				) / firstHalf.length;
+				firstHalf.reduce((total, row) => total + (row.predictorWon > 0 ? 1 : 0), 0) / firstHalf.length;
 			const secondHalfRate =
 				secondHalf.length > 0
-					? secondHalf.reduce(
-							(total, row) => total + (row.predictorWon > 0 ? 1 : 0),
-							0,
-						) / secondHalf.length
+					? secondHalf.reduce((total, row) => total + (row.predictorWon > 0 ? 1 : 0), 0) / secondHalf.length
 					: firstHalfRate;
 			const rateDelta = secondHalfRate - firstHalfRate;
 			health.push({
@@ -1132,12 +1128,7 @@ export function getEntityHealth(
 				comparisonCount: comparisons.length,
 				winRate: wins / comparisons.length,
 				avgMargin,
-				trend:
-					rateDelta > 0.1
-						? "improving"
-						: rateDelta < -0.1
-							? "declining"
-							: "stable",
+				trend: rateDelta > 0.1 ? "improving" : rateDelta < -0.1 ? "declining" : "stable",
 			});
 		}
 
@@ -1149,10 +1140,7 @@ export function getEntityHealth(
 	});
 }
 
-export function propagateMemoryStatus(
-	accessor: DbAccessor,
-	agentId: string,
-): number {
+export function propagateMemoryStatus(accessor: DbAccessor, agentId: string): number {
 	return accessor.withWriteTx((db) => {
 		const stale = db
 			.prepare(
@@ -1168,8 +1156,7 @@ export function propagateMemoryStatus(
 			.all(agentId) as Array<Record<string, unknown>>;
 		if (stale.length === 0) return 0;
 
-		const ids = stale
-			.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
+		const ids = stale.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
 		if (ids.length === 0) return 0;
 
 		const placeholders = ids.map(() => "?").join(", ");
@@ -1222,10 +1209,7 @@ export interface ConstellationGraph {
 	readonly dependencies: readonly ConstellationDependency[];
 }
 
-export function getKnowledgeGraphForConstellation(
-	accessor: DbAccessor,
-	agentId: string,
-): ConstellationGraph {
+export function getKnowledgeGraphForConstellation(accessor: DbAccessor, agentId: string): ConstellationGraph {
 	return accessor.withReadDb((db) => {
 		// 1. Fetch filtered entities: mentions > 0 OR pinned OR has aspects, LIMIT 500
 		const entityRows = db
@@ -1246,9 +1230,7 @@ export function getKnowledgeGraphForConstellation(
 			)
 			.all(agentId) as Array<Record<string, unknown>>;
 
-		const entityIds = entityRows
-			.map((r) => r.id as string)
-			.filter((id) => typeof id === "string");
+		const entityIds = entityRows.map((r) => r.id as string).filter((id) => typeof id === "string");
 
 		if (entityIds.length === 0) {
 			return { entities: [], dependencies: [] };
@@ -1265,11 +1247,14 @@ export function getKnowledgeGraphForConstellation(
 			)
 			.all(agentId) as Array<Record<string, unknown>>;
 
-		const aspectsByEntity = new Map<string, Array<{
-			id: string;
-			name: string;
-			weight: number;
-		}>>();
+		const aspectsByEntity = new Map<
+			string,
+			Array<{
+				id: string;
+				name: string;
+				weight: number;
+			}>
+		>();
 		const aspectIdSet = new Set<string>();
 
 		for (const row of aspectRows) {
@@ -1340,9 +1325,8 @@ export function getKnowledgeGraphForConstellation(
 			.all(agentId) as Array<Record<string, unknown>>;
 
 		const dependencies: ConstellationDependency[] = depRows
-			.filter((row) =>
-				entityIdSet.has(row.source_entity_id as string) &&
-				entityIdSet.has(row.target_entity_id as string),
+			.filter(
+				(row) => entityIdSet.has(row.source_entity_id as string) && entityIdSet.has(row.target_entity_id as string),
 			)
 			.map((row) => ({
 				sourceEntityId: row.source_entity_id as string,
@@ -1355,11 +1339,7 @@ export function getKnowledgeGraphForConstellation(
 	});
 }
 
-export function getStructuralDensity(
-	accessor: DbAccessor,
-	entityId: string,
-	agentId: string,
-): StructuralDensity {
+export function getStructuralDensity(accessor: DbAccessor, entityId: string, agentId: string): StructuralDensity {
 	return accessor.withReadDb((db) => {
 		const aspects = db
 			.prepare(

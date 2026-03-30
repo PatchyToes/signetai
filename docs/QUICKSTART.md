@@ -22,43 +22,49 @@ worked on yesterday. It doesn't know your preferences, your projects,
 or the decisions you've already made together. Every session is a
 first date.
 
-The industry's answer to this has been to give agents memory tools —
-"remember this," "recall that." That's not memory. That's a filing
+The industry's answer to this has often been to give agents memory tools
+— "remember this," "recall that." That's not memory. That's a filing
 cabinet the agent sometimes opens. It puts the LLM in charge of
-deciding what's important, when to store it, and when to retrieve it.
-You don't query a database to remember your coworker's name. It
-surfaces because it's relevant.
+micromanaging what to store and when to retrieve it.
 
-Signet takes a different approach. The agent is not in the loop.
+Signet takes a different approach. The goal is ambient context
+selection: turn interactions into durable memory substrate, then learn
+what should surface automatically when the next session begins.
 
 ### The distillation layer
 
 At the end of every conversation, Signet reviews the session and
 distills it. A local LLM breaks the conversation into atomic facts,
-checks them against what's already known, and decides: file as new,
-update something existing, replace something outdated, or skip
-entirely. Your agent won't store "prefers dark mode" fourteen times.
+checks them against what's already known, and decides whether to add new
+facts, skip duplicates, or record proposals for more complex changes.
+Your agent won't store "prefers dark mode" fourteen times.
 
 ### The knowledge graph
 
 Named entities — people, projects, tools, concepts — are extracted
 and linked. When you ask about a project, Signet traverses the graph:
 the project's architecture, the people involved, the tools it depends
-on, the constraints that apply. Context arrives structured, not as a
-pile of fragments.
+on, the constraints that apply. This structure improves the quality of
+candidate context instead of treating memory as a flat pile of fragments.
 
 ### The predictive scorer
 
-A neural network trained on your interaction patterns runs at inference
-time. It observes the conversation context and predicts which memories
-will be needed — before the agent asks, before a search is triggered.
-The scorer is unique to each user. Your weights never leave your machine.
+A predictive scorer can use that structured candidate pool to learn what
+context is actually useful in your sessions. The aim is not just storage
+or retrieval, but selecting the most helpful context automatically, with
+high precision. The scorer is unique to each user. Your weights never
+leave your machine.
+
+Crucially, the system should learn from regret, not just reuse. If
+injected context does not help, that should become negative evidence
+instead of being silently reinforced forever.
 
 ### Retrieval
 
 Retrieval blends graph traversal, keyword search, and semantic
-similarity into a single ranked result. The constellation view in the
-dashboard lets you see your agent's knowledge topology.
+similarity into a bounded candidate set, then reranks and filters it.
+The constellation view in the dashboard lets you inspect the agent's
+knowledge topology.
 
 ### Document ingest
 
@@ -74,6 +80,10 @@ agent's insights.
 - **Everything is recoverable**: deletions are soft, with a recovery
   window and full audit trail
 
+Automatic destructive memory mutations remain conservative and gated in
+the current implementation. Explicit user/operator repair flows are the
+reliable path today.
+
 The same agent follows you across Claude Code, OpenCode, and OpenClaw.
 Same personality, same knowledge, same secrets. Switch tools without
 starting over.
@@ -87,7 +97,10 @@ Prerequisites
 ---
 
 - Node.js 18+ (or Bun 1.0+)
-- One of: Ollama (for local embeddings) or an OpenAI API key
+- Embeddings (choose one):
+  - Built-in (recommended, no extra setup)
+  - Ollama (local)
+  - OpenAI API key
 - macOS or Linux (Windows support planned)
 
 ---
@@ -117,12 +130,30 @@ For agent-driven onboarding, use non-interactive mode:
 signet setup --non-interactive \
   --name "My Agent" \
   --harness claude-code \
-  --embedding-provider ollama \
-  --extraction-provider claude-code
+  --deployment-type vps \
+  --embedding-provider native
 ```
 
-In non-interactive mode, agents should ask the user to choose both
-providers first, then pass those choices explicitly.
+`--deployment-type` supports `local`, `vps`, or `server` and adjusts inferred
+defaults when provider flags are omitted. Explicit provider flags always
+override inferred defaults.
+
+If OpenClaw is configured to use the same workspace path, setup now enforces
+backup posture before finishing. In automation, either configure a git
+`origin` remote ahead of time, or pass `--create-local-backup` (or
+`--allow-unprotected-workspace` if you intentionally accept the risk).
+Snapshot-backed protection is considered fresh for 7 days; after that, run
+setup with `--create-local-backup` again or configure `origin`.
+
+Extraction safety note:
+
+- intended usage is Claude Code on Haiku, Codex CLI on GPT Mini with a
+  Pro/Max subscription, or local Ollama with at least `qwen3:4b`
+- with `--deployment-type vps`, setup prefers non-local extraction defaults
+  from selected harnesses when those tools are available locally, then other
+  detected tooling, and avoids defaulting to local Ollama extraction
+- on a VPS, set extraction to `none` if you do not want background LLM calls
+- remote API extraction can rack up extreme fees fast
 
 ---
 
@@ -146,7 +177,12 @@ for each:
 - OpenClaw — adapter-openclaw hooks
 - Codex — wrapper install + session hooks
 
-**3. Embedding provider**
+**3. Deployment context**
+
+Choose where Signet is running (`local`, `vps`, `server`). Setup uses
+this to show guidance before extraction provider selection.
+
+**4. Embedding provider**
 
 Embeddings power semantic (meaning-based) memory search. Choose:
 
@@ -157,7 +193,7 @@ Embeddings power semantic (meaning-based) memory search. Choose:
 - **OpenAI** — uses the OpenAI embeddings API. Requires `OPENAI_API_KEY`.
 - **Skip** — memory still works via keyword search, just no semantic search.
 
-**4. Embedding model**
+**5. Embedding model**
 
 For Ollama, `nomic-embed-text` is a good default. Setup can pull it for
 you (with confirmation), or you can do it manually:
@@ -166,12 +202,12 @@ you (with confirmation), or you can do it manually:
 ollama pull nomic-embed-text
 ```
 
-**5. Search balance**
+**6. Search balance**
 
 The `alpha` setting controls how much weight goes to semantic vs. keyword
 search. 0.7 (70% semantic, 30% keyword) works well for most people.
 
-**6. Git & auto-commit**
+**7. Git & auto-commit**
 
 The wizard can initialize a git repo in `$SIGNET_WORKSPACE/` so every change to
 your agent files is automatically versioned.
@@ -218,8 +254,11 @@ across all your AI tools. The core features:
 
 - **[[pipeline|Memory pipeline]]** — conversations are processed automatically by
   Pipeline V2, which extracts meaningful facts and decisions using a
-  local LLM (default: `qwen3:4b` via Ollama). Memories accumulate over
-  time and are recalled in future sessions.
+  configured extraction backend. The safe intended setups are Claude
+  Code on Haiku, Codex on GPT Mini, or local Ollama with at least
+  `qwen3:4b`. Set the extraction provider to `none` if you want Signet
+  without background extraction. Memories accumulate over time and are
+  recalled in future sessions.
 - **Hybrid search** — recall combines semantic and keyword search so
   you find relevant memories even when phrasing varies.
 - **Connectors** — platform adapters for Claude Code, OpenCode, and
@@ -234,8 +273,8 @@ across all your AI tools. The core features:
 - **Secrets** — API keys stored encrypted at rest, never exposed to agents
   directly.
 - **Skills** — installable instruction packages that extend agent behavior.
-- **Auth** — wallet-based identity (ERC-8128) for team deployments and
-  sync. See [Auth](./AUTH.md) for details.
+- **Auth** — token-based access control for local, team, and hybrid
+  deployments. See [Auth](./AUTH.md) for details.
 
 ---
 
@@ -383,28 +422,37 @@ systemctl --user start signet.service
 Editing Your Agent
 ---
 
-Your agent identity lives in two key files:
+Your agent identity lives in four self-managed files:
 
-**`$SIGNET_WORKSPACE/AGENTS.md`** — What the agent knows and how it should
-behave. This is the file that syncs to all your harnesses.
+**`$SIGNET_WORKSPACE/AGENTS.md`** — How the agent operates, including rules,
+workflow, and constraints. This is the main file that syncs to harnesses.
 
-**`$SIGNET_WORKSPACE/SOUL.md`** — Personality, voice, values. Mostly for your
-own reference or for harnesses that load it separately.
+**`$SIGNET_WORKSPACE/SOUL.md`** — Personality, voice, values, and temperament.
 
-Edit them directly in your editor or via the dashboard's config editor.
-Changes sync to harnesses automatically within 2 seconds.
+**`$SIGNET_WORKSPACE/IDENTITY.md`** — Who the agent is.
+
+**`$SIGNET_WORKSPACE/USER.md`** — Who you are to the agent, plus preferences
+and relationship context.
+
+These files are meant to be maintained over time as durable context.
+
+**`$SIGNET_WORKSPACE/MEMORY.md`** is different. It is auto-generated by
+Signet as episodic and operational memory. Do not edit it manually.
+
+Edit the four identity files directly in your editor or via the dashboard's
+config editor. Changes sync to harnesses automatically within 2 seconds.
 
 ---
 
 Auth and Team Deployments
 ---
 
-Signet uses ERC-8128 wallet-based signatures for identity verification.
-For personal use you don't need to think about this — it's handled
-automatically. For team deployments or self-hosted sync servers, auth
-modes let you scope memory access and control who can write to a shared
-agent. See [Auth](./AUTH.md) and [Self-Hosting](./SELF-HOSTING.md) for
-setup details.
+By default, Signet runs in local mode with no auth required on
+requests. In the default local setup, the daemon also binds to
+localhost only, which keeps that unauthenticated mode local by default.
+For team deployments or self-hosted remote access, Signet supports
+token-based auth with roles and scopes. See [Auth](./AUTH.md) and
+[Self-Hosting](./SELF-HOSTING.md) for setup details.
 
 ---
 
@@ -464,6 +512,6 @@ Next Steps
 - [Diagnostics](./DIAGNOSTICS.md) — health checks and pipeline status
 - [Documents](./DOCUMENTS.md) — ingest files and URLs into memory
 - [SDK](./SDK.md) — embed Signet in your own apps
-- [Auth](./AUTH.md) — wallet-based identity and team auth modes
+- [Auth](./AUTH.md) — token-based auth and team deployment modes
 - [Harnesses](./HARNESSES.md) — detailed integration docs
 - [API Reference](./API.md) — HTTP API for scripting and tooling

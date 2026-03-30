@@ -42,11 +42,11 @@ const KNOWN_MODELS: Record<string, ModelRegistryEntry[]> = {
 		{ id: "claude-3-5-haiku-20241022", provider: "anthropic", label: "Claude 3.5 Haiku", tier: "low", deprecated: false },
 	],
 	codex: [
+		{ id: "gpt-5-codex-mini", provider: "codex", label: "GPT Mini", tier: "low", deprecated: false },
 		{ id: "gpt-5.4", provider: "codex", label: "GPT 5.4", tier: "high", deprecated: false },
 		{ id: "gpt-5.3-codex", provider: "codex", label: "GPT 5.3 Codex", tier: "high", deprecated: false },
 		{ id: "gpt-5.3-codex-spark", provider: "codex", label: "GPT 5.3 Codex Spark", tier: "high", deprecated: false },
 		{ id: "gpt-5-codex", provider: "codex", label: "GPT 5 Codex", tier: "mid", deprecated: false },
-		{ id: "codex-mini-latest", provider: "codex", label: "Codex Mini", tier: "low", deprecated: false },
 	],
 	opencode: [
 		{ id: "anthropic/claude-opus-4-6", provider: "opencode", label: "Claude Opus 4.6", tier: "high", deprecated: false },
@@ -63,7 +63,8 @@ const KNOWN_MODELS: Record<string, ModelRegistryEntry[]> = {
 		{ id: "google/gemini-2.5-flash", provider: "openrouter", label: "Gemini 2.5 Flash", tier: "low", deprecated: false },
 	],
 	ollama: [
-		{ id: "qwen3:4b", provider: "ollama", label: "Qwen3 4B", tier: "low", deprecated: false },
+		{ id: "qwen3:4b", provider: "ollama", label: "Qwen3 4B", tier: "low", deprecated: true },
+		{ id: "nemotron-3-nano:4b", provider: "ollama", label: "Nemotron 3 Nano 4B", tier: "low", deprecated: false },
 		{ id: "glm-4.7-flash", provider: "ollama", label: "GLM 4.7 Flash", tier: "low", deprecated: false },
 		{ id: "llama3", provider: "ollama", label: "Llama 3", tier: "low", deprecated: false },
 	],

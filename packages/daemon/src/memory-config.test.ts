@@ -2,11 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	DEFAULT_PIPELINE_V2,
-	loadMemoryConfig,
-	loadPipelineConfig,
-} from "./memory-config";
+import { DEFAULT_PIPELINE_V2, loadMemoryConfig, loadPipelineConfig } from "./memory-config";
 
 const tmpDirs: string[] = [];
 
@@ -106,10 +102,7 @@ describe("loadMemoryConfig", () => {
 
 	it("defaults ollama base_url to localhost:11434 when not specified", () => {
 		const agentsDir = makeTempAgentsDir();
-		writeFileSync(
-			join(agentsDir, "agent.yaml"),
-			"embedding:\n  provider: ollama\n  model: nomic-embed-text\n",
-		);
+		writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  provider: ollama\n  model: nomic-embed-text\n");
 		const cfg = loadMemoryConfig(agentsDir);
 		expect(cfg.embedding.provider).toBe("ollama");
 		expect(cfg.embedding.base_url).toBe("http://localhost:11434");
@@ -141,7 +134,7 @@ describe("loadMemoryConfig", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(
 			join(agentsDir, "agent.yaml"),
-			"embedding:\n  provider: ollama\n  model: nomic-embed-text\n  base_url: \"\"\n",
+			'embedding:\n  provider: ollama\n  model: nomic-embed-text\n  base_url: ""\n',
 		);
 		const cfg = loadMemoryConfig(agentsDir);
 		expect(cfg.embedding.provider).toBe("ollama");
@@ -150,10 +143,7 @@ describe("loadMemoryConfig", () => {
 
 	it("defaults openai base_url to the official API endpoint when not specified", () => {
 		const agentsDir = makeTempAgentsDir();
-		writeFileSync(
-			join(agentsDir, "agent.yaml"),
-			"embedding:\n  provider: openai\n  model: text-embedding-3-small\n",
-		);
+		writeFileSync(join(agentsDir, "agent.yaml"), "embedding:\n  provider: openai\n  model: text-embedding-3-small\n");
 		const cfg = loadMemoryConfig(agentsDir);
 		expect(cfg.embedding.provider).toBe("openai");
 		expect(cfg.embedding.base_url).toBe("https://api.openai.com/v1");
@@ -248,6 +238,66 @@ describe("loadMemoryConfig", () => {
 		expect(cfg.pipelineV2.extraction.model).toBe("gpt-5.3-codex");
 	});
 
+	it("loads extraction fallbackProvider from nested config", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+      fallbackProvider: none
+`,
+		);
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.pipelineV2.extraction.provider).toBe("claude-code");
+		expect(cfg.pipelineV2.extraction.fallbackProvider).toBe("none");
+	});
+
+	it("loads extractionFallbackProvider from flat config", () => {
+		const cfg = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "claude-code",
+					extractionFallbackProvider: "none",
+				},
+			},
+		});
+
+		expect(cfg.extraction.provider).toBe("claude-code");
+		expect(cfg.extraction.fallbackProvider).toBe("none");
+	});
+
+	it("rejects invalid extraction fallbackProvider values", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: {
+					pipelineV2: {
+						extraction: {
+							fallbackProvider: "codex",
+						},
+					},
+				},
+			}),
+		).toThrow('Invalid extraction fallbackProvider "codex"');
+	});
+
+	it("propagates invalid extraction fallbackProvider from agent config files", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    extraction:
+      provider: claude-code
+      fallbackProvider: codex
+`,
+		);
+
+		expect(() => loadMemoryConfig(agentsDir)).toThrow('Invalid extraction fallbackProvider "codex"');
+	});
+
 	it("loads openrouter extraction settings from agent.yaml", () => {
 		const agentsDir = makeTempAgentsDir();
 		writeFileSync(
@@ -262,6 +312,24 @@ describe("loadMemoryConfig", () => {
 		const cfg = loadMemoryConfig(agentsDir);
 		expect(cfg.pipelineV2.extraction.provider).toBe("openrouter");
 		expect(cfg.pipelineV2.extraction.model).toBe("openai/gpt-4o-mini");
+	});
+
+	it("loads disabled extraction settings from agent.yaml", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    enabled: false
+    extractionProvider: none
+    extractionModel: ""
+`,
+		);
+
+		const cfg = loadMemoryConfig(agentsDir);
+		expect(cfg.pipelineV2.enabled).toBe(false);
+		expect(cfg.pipelineV2.extraction.provider).toBe("none");
+		expect(cfg.pipelineV2.extraction.model).toBe("");
 	});
 });
 
@@ -340,22 +408,146 @@ describe("loadPipelineConfig", () => {
 		expect(result.synthesis.model).toBe("openai/gpt-4o-mini");
 	});
 
+	it("accepts codex synthesis provider", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					synthesis: {
+						provider: "codex",
+						model: "gpt-5-codex-mini",
+					},
+				},
+			},
+		});
+		expect(result.synthesis.provider).toBe("codex");
+		expect(result.synthesis.model).toBe("gpt-5-codex-mini");
+	});
+
 	it("flat provider without flat model uses provider default", () => {
 		const result = loadPipelineConfig({
 			memory: {
 				pipelineV2: {
-					extractionProvider: "ollama",
+					extractionProvider: "codex",
 					extraction: {
-						provider: "codex",
-						model: "gpt-5.3-codex",
+						provider: "ollama",
+						model: "qwen3:8b",
 					},
 				},
 			},
 		});
 
 		// Flat provider wins — model must NOT bleed from nested config
+		expect(result.extraction.provider).toBe("codex");
+		expect(result.extraction.model).toBe("gpt-5-codex-mini");
+	});
+
+	it("defaults missing synthesis to the resolved extraction provider and model", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "ollama",
+					extractionModel: "qwen3.5:4b",
+					extractionEndpoint: "http://127.0.0.1:11434",
+				},
+			},
+		});
+
+		expect(result.synthesis.provider).toBe("ollama");
+		expect(result.synthesis.model).toBe("qwen3.5:4b");
+		expect(result.synthesis.endpoint).toBe("http://127.0.0.1:11434");
+		expect(result.synthesis.timeout).toBe(result.extraction.timeout);
+	});
+
+	it("disables inherited synthesis when extraction resolves to none", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "none",
+				},
+			},
+		});
+
+		expect(result.synthesis.provider).toBe("none");
+		expect(result.synthesis.enabled).toBe(false);
+	});
+
+	it("disables explicit synthesis when provider is none", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					synthesis: {
+						enabled: true,
+						provider: "none",
+					},
+				},
+			},
+		});
+
+		expect(result.synthesis.provider).toBe("none");
+		expect(result.synthesis.enabled).toBe(false);
+	});
+
+	it("keeps inheriting extraction values when synthesis only sets enabled", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "ollama",
+					extractionModel: "qwen3.5:4b",
+					extractionEndpoint: "http://127.0.0.1:11434",
+					extractionTimeout: 75000,
+					synthesis: {
+						enabled: true,
+					},
+				},
+			},
+		});
+
+		expect(result.synthesis.provider).toBe("ollama");
+		expect(result.synthesis.model).toBe("qwen3.5:4b");
+		expect(result.synthesis.endpoint).toBe("http://127.0.0.1:11434");
+		expect(result.synthesis.timeout).toBe(75000);
+	});
+
+	it("keeps inherited synthesis provider overrides field-specific", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "ollama",
+					extractionModel: "qwen3.5:4b",
+					extractionEndpoint: "http://127.0.0.1:11434",
+					synthesis: {
+						model: "qwen3:8b",
+					},
+				},
+			},
+		});
+
+		expect(result.synthesis.provider).toBe("ollama");
+		expect(result.synthesis.model).toBe("qwen3:8b");
+		expect(result.synthesis.endpoint).toBe("http://127.0.0.1:11434");
+		expect(result.synthesis.timeout).toBe(result.extraction.timeout);
+	});
+
+	it("keeps explicit synthesis separate from extraction", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "ollama",
+					extractionModel: "qwen3.5:4b",
+					synthesis: {
+						provider: "claude-code",
+						model: "haiku",
+						timeout: 180000,
+					},
+				},
+			},
+		});
+
 		expect(result.extraction.provider).toBe("ollama");
-		expect(result.extraction.model).not.toBe("gpt-5.3-codex");
+		expect(result.extraction.model).toBe("qwen3.5:4b");
+		expect(result.synthesis.provider).toBe("claude-code");
+		expect(result.synthesis.model).toBe("haiku");
+		expect(result.synthesis.timeout).toBe(180000);
 	});
 
 	it("flat model without flat provider is honoured (not silently discarded)", () => {
@@ -386,6 +578,160 @@ describe("loadPipelineConfig", () => {
 
 		expect(result.extraction.provider).toBe("codex");
 		expect(result.extraction.model).toBe("gpt-5.3-codex");
+	});
+
+	it("accepts command extraction provider with argv-safe command config", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extraction: {
+						provider: "command",
+						command: {
+							bin: "node",
+							args: ["script.mjs", "--transcript", "$TRANSCRIPT"],
+							cwd: "/tmp/signet",
+							env: {
+								SIGNET_MODE: "pipeline",
+								"NOT VALID": "skip-me",
+							},
+						},
+					},
+				},
+			},
+		});
+
+		expect(result.extraction.provider).toBe("command");
+		expect(result.extraction.command).toEqual({
+			bin: "node",
+			args: ["script.mjs", "--transcript", "$TRANSCRIPT"],
+			cwd: "/tmp/signet",
+			env: {
+				SIGNET_MODE: "pipeline",
+			},
+		});
+		// synthesis never accepts command provider; extraction command falls back to synthesis defaults
+		expect(result.synthesis.provider).toBe("ollama");
+		expect(result.synthesis.model).toBe("qwen3:4b");
+	});
+
+	it("parses legacy extraction.command string into argv", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					extractionProvider: "command",
+					extractionCommand: 'node ./extract.mjs --transcript "$TRANSCRIPT" --session "$SESSION_KEY"',
+				},
+			},
+		});
+
+		expect(result.extraction.provider).toBe("command");
+		expect(result.extraction.command).toEqual({
+			bin: "node",
+			args: ["./extract.mjs", "--transcript", "$TRANSCRIPT", "--session", "$SESSION_KEY"],
+		});
+	});
+
+	it("rejects synthesis.provider=command with a clear validation error", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: {
+					pipelineV2: {
+						extraction: {
+							provider: "ollama",
+							model: "qwen3:4b",
+						},
+						synthesis: {
+							provider: "command",
+						},
+					},
+				},
+			}),
+		).toThrow("synthesis.provider='command' is not supported");
+	});
+
+	it("loadMemoryConfig fails fast when synthesis.provider=command is configured", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    extraction:
+      provider: ollama
+      model: qwen3:4b
+    synthesis:
+      provider: command
+`,
+			"utf8",
+		);
+
+		expect(() => loadMemoryConfig(agentsDir)).toThrow("synthesis.provider='command' is not supported");
+	});
+
+	it("rejects extraction.provider=command when extraction.command is missing", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: {
+					pipelineV2: {
+						extraction: {
+							provider: "command",
+						},
+					},
+				},
+			}),
+		).toThrow("extraction.command is required when extraction.provider='command'");
+	});
+
+	it("rejects extraction.command object that omits bin", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: {
+					pipelineV2: {
+						extraction: {
+							provider: "command",
+							command: {
+								command: "node",
+								args: ["script.mjs"],
+							},
+						},
+					},
+				},
+			}),
+		).toThrow("extraction.command is required when extraction.provider='command'");
+	});
+
+	it("rejects extraction.command args that contain non-strings", () => {
+		expect(() =>
+			loadPipelineConfig({
+				memory: {
+					pipelineV2: {
+						extraction: {
+							provider: "command",
+							command: {
+								bin: "node",
+								args: ["script.mjs", 123],
+							},
+						},
+					},
+				},
+			}),
+		).toThrow("extraction.command is required when extraction.provider='command'");
+	});
+
+	it("loadMemoryConfig fails fast when extraction.provider=command is missing command config", () => {
+		const agentsDir = makeTempAgentsDir();
+		writeFileSync(
+			join(agentsDir, "agent.yaml"),
+			`memory:
+  pipelineV2:
+    extraction:
+      provider: command
+`,
+			"utf8",
+		);
+
+		expect(() => loadMemoryConfig(agentsDir)).toThrow(
+			"extraction.command is required when extraction.provider='command'",
+		);
 	});
 
 	it("loads all flags correctly when all set to true (flat keys)", () => {
@@ -517,13 +863,9 @@ describe("loadPipelineConfig", () => {
 
 		expect(result.worker.pollMs).toBe(DEFAULT_PIPELINE_V2.worker.pollMs);
 		expect(result.worker.maxRetries).toBe(DEFAULT_PIPELINE_V2.worker.maxRetries);
-		expect(result.extraction.timeout).toBe(
-			DEFAULT_PIPELINE_V2.extraction.timeout,
-		);
+		expect(result.extraction.timeout).toBe(DEFAULT_PIPELINE_V2.extraction.timeout);
 		expect(result.worker.leaseTimeoutMs).toBe(DEFAULT_PIPELINE_V2.worker.leaseTimeoutMs);
-		expect(result.extraction.minConfidence).toBe(
-			DEFAULT_PIPELINE_V2.extraction.minConfidence,
-		);
+		expect(result.extraction.minConfidence).toBe(DEFAULT_PIPELINE_V2.extraction.minConfidence);
 	});
 
 	it("accepts valid numeric values within range (flat keys)", () => {
@@ -546,6 +888,38 @@ describe("loadPipelineConfig", () => {
 		expect(result.extraction.minConfidence).toBe(0.55);
 	});
 
+	it("loads adaptive write-gate config from flat keys", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					writeGateEnabled: true,
+					writeGateThreshold: 0.45,
+					writeGateContinuityDiscount: 0.2,
+				},
+			},
+		});
+
+		expect(result.writeGate?.enabled).toBe(true);
+		expect(result.writeGate?.threshold).toBe(0.45);
+		expect(result.writeGate?.continuityDiscount).toBe(0.2);
+	});
+
+	it("clamps adaptive write-gate numeric values", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					writeGate: {
+						threshold: 3,
+						continuityDiscount: -1,
+					},
+				},
+			},
+		});
+
+		expect(result.writeGate?.threshold).toBe(1);
+		expect(result.writeGate?.continuityDiscount).toBe(0);
+	});
+
 	it("loads graph boost and reranker fields (flat keys)", () => {
 		const result = loadPipelineConfig({
 			memory: {
@@ -564,6 +938,7 @@ describe("loadPipelineConfig", () => {
 		expect(result.graph.boostTimeoutMs).toBe(300);
 		expect(result.reranker.enabled).toBe(true);
 		expect(result.reranker.model).toBe("cross-encoder/ms-marco");
+		expect(result.reranker.useExtractionModel).toBe(false);
 		expect(result.reranker.topN).toBe(15);
 		expect(result.reranker.timeoutMs).toBe(1500);
 	});
@@ -577,6 +952,7 @@ describe("loadPipelineConfig", () => {
 		expect(result.graph.boostTimeoutMs).toBe(DEFAULT_PIPELINE_V2.graph.boostTimeoutMs);
 		expect(result.reranker.enabled).toBe(DEFAULT_PIPELINE_V2.reranker.enabled);
 		expect(result.reranker.model).toBe(DEFAULT_PIPELINE_V2.reranker.model);
+		expect(result.reranker.useExtractionModel).toBe(DEFAULT_PIPELINE_V2.reranker.useExtractionModel);
 		expect(result.reranker.topN).toBe(DEFAULT_PIPELINE_V2.reranker.topN);
 		expect(result.reranker.timeoutMs).toBe(DEFAULT_PIPELINE_V2.reranker.timeoutMs);
 	});
@@ -603,6 +979,63 @@ describe("loadPipelineConfig", () => {
 		expect(result.repair.requeueHourlyBudget).toBe(100);
 	});
 
+	it("loads worker load-shedding config fields", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					worker: {
+						maxLoadPerCpu: 0.6,
+						overloadBackoffMs: 45000,
+					},
+				},
+			},
+		});
+
+		expect(result.worker.maxLoadPerCpu).toBe(0.6);
+		expect(result.worker.overloadBackoffMs).toBe(45000);
+	});
+
+	it("loads worker load-shedding config fields from flat keys", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					workerMaxLoadPerCpu: 0.55,
+					workerOverloadBackoffMs: 42000,
+				},
+			},
+		});
+
+		expect(result.worker.maxLoadPerCpu).toBe(0.55);
+		expect(result.worker.overloadBackoffMs).toBe(42000);
+	});
+
+	it("prefers nested worker load-shedding config over flat keys", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					worker: {
+						maxLoadPerCpu: 0.7,
+						overloadBackoffMs: 38000,
+					},
+					workerMaxLoadPerCpu: 0.5,
+					workerOverloadBackoffMs: 60000,
+				},
+			},
+		});
+
+		expect(result.worker.maxLoadPerCpu).toBe(0.7);
+		expect(result.worker.overloadBackoffMs).toBe(38000);
+	});
+
+	it("uses worker load-shedding defaults when absent", () => {
+		const result = loadPipelineConfig({
+			memory: { pipelineV2: { enabled: true } },
+		});
+
+		expect(result.worker.maxLoadPerCpu).toBe(DEFAULT_PIPELINE_V2.worker.maxLoadPerCpu);
+		expect(result.worker.overloadBackoffMs).toBe(DEFAULT_PIPELINE_V2.worker.overloadBackoffMs);
+	});
+
 	it("uses defaults for maintenance config when absent", () => {
 		const result = loadPipelineConfig({
 			memory: { pipelineV2: { enabled: true } },
@@ -626,6 +1059,28 @@ describe("loadPipelineConfig", () => {
 		});
 
 		expect(result.autonomous.maintenanceMode).toBe(DEFAULT_PIPELINE_V2.autonomous.maintenanceMode);
+	});
+
+	it("defaults paused to false when absent", () => {
+		const result = loadPipelineConfig({
+			memory: { pipelineV2: { enabled: true } },
+		});
+
+		expect(result.paused).toBe(false);
+	});
+
+	it("loads explicit paused state", () => {
+		const result = loadPipelineConfig({
+			memory: {
+				pipelineV2: {
+					enabled: true,
+					paused: true,
+				},
+			},
+		});
+
+		expect(result.enabled).toBe(true);
+		expect(result.paused).toBe(true);
 	});
 
 	it("preserves explicit false values over defaults", () => {
@@ -664,7 +1119,7 @@ describe("loadPipelineConfig", () => {
 						minConfidence: 0.8,
 					},
 					graph: { enabled: true, boostWeight: 0.3 },
-					reranker: { enabled: true, model: "my-reranker", topN: 10 },
+					reranker: { enabled: true, model: "my-reranker", useExtractionModel: true, topN: 10 },
 					autonomous: {
 						enabled: true,
 						frozen: false,
@@ -685,6 +1140,7 @@ describe("loadPipelineConfig", () => {
 		expect(result.graph.boostWeight).toBe(0.3);
 		expect(result.reranker.enabled).toBe(true);
 		expect(result.reranker.model).toBe("my-reranker");
+		expect(result.reranker.useExtractionModel).toBe(true);
 		expect(result.reranker.topN).toBe(10);
 		expect(result.autonomous.enabled).toBe(true);
 		expect(result.autonomous.allowUpdateDelete).toBe(true);
@@ -699,10 +1155,12 @@ describe("loadPipelineConfig", () => {
 					// Flat key
 					rerankerEnabled: false,
 					rerankerModel: "flat-model",
+					rerankerUseExtractionModel: false,
 					// Nested key (wins)
 					reranker: {
 						enabled: true,
 						model: "nested-model",
+						useExtractionModel: true,
 					},
 				},
 			},
@@ -710,5 +1168,6 @@ describe("loadPipelineConfig", () => {
 
 		expect(result.reranker.enabled).toBe(true);
 		expect(result.reranker.model).toBe("nested-model");
+		expect(result.reranker.useExtractionModel).toBe(true);
 	});
 });

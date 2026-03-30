@@ -14,14 +14,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-import { readStaticIdentity } from "@signet/core";
+import {
+	readStaticIdentity,
+	resolveSessionStartTimeoutMs,
+	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
+} from "@signet/core";
 import { createDaemonClient } from "./daemon-client.js";
 import { createTools } from "./tools.js";
 import {
 	DAEMON_URL_DEFAULT,
+	FETCH_TIMEOUT_ENV,
 	HARNESS,
 	READ_TIMEOUT,
 	RUNTIME_PATH,
+	SESSION_START_TIMEOUT_ENV,
 	WRITE_TIMEOUT,
 } from "./types.js";
 
@@ -88,6 +94,20 @@ function staticFallback(): string {
 	return readStaticIdentity(dir) ?? "";
 }
 
+function sessionStartFallback(reason: "offline" | "timeout"): string {
+	const dir = readRuntimeEnv("SIGNET_PATH") ?? join(homedir(), ".agents");
+	if (reason === "timeout") {
+		return readStaticIdentity(dir, STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS) ?? "";
+	}
+	return readStaticIdentity(dir) ?? "";
+}
+
+function sessionStartTimeout(): number {
+	return resolveSessionStartTimeoutMs(
+		readRuntimeEnv(SESSION_START_TIMEOUT_ENV) ?? readRuntimeEnv(FETCH_TIMEOUT_ENV),
+	);
+}
+
 // ============================================================================
 // Event helpers
 // ============================================================================
@@ -109,10 +129,7 @@ function extractSessionId(props: Record<string, unknown> | undefined): string | 
 // a plain-text transcript for the daemon summary worker.
 // ============================================================================
 
-async function buildTranscript(
-	oc: PluginInput["client"],
-	sid: string,
-): Promise<string> {
+async function buildTranscript(oc: PluginInput["client"], sid: string): Promise<string> {
 	const res = await oc.session.messages({
 		path: { id: sid },
 		throwOnError: false,
@@ -131,6 +148,14 @@ async function buildTranscript(
 	return lines.join("\n");
 }
 
+function readPartText(part: unknown): string | null {
+	if (typeof part !== "object" || part === null) return null;
+	const type = Reflect.get(part, "type");
+	if (type !== "text") return null;
+	const text = Reflect.get(part, "text");
+	return typeof text === "string" ? text : null;
+}
+
 // ============================================================================
 // Plugin
 // ============================================================================
@@ -144,22 +169,23 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 
 	const client = createDaemonClient(daemonUrl);
 
-	// Fire session-start — errors are swallowed so we never block the user.
 	let sessionContext = "";
-	try {
-		const result = await client.post<SessionStartResult>(
-			"/api/hooks/session-start",
-			{
-				harness: HARNESS,
-				project: directory,
-				agentId,
-				runtimePath: RUNTIME_PATH,
-			},
-			READ_TIMEOUT,
-		);
-		sessionContext = result?.inject ?? result?.recentContext ?? "";
-	} catch {
-		// daemon not running — fall back to static identity files
+	const start = await client.postResult<SessionStartResult>(
+		"/api/hooks/session-start",
+		{
+			harness: HARNESS,
+			project: directory,
+			agentId,
+			runtimePath: RUNTIME_PATH,
+		},
+		sessionStartTimeout(),
+	);
+	if (start.ok) {
+		sessionContext = start.data.inject ?? start.data.recentContext ?? "";
+	} else if (start.reason === "timeout") {
+		sessionContext = sessionStartFallback("timeout");
+	} else {
+		// offline, http error, invalid-json — all fall back to static identity
 		sessionContext = staticFallback();
 	}
 
@@ -167,16 +193,10 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 		// ------------------------------------------------------------------
 		// Per-prompt memory recall — extract user text and call daemon
 		// ------------------------------------------------------------------
-		"chat.message": async (
-			input: { sessionID: string },
-			output: { parts: ReadonlyArray<{ type: string; text?: string }> },
-		): Promise<void> => {
+		"chat.message": async (input, output): Promise<void> => {
 			const userText = output.parts
-				.filter(
-					(p): p is { type: "text"; text: string } =>
-						p.type === "text" && typeof p.text === "string",
-				)
-				.map((p) => p.text)
+				.map((part) => readPartText(part))
+				.filter((text): text is string => text !== null)
 				.join("\n")
 				.trim();
 			if (!userText) return;
@@ -208,10 +228,8 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 		// ------------------------------------------------------------------
 		// Inject per-prompt context into the system prompt
 		// ------------------------------------------------------------------
-		"experimental.chat.system.transform": async (
-			input: { sessionID: string },
-			output: { system: string[] },
-		): Promise<void> => {
+		"experimental.chat.system.transform": async (input, output): Promise<void> => {
+			if (!input.sessionID) return;
 			const inject = pendingInject.get(input.sessionID);
 			if (inject) {
 				pendingInject.delete(input.sessionID);
@@ -222,10 +240,7 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 		// ------------------------------------------------------------------
 		// Inject memory context before context compaction
 		// ------------------------------------------------------------------
-		"experimental.session.compacting": async (
-			_input: unknown,
-			output: { context: string[] },
-		): Promise<void> => {
+		"experimental.session.compacting": async (_input, output): Promise<void> => {
 			try {
 				const result = await client.post<PreCompactionResult>(
 					"/api/hooks/pre-compaction",
@@ -285,11 +300,14 @@ export const SignetPlugin: Plugin = async ({ directory, client: oc }) => {
 				}
 
 				if (event.type === "session.compacted" && event.summary) {
+					const sid = extractSessionId(event.properties);
 					await client.post(
 						"/api/hooks/compaction-complete",
 						{
 							harness: HARNESS,
 							summary: event.summary,
+							project: directory,
+							sessionKey: sid || undefined,
 							runtimePath: RUNTIME_PATH,
 						},
 						WRITE_TIMEOUT,

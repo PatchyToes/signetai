@@ -11,34 +11,35 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseSimpleYaml } from "@signet/core";
-import { logger } from "./logger";
-import { getDbAccessor } from "./db-accessor";
-import { listAgentPresence } from "./cross-agent";
-import { fetchEmbedding } from "./embedding-fetch";
-import { hybridRecall } from "./memory-search";
-import { enqueueSummaryJob } from "./pipeline/summary-worker";
-import { getUpdateSummary } from "./update-system";
-import { loadMemoryConfig } from "./memory-config";
-import { recordSessionCandidates, trackFtsHits, parseFeedback, recordAgentFeedback } from "./session-memories";
-import { listSecrets } from "./secrets";
-import { buildCandidateFeatures, getStructuralFeatures } from "./structural-features";
-import { getPredictorClient, recordPredictorLatency } from "./daemon";
-import { getPredictorState, updatePredictorState } from "./predictor-state";
+import { getAgentScope, resolveAgentId } from "./agent-id";
+import { extractAnchorTerms } from "./anchor-terms";
 import {
-	type CandidateInput,
-	type CandidateSource,
-	type RankedCandidate,
-	buildPredictorStatusLine,
-	evaluateColdStartExit,
-	maybeExplore,
-	runPredictorScoring,
-} from "./predictor-scoring";
+	clearContinuity,
+	consumeState,
+	initContinuity,
+	recordPrompt,
+	recordRemember,
+	setStructuralSnapshot,
+	shouldCheckpoint,
+} from "./continuity-state";
+import { listAgentPresence } from "./cross-agent";
+import { getPredictorClient, recordPredictorLatency } from "./daemon";
+import { getDbAccessor } from "./db-accessor";
+import { fetchEmbedding } from "./embedding-fetch";
 import { propagateMemoryStatus } from "./knowledge-graph";
-import { invalidateTraversalCache, resolveFocalEntities, setTraversalStatus, traverseKnowledgeGraph } from "./pipeline/graph-traversal";
+import { logger } from "./logger";
+import { loadMemoryConfig } from "./memory-config";
+import { writeMemoryHead } from "./memory-head";
+import {
+	appendSynthesisIndexBlock as appendRenderedIndexBlock,
+	renderMemoryProjection,
+	writeTranscriptArtifact,
+} from "./memory-lineage";
+import { buildAgentScopeClause, hybridRecall } from "./memory-search";
 import {
 	applyFtsOverlapFeedback,
 	decayAspectWeights,
@@ -47,25 +48,42 @@ import {
 	shouldRunSessionDecay,
 } from "./pipeline/aspect-feedback";
 import {
-	initContinuity,
-	recordPrompt,
-	recordRemember,
-	shouldCheckpoint,
-	consumeState,
-	clearContinuity,
-	setStructuralSnapshot,
-} from "./continuity-state";
+	type TraversalPath,
+	invalidateTraversalCache,
+	resolveFocalEntities,
+	setTraversalStatus,
+	traverseKnowledgeGraph,
+} from "./pipeline/graph-traversal";
+import { enqueueSummaryJob } from "./pipeline/summary-worker";
 import {
-	getLatestCheckpoint,
-	getLatestCheckpointBySession,
-	formatRecoveryDigest,
+	type CandidateInput,
+	type CandidateSource,
+	type RankedCandidate,
+	type ScoringResult,
+	buildPredictorStatusLine,
+	evaluateColdStartExit,
+	maybeExplore,
+	runPredictorScoring,
+} from "./predictor-scoring";
+import { getPredictorState, updatePredictorState } from "./predictor-state";
+import { listSecrets } from "./secrets";
+import {
+	flushPendingCheckpoints,
 	formatPeriodicDigest,
 	formatPreCompactionDigest,
+	formatRecoveryDigest,
 	formatSessionEndDigest,
-	writeCheckpoint,
+	getLatestCheckpoint,
+	getLatestCheckpointBySession,
 	queueCheckpointWrite,
-	flushPendingCheckpoints,
+	writeCheckpoint,
 } from "./session-checkpoints";
+import { parseFeedback, recordAgentFeedback, recordSessionCandidates, trackFtsHits } from "./session-memories";
+import { getExpiryWarning } from "./session-tracker";
+import { getSessionTranscriptContent, searchTranscriptFallback, upsertSessionTranscript } from "./session-transcripts";
+import { type StructuralFeatures, buildCandidateFeatures, getStructuralFeatures } from "./structural-features";
+import { searchTemporalFallback } from "./temporal-fallback";
+import { getUpdateSummary } from "./update-system";
 
 const AGENTS_DIR = process.env.SIGNET_PATH || join(homedir(), ".agents");
 const MEMORY_DB = join(AGENTS_DIR, "memory", "memories.db");
@@ -86,6 +104,14 @@ export function resetPromptDedup(sessionKey: string): void {
 	promptDedupRecent.delete(sessionKey);
 }
 
+function loadDbAccessor() {
+	try {
+		return getDbAccessor();
+	} catch {
+		return null;
+	}
+}
+
 function formatMemoryDate(isoDate: string): string {
 	const d = new Date(isoDate);
 	return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
@@ -104,6 +130,11 @@ function formatLastSeenShort(isoDate: string): string {
 	return `${days}d ago`;
 }
 
+function formatTranscriptSessionLabel(sessionKey: string): string {
+	if (sessionKey.length <= 18) return sessionKey;
+	return `${sessionKey.slice(0, 8)}…${sessionKey.slice(-6)}`;
+}
+
 function harnessSupportsNamedCrossAgentTools(harness: string): boolean {
 	return harness.trim().toLowerCase() === "codex";
 }
@@ -114,6 +145,18 @@ function sanitizePeerPromptField(value: string | undefined): string {
 		.replace(/[\r\n`*#[\]<>]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function toUnique(values: ReadonlyArray<string>): string[] {
+	return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+}
+
+function serializeTraversalPath(path: TraversalPath): string {
+	return JSON.stringify({
+		entity_ids: toUnique(path.entityIds),
+		aspect_ids: toUnique(path.aspectIds),
+		dependency_ids: toUnique(path.dependencyIds),
+	});
 }
 
 // ============================================================================
@@ -130,10 +173,20 @@ export interface HooksConfig {
 		query?: string;
 		maxInjectChars?: number;
 	};
+	userPromptSubmit?: {
+		/** Set to false to disable per-prompt memory injection entirely. Default: true. */
+		enabled?: boolean;
+		recallLimit?: number;
+		maxInjectChars?: number;
+		/** Minimum top recall score required before injecting memories. */
+		minScore?: number;
+	};
 	preCompaction?: {
 		summaryGuidelines?: string;
 		includeRecentMemories?: boolean;
 		memoryLimit?: number;
+		/** Cap the generated summary at this many characters. */
+		maxSummaryChars?: number;
 	};
 }
 
@@ -145,8 +198,9 @@ export interface SynthesisResponse {
 	harness: string;
 	model: string;
 	prompt: string;
-	/** Number of session summary files included in the prompt. */
+	/** Number of source items included in the prompt. */
 	fileCount: number;
+	indexBlock?: string;
 }
 
 export interface SessionStartRequest {
@@ -172,6 +226,7 @@ export interface SessionStartResponse {
 	}>;
 	recentContext?: string;
 	inject: string;
+	warnings?: string[];
 }
 
 export interface PreCompactionRequest {
@@ -197,6 +252,8 @@ export interface UserPromptSubmitRequest {
 	userPrompt?: string;
 	lastAssistantMessage?: string;
 	sessionKey?: string;
+	transcriptPath?: string;
+	transcript?: string;
 	runtimePath?: "plugin" | "legacy";
 	memory_feedback?: unknown;
 }
@@ -206,6 +263,7 @@ export interface UserPromptSubmitResponse {
 	memoryCount: number;
 	queryTerms?: string;
 	engine?: string;
+	warnings?: string[];
 }
 
 export interface SessionEndRequest {
@@ -214,6 +272,7 @@ export interface SessionEndRequest {
 	transcript?: string;
 	sessionId?: string;
 	sessionKey?: string;
+	agentId?: string;
 	cwd?: string;
 	reason?: string;
 	runtimePath?: "plugin" | "legacy";
@@ -223,6 +282,22 @@ export interface SessionEndResponse {
 	memoriesSaved: number;
 	queued?: boolean;
 	jobId?: string;
+}
+
+export interface CheckpointExtractRequest {
+	harness: string;
+	sessionKey: string;
+	agentId?: string;
+	project?: string;
+	transcript?: string;
+	transcriptPath?: string;
+	runtimePath?: "plugin" | "legacy";
+}
+
+export interface CheckpointExtractResponse {
+	queued?: boolean;
+	jobId?: string;
+	skipped?: boolean;
 }
 
 export interface RememberRequest {
@@ -296,6 +371,61 @@ export function effectiveScore(importance: number, createdAt: string, pinned: bo
 	if (pinned) return 1.0;
 	const ageDays = (Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24);
 	return importance * 0.95 ** ageDays;
+}
+
+export function appendSynthesisIndexBlock(content: string, indexBlock: string): string {
+	return appendRenderedIndexBlock(content, indexBlock);
+}
+
+function buildTranscriptFallbackResponse(
+	metadataHeader: string,
+	queryTerms: string,
+	charBudget: number,
+	hits: ReadonlyArray<{
+		readonly sessionKey: string;
+		readonly updatedAt: string;
+		readonly excerpt: string;
+	}>,
+	warnings?: string[],
+): UserPromptSubmitResponse {
+	const rows = hits.map((hit) => ({
+		content: `- ${hit.excerpt} (${formatMemoryDate(hit.updatedAt)}, session ${formatTranscriptSessionLabel(hit.sessionKey)})`,
+	}));
+	const lines = selectWithBudget(rows, charBudget).map((row) => row.content);
+	const inject = `${metadataHeader}\n[signet:recall | query="${queryTerms}" | results=${lines.length} | engine=transcript-fallback]\n${lines.join("\n")}`;
+	return {
+		inject,
+		memoryCount: lines.length,
+		queryTerms,
+		engine: "transcript-fallback",
+		warnings,
+	};
+}
+
+function buildTemporalFallbackResponse(
+	metadataHeader: string,
+	queryTerms: string,
+	charBudget: number,
+	hits: ReadonlyArray<{
+		readonly id: string;
+		readonly latestAt: string;
+		readonly threadLabel: string;
+		readonly excerpt: string;
+	}>,
+	warnings?: string[],
+): UserPromptSubmitResponse {
+	const rows = hits.map((hit) => ({
+		content: `- [node ${hit.id}] ${hit.excerpt} (${formatMemoryDate(hit.latestAt)}, ${hit.threadLabel})`,
+	}));
+	const lines = selectWithBudget(rows, charBudget).map((row) => row.content);
+	const inject = `${metadataHeader}\n[signet:recall | query="${queryTerms}" | results=${lines.length} | engine=temporal-fallback]\n${lines.join("\n")}`;
+	return {
+		inject,
+		memoryCount: lines.length,
+		queryTerms,
+		engine: "temporal-fallback",
+		warnings,
+	};
 }
 
 /** Truncate rows to fit a character budget, preserving the input type */
@@ -533,19 +663,28 @@ function buildActiveConstraintsSection(
  * sorted by project match + score. No budget applied — caller
  * handles truncation via selectWithBudget().
  */
-export function getAllScoredCandidates(project: string | undefined, limit: number): ScoredMemory[] {
+export function getAllScoredCandidates(
+	project: string | undefined,
+	limit: number,
+	agentId = "default",
+	readPolicy = "isolated",
+	policyGroup: string | null = null,
+): ScoredMemory[] {
 	if (!existsSync(MEMORY_DB)) return [];
 
 	try {
+		const scope = buildAgentScopeClause(agentId, readPolicy, policyGroup);
 		const rows = getDbAccessor().withReadDb(
 			(db) =>
 				db
 					.prepare(
-						`SELECT id, content, type, importance, tags, pinned, project, created_at,
+						`SELECT m.id, m.content, m.type, m.importance, m.tags, m.pinned, m.project, m.created_at,
 						        COALESCE(access_count, 0) AS access_count
-					 FROM memories WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?`,
+					 FROM memories m
+					 WHERE m.is_deleted = 0${scope.sql}
+					 ORDER BY created_at DESC LIMIT ?`,
 					)
-					.all(limit * 3) as Array<{
+					.all(...scope.args, limit * 3) as Array<{
 					id: string;
 					content: string;
 					type: string;
@@ -582,12 +721,6 @@ export function getAllScoredCandidates(project: string | undefined, limit: numbe
 	}
 }
 
-/** Backwards-compatible wrapper: scored candidates + budget selection */
-function getProjectMemories(project: string | undefined, limit: number, charBudget: number): ScoredMemory[] {
-	const candidates = getAllScoredCandidates(project, limit);
-	return selectWithBudget(candidates.slice(0, limit), charBudget);
-}
-
 /**
  * Get predicted context memories by analyzing recent session summaries
  * and using recurring topics as additional search terms. Supplements
@@ -599,6 +732,9 @@ function getPredictedContextMemories(
 	limit: number,
 	charBudget: number,
 	excludeIds: ReadonlySet<string>,
+	agentId: string,
+	readPolicy = "isolated",
+	policyGroup: string | null = null,
 ): ScoredMemory[] {
 	if (!existsSync(MEMORY_DB)) return [];
 
@@ -609,18 +745,18 @@ function getPredictedContextMemories(
 				return db
 					.prepare(
 						`SELECT transcript FROM summary_jobs
-						 WHERE project = ? AND status = 'completed'
+						 WHERE project = ? AND status = 'completed' AND agent_id = ?
 						 ORDER BY created_at DESC LIMIT 5`,
 					)
-					.all(project) as Array<{ transcript: string }>;
+					.all(project, agentId) as Array<{ transcript: string }>;
 			}
 			return db
 				.prepare(
 					`SELECT transcript FROM summary_jobs
-					 WHERE status = 'completed'
+					 WHERE status = 'completed' AND agent_id = ?
 					 ORDER BY created_at DESC LIMIT 5`,
 				)
-				.all() as Array<{ transcript: string }>;
+				.all(agentId) as Array<{ transcript: string }>;
 		});
 
 		if (summaryRows.length === 0) return [];
@@ -653,6 +789,7 @@ function getPredictedContextMemories(
 
 		// Use recurring terms as FTS query
 		const ftsQuery = recurring.join(" OR ");
+		const scope = buildAgentScopeClause(agentId, readPolicy, policyGroup);
 		const rows = getDbAccessor().withReadDb(
 			(db) =>
 				db
@@ -664,10 +801,11 @@ function getPredictedContextMemories(
 						 JOIN memories m ON memories_fts.rowid = m.rowid
 						 WHERE memories_fts MATCH ?
 						   AND m.is_deleted = 0
+						   ${scope.sql}
 						 ORDER BY bm25(memories_fts)
 						 LIMIT ?`,
 					)
-					.all(ftsQuery, limit * 2) as Array<{
+					.all(ftsQuery, ...scope.args, limit * 2) as Array<{
 					id: string;
 					content: string;
 					type: string;
@@ -726,6 +864,13 @@ function updateAccessTracking(ids: string[]): void {
 // Config Loading
 // ============================================================================
 
+// Derived from HooksConfig — update when adding new config sections.
+const KNOWN_HOOKS_KEYS: ReadonlySet<keyof HooksConfig> = new Set<keyof HooksConfig>([
+	"sessionStart",
+	"userPromptSubmit",
+	"preCompaction",
+]);
+
 function loadHooksConfig(): HooksConfig {
 	const configPath = join(AGENTS_DIR, "agent.yaml");
 	if (!existsSync(configPath)) {
@@ -734,8 +879,33 @@ function loadHooksConfig(): HooksConfig {
 
 	try {
 		const content = readFileSync(configPath, "utf-8");
-		const config = parseSimpleYaml(content);
-		return config.hooks || getDefaultConfig();
+		const parsed = parseSimpleYaml(content);
+		const hooks = parsed.hooks;
+		if (!hooks || typeof hooks !== "object") {
+			return getDefaultConfig();
+		}
+		// Warn on unrecognized keys so users catch typos early
+		const record = hooks as Record<string, unknown>;
+		for (const key of Object.keys(record)) {
+			if (!KNOWN_HOOKS_KEYS.has(key as keyof HooksConfig)) {
+				logger.warn("hooks", `Unknown hooks config key: ${key} — check agent.yaml`);
+			}
+		}
+		const cfg: HooksConfig = {
+			sessionStart:
+				typeof record.sessionStart === "object" && record.sessionStart !== null
+					? (record.sessionStart as HooksConfig["sessionStart"])
+					: undefined,
+			userPromptSubmit:
+				typeof record.userPromptSubmit === "object" && record.userPromptSubmit !== null
+					? (record.userPromptSubmit as HooksConfig["userPromptSubmit"])
+					: undefined,
+			preCompaction:
+				typeof record.preCompaction === "object" && record.preCompaction !== null
+					? (record.preCompaction as HooksConfig["preCompaction"])
+					: undefined,
+		};
+		return cfg;
 	} catch (e) {
 		logger.warn("hooks", "Failed to load hooks config, using defaults");
 		return getDefaultConfig();
@@ -751,6 +921,12 @@ function getDefaultConfig(): HooksConfig {
 			includeRecentContext: true,
 			recencyBias: 0.7,
 		},
+		userPromptSubmit: {
+			enabled: true,
+			recallLimit: 10,
+			maxInjectChars: 500,
+			minScore: 0.8,
+		},
 		preCompaction: {
 			summaryGuidelines: `Summarize this session focusing on:
 - Key decisions made
@@ -764,6 +940,11 @@ Keep the summary concise but complete. Use first person from the agent's perspec
 			memoryLimit: 5,
 		},
 	};
+}
+
+function resolveUserPromptMinScore(value: number | undefined): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return 0.8;
+	return Math.max(0, Math.min(1, value));
 }
 
 // ============================================================================
@@ -944,10 +1125,14 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			dateStyle: "full",
 			timeStyle: "short",
 		});
+		const warnings = req.sessionKey
+			? [getExpiryWarning(req.sessionKey)].filter((w): w is string => w !== null)
+			: undefined;
 		return {
 			identity: { name: "Agent" },
 			memories: [],
 			inject: `[memory active | /remember | /recall]\n# Current Date & Time\n${now} (${tz})`,
+			warnings: warnings?.length ? warnings : undefined,
 		};
 	}
 
@@ -967,6 +1152,8 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
 	const traversalCfg = memoryCfg.pipelineV2.traversal;
 	const traversalEnabled = memoryCfg.pipelineV2.graph.enabled && traversalCfg?.enabled === true;
+	const traversalAgentId = resolveAgentId(req);
+	const agentScope = getAgentScope(traversalAgentId);
 	const traversalRuntimeCfg = {
 		maxAspectsPerEntity: traversalCfg?.maxAspectsPerEntity ?? 10,
 		maxAttributesPerAspect: traversalCfg?.maxAttributesPerAspect ?? 20,
@@ -983,13 +1170,18 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	// Candidate pool fusion: traversal U effective (capped before budget truncation)
 	const recallLimit = Math.max(1, config.recallLimit ?? 50);
 	const candidatePoolLimit = Math.max(1, config.candidatePoolLimit ?? 100);
-	const allCandidates = getAllScoredCandidates(req.project, recallLimit);
+	const allCandidates = getAllScoredCandidates(
+		req.project,
+		recallLimit,
+		traversalAgentId,
+		agentScope.readPolicy,
+		agentScope.policyGroup,
+	);
 	const candidateById = new Map(allCandidates.map((candidate) => [candidate.id, candidate]));
 	const candidateSourceById = new Map<string, CandidateSource>(
 		allCandidates.map((candidate) => [candidate.id, "effective" as const]),
 	);
 
-	const traversalAgentId = req.agentId ?? "default";
 	let traversalFocalSource: "project" | "checkpoint" | "query" | "session_key" | null = null;
 	let traversalEntities = 0;
 	let traversalEntityNames: ReadonlyArray<string> = [];
@@ -998,6 +1190,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	let traversalConstraints = 0;
 	let traversalTimedOut = false;
 	let traversalActiveAspectIds: ReadonlyArray<string> = [];
+	const traversalPathById = new Map<string, string>();
 	let constraintsForInject: ReadonlyArray<{
 		readonly entityName: string;
 		readonly content: string;
@@ -1026,6 +1219,9 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				constraintsForInject = traversalResult.constraints;
 				traversalConstraints = traversalResult.constraints.length;
 				traversalActiveAspectIds = traversalResult.activeAspectIds;
+				for (const [memoryId, path] of traversalResult.memoryPaths) {
+					traversalPathById.set(memoryId, serializeTraversalPath(path));
+				}
 
 				for (const memoryId of traversalResult.memoryIds) {
 					if (!candidateById.has(memoryId)) {
@@ -1090,6 +1286,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const predictorConfig = memoryCfg.pipelineV2.predictor;
 	const agentId = traversalAgentId;
 	const predictorState = getPredictorState(agentId);
+	const dbAcc = loadDbAccessor();
 
 	// Build CandidateInput array from merged candidates
 	const candidateInputs: ReadonlyArray<CandidateInput> = mergedCandidates.map((c) => ({
@@ -1100,7 +1297,9 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	// Get structural features for candidate feature vectors
 	const candidateIdsForFeatures = mergedCandidates.map((c) => c.id);
-	const structuralById = getStructuralFeatures(getDbAccessor(), candidateIdsForFeatures, agentId, candidateSourceById);
+	const structuralById = dbAcc
+		? getStructuralFeatures(dbAcc, candidateIdsForFeatures, agentId, candidateSourceById)
+		: new Map<string, StructuralFeatures>();
 
 	// Build candidate feature vectors using the canonical 17-element FeatureVector shape
 	// (same contract as buildCandidateFeatures / structural-features.ts).
@@ -1123,43 +1322,61 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 			return 0;
 		}
 	})();
-	const candidateFeatures: ReadonlyArray<ReadonlyArray<number>> | null = predictorConfig?.enabled
-		? buildCandidateFeatures(
-				getDbAccessor(),
-				mergedCandidates.map((c) => ({
-					id: c.id,
-					importance: c.importance,
-					createdAt: c.created_at,
-					accessCount: c.access_count,
-					lastAccessed: null,
-					pinned: c.pinned === 1,
-					isSuperseded: false,
-					source: candidateSourceById.get(c.id),
-				})),
-				agentId,
-				{
-					projectSlot: 0,
-					timeOfDay: featureNow.getHours() + featureNow.getMinutes() / 60,
-					dayOfWeek: featureNow.getDay(),
-					monthOfYear: featureNow.getMonth(),
-					sessionGapDays,
-				},
-			)
-		: null;
+	const candidateFeatures: ReadonlyArray<ReadonlyArray<number>> | null =
+		predictorConfig?.enabled && dbAcc
+			? buildCandidateFeatures(
+					dbAcc,
+					mergedCandidates.map((c) => ({
+						id: c.id,
+						importance: c.importance,
+						createdAt: c.created_at,
+						accessCount: c.access_count,
+						lastAccessed: null,
+						pinned: c.pinned === 1,
+						isSuperseded: false,
+						source: candidateSourceById.get(c.id),
+					})),
+					agentId,
+					{
+						projectSlot: 0,
+						timeOfDay: featureNow.getHours() + featureNow.getMinutes() / 60,
+						dayOfWeek: featureNow.getDay(),
+						monthOfYear: featureNow.getMonth(),
+						sessionGapDays,
+					},
+				)
+			: null;
 
 	// Run predictor scoring (async — calls sidecar if available)
 	const predictorScoreStart = Date.now();
-	const scoringResult = await runPredictorScoring({
-		candidates: candidateInputs,
-		accessor: getDbAccessor(),
-		agentId,
-		predictorClient,
-		config: predictorConfig,
-		state: predictorState,
-		candidateFeatures,
-		nativeEmbeddingDimensions: memoryCfg.embedding.dimensions,
-		project: req.project,
-	});
+	const scoringResult: ScoringResult = dbAcc
+		? await runPredictorScoring({
+				candidates: candidateInputs,
+				accessor: dbAcc,
+				agentId,
+				predictorClient,
+				config: predictorConfig,
+				state: predictorState,
+				candidateFeatures,
+				nativeEmbeddingDimensions: memoryCfg.embedding.dimensions,
+				project: req.project,
+			})
+		: {
+				candidates: candidateInputs.map((candidate, index) => ({
+					id: candidate.id,
+					baselineRank: index + 1,
+					baselineScore: candidate.effScore,
+					predictorRank: null,
+					predictorScore: null,
+					fusedScore: candidate.effScore,
+					source: candidate.source,
+					embedding: null,
+				})),
+				predictorUsed: false,
+				alpha: 1,
+				exploredId: null,
+				predictorStatus: null,
+			};
 	const predictorScoreMs = Date.now() - predictorScoreStart;
 	recordPredictorLatency("predictor_score", predictorScoreMs);
 
@@ -1178,7 +1395,15 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	// Get predicted context from recent session analysis (~30% of budget)
 	const existingIds = new Set(memories.map((m) => m.id));
-	const predictedMemories = getPredictedContextMemories(req.project, 10, 600, existingIds);
+	const predictedMemories = getPredictedContextMemories(
+		req.project,
+		10,
+		600,
+		existingIds,
+		agentId,
+		agentScope.readPolicy,
+		agentScope.policyGroup,
+	);
 	if (predictedMemories.length > 0) {
 		memories.push(...predictedMemories);
 	}
@@ -1214,12 +1439,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	if (predictorConfig?.enabled) {
 		const predictorStatus = scoringResult.predictorStatus;
 		if (predictorStatus !== null) {
-			const exited = evaluateColdStartExit(
-				predictorStatus,
-				predictorConfig.minTrainingSessions,
-				predictorState,
-				getDbAccessor(),
-			);
+			const exited = evaluateColdStartExit(predictorStatus, predictorConfig.minTrainingSessions, predictorState, dbAcc);
 			if (exited && !predictorState.coldStartExited) {
 				updatePredictorState(agentId, { coldStartExited: true });
 			}
@@ -1234,7 +1454,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				predictorStatus,
 				getPredictorState(agentId), // re-read after possible update
 				predictorConfig,
-				getDbAccessor(),
+				dbAcc,
 			);
 		} else {
 			predictorStatusLine = buildPredictorStatusLine(null, predictorState, predictorConfig, null);
@@ -1249,8 +1469,8 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	];
 	// Re-fetch structural features for any predicted memories not in the first batch
 	const fullStructuralById =
-		allCandidateIdsForRecording.length > candidateIdsForFeatures.length
-			? getStructuralFeatures(getDbAccessor(), allCandidateIdsForRecording, agentId, candidateSourceById)
+		allCandidateIdsForRecording.length > candidateIdsForFeatures.length && dbAcc
+			? getStructuralFeatures(dbAcc, allCandidateIdsForRecording, agentId, candidateSourceById)
 			: structuralById;
 
 	const candidatesForRecording = [
@@ -1270,6 +1490,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 				aspectSlot: sf?.aspectSlot ?? 0,
 				isConstraint: sf?.isConstraint ?? 0,
 				structuralDensity: sf?.structuralDensity ?? 0,
+				pathJson: traversalPathById.get(c.id) ?? null,
 			};
 		}),
 		...predictedMemories
@@ -1287,10 +1508,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 					aspectSlot: sf?.aspectSlot ?? 0,
 					isConstraint: sf?.isConstraint ?? 0,
 					structuralDensity: sf?.structuralDensity ?? 0,
+					pathJson: traversalPathById.get(m.id) ?? null,
 				};
 			}),
 	];
-	recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet);
+	recordSessionCandidates(req.sessionKey, candidatesForRecording, injectedSet, agentId);
 
 	// Format inject text
 	const injectParts: string[] = [];
@@ -1318,7 +1540,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 
 	if (req.project) {
 		const peerSessions = listAgentPresence({
-			agentId: req.agentId ?? "default",
+			agentId: resolveAgentId(req),
 			sessionKey: req.sessionKey,
 			project: req.project,
 			includeSelf: false,
@@ -1452,7 +1674,7 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 	const mainBudget = Math.max(0, maxInject - reservedChars);
 	let inject = injectParts.join("\n");
 	if (inject.length > mainBudget) {
-		inject = inject.slice(0, mainBudget) + "\n[context truncated]";
+		inject = `${inject.slice(0, mainBudget)}\n[context truncated]`;
 	}
 	if (constraintsSection) {
 		inject += constraintsSection;
@@ -1491,6 +1713,11 @@ export async function handleSessionStart(req: SessionStartRequest): Promise<Sess
 		})),
 		recentContext: memoryMdContent,
 		inject,
+		warnings: (() => {
+			if (!req.sessionKey) return undefined;
+			const w = [getExpiryWarning(req.sessionKey)].filter((v): v is string => v !== null);
+			return w.length > 0 ? w : undefined;
+		})(),
 	};
 }
 
@@ -1645,45 +1872,7 @@ function stripUntrustedMetadata(text: string): string {
 		remaining = [before, after].filter((part) => part.length > 0).join("\n\n");
 	}
 
-	// Strip orphaned code-fenced JSON metadata blocks at the start of the text.
-	// Some harnesses (e.g. OpenClaw) strip their own "Sender (untrusted metadata):"
-	// header before forwarding the message, leaving behind a bare ```json {...} ```
-	// block that pollutes recall queries.
-	remaining = stripLeadingCodeFencedJson(remaining);
-
 	return remaining.trim();
-}
-
-/**
- * Remove a leading markdown code-fenced JSON block if it looks like
- * harness/sender metadata (contains keys like "label", "id", "sender",
- * "chat_type", etc.). Preserves the rest of the message.
- */
-function stripLeadingCodeFencedJson(text: string): string {
-	const fenceMatch = /^```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```/m.exec(text.trimStart());
-	if (!fenceMatch) return text;
-
-	// Quick heuristic: does the JSON contain metadata-like keys?
-	const jsonStr = fenceMatch[1];
-	const metadataKeys = /["'](?:label|id|sender|chat_type|channel|provider|surface)["']\s*:/i;
-	if (!metadataKeys.test(jsonStr)) return text;
-
-	// Validate it's actually parseable JSON
-	try {
-		JSON.parse(jsonStr);
-	} catch {
-		return text;
-	}
-
-	// Strip the code fence block and any trailing whitespace/newlines
-	const leadingWhitespace = text.length - text.trimStart().length;
-	const blockEnd = leadingWhitespace + fenceMatch[0].length;
-	let rest = text.slice(blockEnd).trimStart();
-
-	// Also strip a leading harness timestamp like "[Tue 2026-03-24 14:51 UTC]"
-	rest = rest.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s+\w+\]\s*/i, "");
-
-	return rest;
 }
 
 const RECALL_STOPWORDS = new Set([
@@ -1809,12 +1998,7 @@ function extractSubstantiveWords(text: string): string[] {
 	const words = cleaned
 		.toLowerCase()
 		.split(/\W+/)
-		.filter((word) =>
-			word.length >= 3 &&
-			!RECALL_STOPWORDS.has(word) &&
-			!/^\d+$/.test(word) &&
-			!/\.(js|ts|py|md|txt|json|csv|yml|yaml|sh|css|html|jsx|tsx|sql|env)$/.test(word),
-		);
+		.filter((word) => word.length >= 3 && !RECALL_STOPWORDS.has(word) && !/^\d+$/.test(word));
 
 	// Deduplicate: hyphenated first (more specific), then words
 	const seen = new Set<string>();
@@ -1828,7 +2012,23 @@ function extractSubstantiveWords(text: string): string[] {
 	return result;
 }
 
-function buildRecallQueryShape(userPrompt: string, lastAssistantMessage?: string): RecallQueryShape {
+export function queryAnchorsMissingFromRecall(query: string, results: ReadonlyArray<{ content: string }>): boolean {
+	const anchors = extractAnchorTerms(stripUntrustedMetadata(query));
+	if (anchors.length === 0) return false;
+	if (results.length === 0) return false;
+	const anchorSet = new Set(anchors);
+	for (const row of results.slice(0, 8)) {
+		const rowAnchors = extractAnchorTerms(row.content);
+		for (const rowAnchor of rowAnchors) {
+			if (anchorSet.has(rowAnchor)) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+function buildRecallQueryShape(userPrompt: string): RecallQueryShape {
 	// Pass cleaned raw text for both keyword and vector queries.
 	// FTS5 with implicit AND + BM25 IDF handles term weighting naturally —
 	// manual stopword stripping destroyed phrase semantics and let
@@ -1853,10 +2053,46 @@ function resolveRecallUserMessage(req: UserPromptSubmitRequest): string {
 	return stripUntrustedMetadata(raw).trim();
 }
 
+function finalizeUserPromptSubmitSuccess(
+	req: UserPromptSubmitRequest,
+	userMessage: string,
+	start: number,
+	result: UserPromptSubmitResponse,
+	engineOverride?: string,
+): UserPromptSubmitResponse {
+	const inject = typeof result.inject === "string" ? result.inject : "";
+	const rawMemoryCount = typeof result.memoryCount === "number" ? result.memoryCount : 0;
+	const memoryCount = Number.isFinite(rawMemoryCount) && rawMemoryCount >= 0 ? rawMemoryCount : 0;
+	const engine =
+		typeof engineOverride === "string" && engineOverride.trim().length > 0
+			? engineOverride
+			: typeof result.engine === "string" && result.engine.trim().length > 0
+				? result.engine
+				: "none";
+	const duration = Date.now() - start;
+
+	logger.info("hooks", "User prompt submit", {
+		harness: req.harness,
+		project: req.project,
+		sessionKey: req.sessionKey,
+		memoryCount,
+		prompt: userMessage,
+		injectChars: inject.length,
+		inject,
+		engine,
+		durationMs: duration,
+	});
+
+	return result;
+}
+
 export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Promise<UserPromptSubmitResponse> {
 	const start = Date.now();
+	const submitCfg = loadHooksConfig().userPromptSubmit ?? {};
 	const userMessage = resolveRecallUserMessage(req);
-	const { keywordTerms, vectorQuery } = buildRecallQueryShape(userMessage, req.lastAssistantMessage);
+	const agentId = resolveAgentId(req);
+	const agentScope = getAgentScope(agentId);
+	const { keywordTerms, vectorQuery } = buildRecallQueryShape(userMessage);
 
 	// -- Parse and accumulate incoming agent feedback (from previous prompt) --
 	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
@@ -1865,7 +2101,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		try {
 			const parsed = parseFeedback(req.memory_feedback);
 			if (parsed) {
-				recordAgentFeedback(req.sessionKey, parsed);
+				recordAgentFeedback(req.sessionKey, parsed, resolveAgentId(req));
 			} else {
 				logger.warn("hooks", "Invalid memory_feedback format, skipping", {
 					sessionKey: req.sessionKey,
@@ -1914,6 +2150,32 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		}
 	}
 
+	if (req.sessionKey) {
+		let transcript = "";
+		if (req.transcriptPath && existsSync(req.transcriptPath)) {
+			try {
+				const raw = readFileSync(req.transcriptPath, "utf-8");
+				transcript = normalizeSessionTranscript(req.harness, raw);
+			} catch {
+				logger.warn("hooks", "Could not read prompt transcript", {
+					path: req.transcriptPath,
+				});
+			}
+		} else if (req.transcript) {
+			transcript = normalizeSessionTranscript(req.harness, req.transcript);
+		}
+
+		if (transcript) {
+			try {
+				upsertSessionTranscript(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
+			} catch (error) {
+				logger.warn("hooks", "Prompt transcript write failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
 	// Build lightweight metadata header (injected on every prompt)
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const now = new Date().toLocaleString("en-US", {
@@ -1922,34 +2184,128 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		timeStyle: "short",
 	});
 	const metadataHeader = `# Current Date & Time\n${now} (${tz})\n`;
+	const expiryWarning = req.sessionKey ? getExpiryWarning(req.sessionKey) : null;
+	const warnings = expiryWarning ? [expiryWarning] : undefined;
+
+	if (submitCfg.enabled === false) {
+		return finalizeUserPromptSubmitSuccess(
+			req,
+			userMessage,
+			start,
+			{
+				inject: metadataHeader,
+				memoryCount: 0,
+				warnings,
+			},
+			"disabled",
+		);
+	}
 
 	if (keywordTerms.length < 1 || vectorQuery.length === 0 || !existsSync(MEMORY_DB)) {
-		return { inject: metadataHeader, memoryCount: 0 };
+		return finalizeUserPromptSubmitSuccess(
+			req,
+			userMessage,
+			start,
+			{
+				inject: metadataHeader,
+				memoryCount: 0,
+				warnings,
+			},
+			"no-query",
+		);
 	}
 
 	try {
 		const cfg = loadMemoryConfig(AGENTS_DIR);
+		const recallLimit = submitCfg.recallLimit ?? 10;
+		const injectBudget = submitCfg.maxInjectChars ?? cfg.pipelineV2.guardrails.contextBudgetChars;
+		const minScore = resolveUserPromptMinScore(submitCfg.minScore);
+		const queryTerms = vectorQuery.slice(0, 80);
 		const recall = await hybridRecall(
 			{
 				query: vectorQuery,
 				keywordQuery: vectorQuery,
-				limit: 10,
-				importance_min: 0.5,
+				limit: recallLimit,
+				importance_min: 0.3,
+				agentId,
+				readPolicy: agentScope.readPolicy,
+				policyGroup: agentScope.policyGroup,
+				project: req.project,
 			},
 			cfg,
 			fetchEmbedding,
 		);
 
-		if (recall.results.length === 0 || typeof recall.results[0]?.score !== "number" || recall.results[0].score < 0.6) {
-			return { inject: metadataHeader, memoryCount: 0 };
+		const topRaw = recall.results[0]?.score;
+		const topScore = typeof topRaw === "number" ? clampScore01(topRaw) : undefined;
+		const noStructured = recall.results.length === 0 || typeof topScore !== "number" || topScore < 0.4;
+		// Anchor checks must be driven by the current user turn text, not any
+		// expanded/derived recall query shape.
+		const anchorsMissed = queryAnchorsMissingFromRecall(userMessage, recall.results);
+		if (noStructured || anchorsMissed) {
+			const temporalHits = searchTemporalFallback({
+				query: vectorQuery,
+				agentId,
+				sessionKey: req.sessionKey,
+				project: req.project,
+				limit: 4,
+			});
+			if (temporalHits.length > 0) {
+				return finalizeUserPromptSubmitSuccess(
+					req,
+					userMessage,
+					start,
+					buildTemporalFallbackResponse(metadataHeader, queryTerms, injectBudget, temporalHits, warnings),
+				);
+			}
+			const transcriptHits = searchTranscriptFallback({
+				query: vectorQuery,
+				agentId,
+				sessionKey: req.sessionKey,
+				project: req.project,
+				limit: 3,
+			});
+			if (transcriptHits.length > 0) {
+				return finalizeUserPromptSubmitSuccess(
+					req,
+					userMessage,
+					start,
+					buildTranscriptFallbackResponse(metadataHeader, queryTerms, injectBudget, transcriptHits, warnings),
+				);
+			}
+			if (noStructured) {
+				return finalizeUserPromptSubmitSuccess(
+					req,
+					userMessage,
+					start,
+					{
+						inject: metadataHeader,
+						memoryCount: 0,
+						warnings,
+					},
+					"no-structured",
+				);
+			}
+		}
+		if (typeof topScore !== "number" || topScore < minScore) {
+			return finalizeUserPromptSubmitSuccess(
+				req,
+				userMessage,
+				start,
+				{
+					inject: metadataHeader,
+					memoryCount: 0,
+					warnings,
+				},
+				"low-confidence",
+			);
 		}
 
-		const budget = cfg.pipelineV2.guardrails.contextBudgetChars;
 		const mapped = recall.results.map((result) => ({
 			...result,
 			pinned: result.pinned ? 1 : 0,
 		}));
-		const budgetFiltered = selectWithBudget(mapped, budget);
+		const budgetFiltered = selectWithBudget(mapped, injectBudget);
 		const budgetSelected = budgetFiltered.slice(0, 5);
 		// omitted reflects only budget truncation, not the 5-item display cap,
 		// so the hint correctly directs users to raise contextBudgetChars.
@@ -1957,7 +2313,7 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 
 		// Track FTS hits for predictive scorer data collection (full results, pre-dedup)
 		const allMatchedIds = recall.results.map((result) => result.id);
-		trackFtsHits(req.sessionKey, allMatchedIds);
+		trackFtsHits(req.sessionKey, allMatchedIds, resolveAgentId(req));
 
 		// Filter out memories already injected within the sliding window
 		let selected = budgetSelected;
@@ -1973,10 +2329,19 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 		}
 
 		if (selected.length === 0) {
-			return { inject: metadataHeader, memoryCount: 0 };
+			return finalizeUserPromptSubmitSuccess(
+				req,
+				userMessage,
+				start,
+				{
+					inject: metadataHeader,
+					memoryCount: 0,
+					warnings,
+				},
+				"dedup-empty",
+			);
 		}
 
-		const queryTerms = vectorQuery.slice(0, 80);
 		const lines = selected.map((s) => {
 			const dateStr = formatMemoryDate(s.created_at);
 			return `- ${s.content} (${dateStr})`;
@@ -2005,27 +2370,16 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 			}
 		}
 
-		const duration = Date.now() - start;
-		logger.info("hooks", "User prompt submit", {
-			harness: req.harness,
-			project: req.project,
-			sessionKey: req.sessionKey,
-			memoryCount: selected.length,
-			prompt: userMessage,
-			injectChars: inject.length,
-			inject,
-			durationMs: duration,
-		});
-
-		return {
+		return finalizeUserPromptSubmitSuccess(req, userMessage, start, {
 			inject,
 			memoryCount: selected.length,
 			queryTerms,
 			engine: "hybrid",
-		};
+			warnings,
+		});
 	} catch (e) {
 		logger.error("hooks", "User prompt submit failed", e as Error);
-		return { inject: "", memoryCount: 0 };
+		return { inject: "", memoryCount: 0, warnings };
 	}
 }
 
@@ -2035,7 +2389,9 @@ export async function handleUserPromptSubmit(req: UserPromptSubmitRequest): Prom
 
 export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 	const sessionKey = req.sessionKey || req.sessionId;
-	const agentId = "default";
+	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey || req.sessionId });
+	const sessionId = req.sessionId ?? sessionKey ?? `session-end:${new Date().toISOString()}`;
+	const endedAt = new Date().toISOString();
 
 	// Clear hook dedup state for this session
 	if (sessionKey) {
@@ -2119,17 +2475,31 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 	// or whether the summary worker succeeds later.
 	if (transcript && sessionKey) {
 		try {
-			const now = new Date().toISOString();
-			getDbAccessor().withWriteTx((db) => {
-				db.prepare(
-					`INSERT OR IGNORE INTO session_transcripts
-					 (session_key, content, harness, project, agent_id, created_at)
-					VALUES (?, ?, ?, ?, ?, ?)`,
-				).run(sessionKey, transcript, req.harness, req.cwd ?? null, agentId, now);
-			});
+			upsertSessionTranscript(sessionKey, transcript, req.harness, req.cwd ?? null, agentId);
 		} catch (e) {
 			logger.warn("hooks", "Transcript write failed (non-fatal)", {
 				error: e instanceof Error ? e.message : String(e),
+			});
+		}
+	}
+
+	if (transcript.trim().length > 0) {
+		try {
+			writeTranscriptArtifact({
+				agentId,
+				sessionId,
+				sessionKey: sessionKey ?? null,
+				project: req.cwd ?? null,
+				harness: req.harness,
+				capturedAt: endedAt,
+				startedAt: null,
+				endedAt,
+				transcript,
+			});
+		} catch (e) {
+			logger.warn("hooks", "Transcript artifact write failed (non-fatal)", {
+				error: e instanceof Error ? e.message : String(e),
+				sessionKey,
 			});
 		}
 	}
@@ -2200,7 +2570,12 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 		harness: req.harness,
 		transcript,
 		sessionKey,
+		sessionId,
 		project: req.cwd,
+		agentId,
+		trigger: "session_end",
+		capturedAt: endedAt,
+		endedAt,
 	});
 
 	logger.info("hooks", "Session end queued for summary", {
@@ -2222,6 +2597,224 @@ export function handleSessionEnd(req: SessionEndRequest): SessionEndResponse {
 	});
 
 	return { memoriesSaved: 0, queued: true, jobId };
+}
+
+// ---------------------------------------------------------------------------
+// Mid-session checkpoint extraction (long-lived sessions)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read (or upsert) the extract cursor for delta tracking.
+ * Returns the last_offset for the given session/agent pair.
+ */
+/** Read the extract cursor for a session, returning last_offset (0 if none). */
+function readExtractCursor(sessionKey: string, agentId: string): number {
+	try {
+		return getDbAccessor().withReadDb((db) => {
+			const row = db
+				.prepare("SELECT last_offset FROM session_extract_cursors WHERE session_key = ? AND agent_id = ?")
+				.get(sessionKey, agentId) as { last_offset: number } | undefined;
+			return row?.last_offset ?? 0;
+		});
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Advance the extract cursor to `offset` for this session.
+ * Called AFTER the summary job is enqueued so a crash between enqueue and
+ * cursor advance causes a redundant re-extraction (acceptable) rather than
+ * permanently skipping a delta window (data loss).
+ */
+function advanceExtractCursor(sessionKey: string, agentId: string, offset: number): void {
+	const now = new Date().toISOString();
+	try {
+		getDbAccessor().withWriteTx((db) => {
+			db.prepare(
+				`INSERT INTO session_extract_cursors (session_key, agent_id, last_offset, last_extract_at)
+				 VALUES (?, ?, ?, ?)
+				 ON CONFLICT(session_key, agent_id) DO UPDATE SET
+				   last_offset = excluded.last_offset,
+				   last_extract_at = excluded.last_extract_at`,
+			).run(sessionKey, agentId, offset, now);
+		});
+	} catch (e) {
+		logger.warn("hooks", "advanceExtractCursor failed (non-fatal)", {
+			error: e instanceof Error ? e.message : String(e),
+		});
+	}
+}
+
+/**
+ * Mid-session checkpoint extraction. Simplified version of handleSessionEnd
+ * for long-lived sessions that never call session-end.
+ *
+ * Key differences from handleSessionEnd:
+ * - Does NOT release the session claim (session continues after this call)
+ * - Calls consumeState() to flush accumulated continuity data, then
+ *   initContinuity() to restart the tracking window for the next interval
+ * - Only extracts the delta since the last extraction (cursor via
+ *   readExtractCursor / advanceExtractCursor; cursor is advanced AFTER
+ *   enqueueSummaryJob succeeds to preserve crash-safety)
+ * - Skips if delta is < 500 bytes (not worth extracting)
+ * - Writes a checkpoint with trigger 'mid_session_extract'
+ */
+export function handleCheckpointExtract(req: CheckpointExtractRequest): CheckpointExtractResponse {
+	const agentId = resolveAgentId({ agentId: req.agentId, sessionKey: req.sessionKey });
+
+	// Respect the pipeline master switch
+	const memoryCfg = loadMemoryConfig(AGENTS_DIR);
+	if (!memoryCfg.pipelineV2.enabled && !memoryCfg.pipelineV2.shadowMode) {
+		logger.info("hooks", "Checkpoint extract skipped — pipeline disabled");
+		return { skipped: true };
+	}
+
+	// Read transcript: prefer inline body, then file path, then stored transcript.
+	// transcriptPath is trusted the same way as in handleSessionEnd and
+	// handleUserPromptSubmit — OpenClaw session files are written by the same
+	// user process as the daemon and may be anywhere (project dirs, /tmp,
+	// containers). Protection at the network level is the global auth middleware.
+	let transcript = "";
+	let fromStore = false;
+	if (req.transcript) {
+		transcript = normalizeSessionTranscript(req.harness, req.transcript);
+	} else if (req.transcriptPath && existsSync(req.transcriptPath)) {
+		try {
+			const raw = readFileSync(req.transcriptPath, "utf-8");
+			transcript = normalizeSessionTranscript(req.harness, raw);
+		} catch {
+			logger.warn("hooks", "Could not read checkpoint transcript", {
+				path: req.transcriptPath,
+			});
+		}
+	}
+
+	// Fall back to stored transcript if nothing was provided inline
+	if (!transcript) {
+		transcript = getSessionTranscriptContent(req.sessionKey, agentId) ?? "";
+		fromStore = true;
+	}
+
+	if (!transcript) {
+		logger.info("hooks", "Checkpoint extract skipped — no transcript available", {
+			sessionKey: req.sessionKey,
+		});
+		return { skipped: true };
+	}
+
+	// Upsert transcript for lossless retention, but only when new content is
+	// provided (not merely re-reading the stored transcript) and only when it
+	// is at least as long as what is already stored.  Upserting a shorter
+	// payload would move the extraction cursor past valid content and cause
+	// future checkpoints to permanently skip that range.
+	if (!fromStore) {
+		const prev = getSessionTranscriptContent(req.sessionKey, agentId);
+		if (!prev || transcript.length >= prev.length) {
+			try {
+				upsertSessionTranscript(req.sessionKey, transcript, req.harness, req.project ?? null, agentId);
+			} catch (e) {
+				logger.warn("hooks", "Checkpoint transcript upsert failed (non-fatal)", {
+					error: e instanceof Error ? e.message : String(e),
+				});
+			}
+		}
+	}
+
+	// Read current cursor; skip if delta is too small.
+	// Cursor is stored as UTF-8 byte offset so it matches the Rust daemon's
+	// byte-based cursor on a shared database. Slice transcript by bytes to
+	// keep the unit consistent across daemons.
+	const cursor = readExtractCursor(req.sessionKey, agentId);
+	const transcriptBuf = Buffer.from(transcript, "utf8");
+	const deltaBuf = transcriptBuf.subarray(cursor);
+	if (deltaBuf.byteLength < 500) {
+		logger.info("hooks", "Checkpoint extract skipped — delta too small", {
+			sessionKey: req.sessionKey,
+			deltaBytes: deltaBuf.byteLength,
+			cursor,
+		});
+		return { skipped: true };
+	}
+	// Convert delta buffer to string; safety cap against degenerate inputs
+	const delta = deltaBuf.toString("utf8");
+	const MAX_DELTA_CHARS = 100_000;
+	const capped = delta.length > MAX_DELTA_CHARS ? `${delta.slice(0, MAX_DELTA_CHARS)}\n[truncated]` : delta;
+
+	// Flush accumulated continuity data into a checkpoint, then re-init the
+	// tracking window so subsequent turns continue accumulating. Unlike
+	// session-end, we do NOT release the session claim.
+	//
+	// Note: consumeState/initContinuity are session-key-scoped (not agentId-
+	// scoped) — matching the same design in handleSessionEnd. In the OpenClaw
+	// multi-agent model each agent run always has a unique session key, so
+	// session-key scoping is sufficient in practice. agentId is used for
+	// cursor and transcript dedup in session_extract_cursors /
+	// session_transcripts, where it matters for correct per-agent scoping.
+	try {
+		const snap = consumeState(req.sessionKey);
+		if (snap && snap.totalPromptCount > 0) {
+			const cfg = loadMemoryConfig(AGENTS_DIR).pipelineV2.continuity;
+			writeCheckpoint(
+				getDbAccessor(),
+				{
+					sessionKey: snap.sessionKey,
+					harness: snap.harness,
+					project: snap.project,
+					projectNormalized: snap.projectNormalized,
+					trigger: "mid_session_extract",
+					digest: formatPeriodicDigest(snap),
+					promptCount: snap.totalPromptCount,
+					memoryQueries: snap.pendingQueries,
+					recentRemembers: snap.pendingRemembers,
+					focalEntityIds: snap.structuralSnapshot?.focalEntityIds,
+					focalEntityNames: snap.structuralSnapshot?.focalEntityNames,
+					activeAspectIds: snap.structuralSnapshot?.activeAspectIds,
+					surfacedConstraintCount: snap.structuralSnapshot?.surfacedConstraintCount,
+					traversalMemoryCount: snap.structuralSnapshot?.traversalMemoryCount,
+				},
+				cfg.maxCheckpointsPerSession,
+			);
+		}
+	} catch (err) {
+		logger.warn("hooks", "Checkpoint extract checkpoint write failed", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+
+	try {
+		initContinuity(req.sessionKey, req.harness, req.project);
+	} catch {
+		// Non-fatal — continuity will re-init on the next prompt
+	}
+
+	// Enqueue summary job for the delta only.
+	// Cursor is advanced AFTER the enqueue so a crash between the two steps
+	// causes a redundant re-extraction next time rather than silently
+	// skipping a delta window.
+	const jobId = enqueueSummaryJob(getDbAccessor(), {
+		harness: req.harness,
+		transcript: capped,
+		sessionKey: req.sessionKey,
+		sessionId: req.sessionKey,
+		project: req.project,
+		agentId,
+		trigger: "checkpoint_extract",
+		capturedAt: new Date().toISOString(),
+	});
+	// Advance cursor using UTF-8 byte length so the stored offset is
+	// byte-compatible with the Rust daemon on a shared database.
+	advanceExtractCursor(req.sessionKey, agentId, Buffer.byteLength(transcript, "utf8"));
+
+	logger.info("hooks", "Checkpoint extract queued", {
+		jobId,
+		sessionKey: req.sessionKey,
+		deltaChars: capped.length,
+		cursor,
+		newCursor: Buffer.byteLength(transcript, "utf8"),
+	});
+
+	return { queued: true, jobId };
 }
 
 export function normalizeSessionTranscript(harness: string, raw: string): string {
@@ -2247,7 +2840,10 @@ export function normalizeSessionTranscript(harness: string, raw: string): string
 // Returns string (possibly empty) when input IS JSON-line — empty means
 // all lines were non-conversational (tool calls, metadata, etc.).
 export function normalizeJsonConversationTranscript(raw: string): string | null {
-	const rawLines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const rawLines = raw
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
 	if (rawLines.length === 0) return "";
 
 	const parsedLines: Array<Record<string, unknown> | null> = [];
@@ -2398,7 +2994,6 @@ export function normalizeCodexTranscript(raw: string): string {
 					lines.push(`Assistant: ${record.text.trim().replace(/[\r\n]+/g, " ")}`);
 				}
 			}
-			continue;
 		}
 
 		// response_item events (tool calls/outputs) are intentionally omitted
@@ -2598,151 +3193,39 @@ export function handleRecall(req: RecallRequest): RecallResponse {
  * Write MEMORY.md with backup of previous version.
  * Shared by the synthesis-complete endpoint and the synthesis worker.
  */
-export function writeMemoryMd(content: string): { ok: true } | { ok: false; error: string } {
-	// Last-resort guard: refuse to overwrite MEMORY.md with JSON blobs
-	const trimmed = content.trim();
-	if (!trimmed) {
-		logger.error("hooks", "Refusing to write empty content to MEMORY.md");
-		return { ok: false, error: "Refusing to write empty content to MEMORY.md" };
-	}
-	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-		try {
-			JSON.parse(trimmed);
-			// Parsed successfully — it's JSON, not markdown
-			logger.error("hooks", "Refusing to write JSON to MEMORY.md", undefined, { preview: trimmed.slice(0, 200) });
-			return { ok: false, error: "Refusing to write JSON to MEMORY.md" };
-		} catch {
-			// Not valid JSON — markdown that starts with [ or { is fine
-		}
-	}
-
-	const memoryMdPath = join(AGENTS_DIR, "MEMORY.md");
-	if (existsSync(memoryMdPath)) {
-		const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		const backupPath = join(AGENTS_DIR, "memory", `MEMORY.backup-${timestamp}.md`);
-		mkdirSync(join(AGENTS_DIR, "memory"), { recursive: true });
-		writeFileSync(backupPath, readFileSync(memoryMdPath, "utf-8"));
-	}
-	const header = `<!-- generated ${new Date().toISOString().slice(0, 16).replace("T", " ")} -->\n\n`;
-	writeFileSync(memoryMdPath, header + content);
-	return { ok: true };
+export function writeMemoryMd(
+	content: string,
+	opts?: {
+		readonly agentId?: string;
+		readonly owner?: string;
+	},
+): { ok: true } | { ok: false; error: string; code?: "busy" | "invalid" } {
+	const result = writeMemoryHead(content, opts);
+	if (result.ok) return { ok: true };
+	logger.error("hooks", result.error, undefined, {
+		agentId: opts?.agentId ?? "default",
+		owner: opts?.owner,
+	});
+	return { ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) };
 }
 
-/**
- * Build a synthesis prompt. When sinceTimestamp is provided, only memories
- * created after that time are included (incremental merge). Otherwise
- * falls back to the top 100 by importance/recency (full regeneration).
- */
 export function handleSynthesisRequest(
 	req: SynthesisRequest,
-	opts?: { maxTokens?: number; sinceTimestamp?: number },
+	opts?: { maxTokens?: number; sinceTimestamp?: number; agentId?: string },
 ): SynthesisResponse {
-	const maxTokens = opts?.maxTokens ?? 8000;
-	const charBudget = maxTokens * 4; // rough char-to-token estimate
-
 	logger.info("hooks", "Synthesis request", { trigger: req.trigger });
 
-	// Read existing MEMORY.md for merge-based synthesis
-	const memoryMdPath = join(AGENTS_DIR, "MEMORY.md");
-	let existingContent = "";
-	if (existsSync(memoryMdPath)) {
-		try {
-			const raw = readFileSync(memoryMdPath, "utf-8")
-				.replace(/^<!-- generated .* -->\n\n?/, "")
-				.trim();
-			// Cap existing content to avoid blowing up the prompt
-			if (raw.length > charBudget) {
-				logger.warn("hooks", "Truncating large MEMORY.md for synthesis", {
-					originalChars: raw.length,
-					budgetChars: charBudget,
-				});
-				existingContent = raw.slice(0, charBudget);
-			} else {
-				existingContent = raw;
-			}
-		} catch {
-			// ignore read errors
-		}
-	}
+	const _sinceTimestamp = opts?.sinceTimestamp ?? 0;
+	const _maxTokens = opts?.maxTokens ?? 8000;
+	void _sinceTimestamp;
+	void _maxTokens;
 
-	// Read session summary files from memory directory
-	const memoryDir = join(AGENTS_DIR, "memory");
-	const DATE_PREFIX = /^\d{4}-\d{2}-\d{2}/;
-	let sessionFiles: string[] = [];
-
-	if (existsSync(memoryDir)) {
-		try {
-			sessionFiles = readdirSync(memoryDir)
-				.filter((f) => f.endsWith(".md") && DATE_PREFIX.test(f))
-				.sort()
-				.reverse(); // newest first
-		} catch {
-			// ignore read errors
-		}
-	}
-
-	// Collect file contents up to char budget, skipping files older than sinceTimestamp
-	const sinceMs = opts?.sinceTimestamp ?? 0;
-	const sessionBlocks: string[] = [];
-	let cumChars = 0;
-	for (const file of sessionFiles) {
-		if (cumChars >= charBudget) break;
-		try {
-			const filePath = join(memoryDir, file);
-			if (sinceMs > 0 && statSync(filePath).mtimeMs < sinceMs) continue;
-			const content = readFileSync(filePath, "utf-8").trim();
-			if (content.length === 0) continue;
-			sessionBlocks.push(content);
-			cumChars += content.length;
-		} catch {
-			// skip unreadable files
-		}
-	}
-
-	const sessionsBlock = sessionBlocks.join("\n\n---\n\n");
-
-	const prompt = existingContent
-		? `You are updating MEMORY.md — a working memory summary for an AI agent.
-
-## Current MEMORY.md
-
-${existingContent}
-
-## Session Summaries
-
-${sessionsBlock}
-
-Instructions:
-- Preserve existing sections and structure
-- Update entries that have new information from session summaries
-- Add new projects, decisions, context, or technical notes that appeared
-- Remove only items that are clearly superseded or obsolete
-- Keep the document well-organized with clear sections
-- This is a working document, not a changelog — keep it current-state focused
-- Be concise (target under ${maxTokens} tokens)
-- Do not include a generated timestamp — that is added automatically
-- Output the full updated MEMORY.md content`
-		: `You are generating MEMORY.md — a working memory summary for an AI agent.
-
-## Session Summaries
-
-${sessionsBlock}
-
-Instructions:
-- Create a coherent, organized summary capturing:
-  - Current active projects and their status
-  - Key decisions and their rationale
-  - Important people, preferences, and relationships
-  - Technical notes and learnings
-  - Open threads and todos
-- Format as clean markdown with clear sections
-- Be concise but complete (target under ${maxTokens} tokens)
-- Do not include a generated timestamp — that is added automatically`;
-
+	const rendered = renderMemoryProjection(opts?.agentId ?? "default");
 	return {
 		harness: "daemon",
-		model: "synthesis",
-		prompt,
-		fileCount: sessionBlocks.length,
+		model: "projection",
+		prompt: rendered.content,
+		fileCount: rendered.fileCount,
+		indexBlock: rendered.indexBlock,
 	};
 }

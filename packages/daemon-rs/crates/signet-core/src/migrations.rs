@@ -201,9 +201,39 @@ static MIGRATIONS: &[Migration] = &[
         name: "dependency-reason",
         sql: include_str!("sql/031-dependency-reason.sql"),
     },
+    Migration {
+        version: 32,
+        name: "session-transcripts",
+        sql: include_str!("sql/032-session-transcripts.sql"),
+    },
+    Migration {
+        version: 33,
+        name: "session-extract-cursors",
+        sql: include_str!("sql/033-session-extract-cursors.sql"),
+    },
+    Migration {
+        version: 34,
+        name: "session-transcripts-compound-pk",
+        sql: include_str!("sql/034-session-transcripts-compound-pk.sql"),
+    },
+    Migration {
+        version: 35,
+        name: "dependency-audit-history",
+        sql: include_str!("sql/035-dependency-audit-history.sql"),
+    },
+    Migration {
+        version: 36,
+        name: "temporal-heads",
+        sql: include_str!("sql/036-temporal-heads.sql"),
+    },
+    Migration {
+        version: 37,
+        name: "memory-md-rolling-window-lineage",
+        sql: include_str!("sql/037-memory-md-rolling-window-lineage.sql"),
+    },
 ];
 
-pub const LATEST_SCHEMA_VERSION: u32 = 31;
+pub const LATEST_SCHEMA_VERSION: u32 = 37;
 
 /// Ensure meta tables exist (safe on fresh DB).
 fn ensure_meta(conn: &Connection) -> Result<(), CoreError> {
@@ -484,7 +514,161 @@ fn run_migration_sql(conn: &Connection, m: &Migration) -> Result<(), CoreError> 
             add_column_if_missing(conn, "entity_dependencies", "reason", "TEXT");
             add_column_if_missing(conn, "entities", "last_synthesized_at", "TEXT");
         }
+        34 => {
+            // Rebuild session_transcripts with compound (session_key, agent_id) PK.
+            // Skip only when agent_id is already a PRIMARY KEY member (PRAGMA
+            // table_info column 5 = pk, nonzero = part of the PK). Checking just
+            // for column existence would incorrectly skip when agent_id was added
+            // by a different migration as a regular column without PK membership.
+            //
+            // Two scenarios for the old table when this migration runs:
+            // (a) Fresh Rust install: migration 032 created session_transcripts
+            //     without agent_id → SELECT must use literal 'default'
+            // (b) Cross-daemon: TS daemon ran first and added agent_id as a
+            //     regular (non-PK) column → SELECT must use COALESCE(agent_id, 'default')
+            let cols: Vec<(String, i64)> = conn
+                .prepare("PRAGMA table_info(session_transcripts)")?
+                .query_map([], |row| {
+                    let name: String = row.get(1)?;
+                    let pk: i64 = row.get(5)?;
+                    Ok((name, pk))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            let agent_id_in_pk = cols.iter().any(|(name, pk)| name == "agent_id" && *pk > 0);
+            let agent_id_col_exists = cols.iter().any(|(name, _)| name == "agent_id");
+
+            if !agent_id_in_pk {
+                // Build the agent_id expression for the SELECT based on whether
+                // the column already exists in the source table.
+                let agent_id_expr = if agent_id_col_exists {
+                    "COALESCE(agent_id, 'default')"
+                } else {
+                    "'default'"
+                };
+                let sql = format!(
+                    "CREATE TABLE session_transcripts_new (
+                        session_key TEXT NOT NULL,
+                        agent_id    TEXT NOT NULL DEFAULT 'default',
+                        content     TEXT NOT NULL,
+                        harness     TEXT,
+                        project     TEXT,
+                        created_at  TEXT NOT NULL,
+                        PRIMARY KEY (session_key, agent_id)
+                    );
+                    INSERT OR IGNORE INTO session_transcripts_new
+                        (session_key, agent_id, content, harness, project, created_at)
+                    SELECT session_key, {agent_id_expr}, content, harness, project, created_at
+                    FROM session_transcripts;
+                    DROP TABLE session_transcripts;
+                    ALTER TABLE session_transcripts_new RENAME TO session_transcripts;
+                    CREATE INDEX IF NOT EXISTS idx_st_project
+                        ON session_transcripts(project);
+                    CREATE INDEX IF NOT EXISTS idx_st_created
+                        ON session_transcripts(created_at);"
+                );
+                conn.execute_batch(&sql)?;
+            }
+        }
+
+        // Migration 35 (dependency-audit-history) — merged from main branch.
+        // This arm runs only when migration 35 is first applied. Installs
+        // already at v35 upgrading to this branch (which adds 36 + 37) will
+        // NOT re-execute this arm — the session_summaries work was applied
+        // when they upgraded to v35 and is idempotent via IF NOT EXISTS guards.
+        35 => {
+            add_column_if_missing(conn, "session_summaries", "source_type", "TEXT");
+            add_column_if_missing(conn, "session_summaries", "source_ref", "TEXT");
+            add_column_if_missing(conn, "session_summaries", "meta_json", "TEXT");
+            conn.execute_batch(
+                "UPDATE session_summaries
+                    SET source_type = CASE
+                        WHEN source_type IS NOT NULL AND TRIM(source_type) != '' THEN source_type
+                        WHEN kind = 'session' THEN 'summary'
+                        WHEN kind = 'arc' THEN 'arc'
+                        WHEN kind = 'epoch' THEN 'epoch'
+                        ELSE 'summary'
+                    END
+                  WHERE source_type IS NULL OR TRIM(source_type) = '';
+                 CREATE INDEX IF NOT EXISTS idx_summaries_source_type
+                    ON session_summaries(source_type);
+                 CREATE INDEX IF NOT EXISTS idx_summaries_source_ref
+                    ON session_summaries(source_ref);
+                 DROP INDEX IF EXISTS idx_summaries_session_depth;
+                 DROP INDEX IF EXISTS idx_summaries_session_agent_depth;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_summaries_session_agent_depth
+                    ON session_summaries(agent_id, session_key, depth)
+                    WHERE session_key IS NOT NULL
+                      AND COALESCE(source_type, 'summary') = 'summary';",
+            )?;
+        }
+        37 => {
+            for col in &[
+                ("summary_jobs", "session_id", "TEXT"),
+                (
+                    "summary_jobs",
+                    "trigger",
+                    "TEXT NOT NULL DEFAULT 'session_end'",
+                ),
+                ("summary_jobs", "captured_at", "TEXT"),
+                ("summary_jobs", "started_at", "TEXT"),
+                ("summary_jobs", "ended_at", "TEXT"),
+                ("summary_jobs", "leased_at", "TEXT"),
+                ("summary_jobs", "updated_at", "TEXT"),
+                ("summary_jobs", "failed_at", "TEXT"),
+                (
+                    "summary_jobs",
+                    "agent_id",
+                    "TEXT NOT NULL DEFAULT 'default'",
+                ),
+            ] {
+                add_column_if_missing(conn, col.0, col.1, col.2);
+            }
+            conn.execute_batch(
+                "UPDATE summary_jobs
+                    SET session_id = COALESCE(session_id, session_key, id),
+                        trigger = COALESCE(NULLIF(trigger, ''), 'session_end'),
+                        captured_at = COALESCE(captured_at, completed_at, created_at),
+                        ended_at = COALESCE(ended_at, completed_at),
+                        updated_at = COALESCE(updated_at, completed_at, created_at),
+                        agent_id = COALESCE(NULLIF(agent_id, ''), 'default')
+                  WHERE 1 = 1;
+                 CREATE INDEX IF NOT EXISTS idx_summary_jobs_agent_trigger
+                    ON summary_jobs(agent_id, trigger, created_at);
+                 CREATE INDEX IF NOT EXISTS idx_summary_jobs_agent_session
+                    ON summary_jobs(agent_id, session_key, created_at);
+                 INSERT INTO memory_artifacts_fts(memory_artifacts_fts)
+                 VALUES ('rebuild');",
+            )?;
+        }
         _ => {}
+    }
+
+    // Cross-daemon parity: keep scoped memory columns/indexes aligned.
+    if m.version >= 2 {
+        add_column_if_missing(
+            conn,
+            "memories",
+            "agent_id",
+            "TEXT NOT NULL DEFAULT 'default'",
+        );
+        add_column_if_missing(
+            conn,
+            "memories",
+            "visibility",
+            "TEXT NOT NULL DEFAULT 'global'",
+        );
+        add_column_if_missing(conn, "memories", "scope", "TEXT");
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_memories_agent_visibility_scope
+                ON memories(agent_id, visibility, scope);
+             DROP INDEX IF EXISTS idx_memories_content_hash_unique;
+             DROP INDEX IF EXISTS idx_memories_content_hash;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
+                ON memories(content_hash, agent_id, IFNULL(scope, ''), visibility)
+                WHERE content_hash IS NOT NULL AND is_deleted = 0;",
+        )?;
     }
 
     Ok(())

@@ -2,6 +2,373 @@
 
 All notable changes to Signet are documented here.
 
+## [0.87.0] - 2026-03-30
+
+### Bug Fixes
+
+- **worker**: exclude exhausted jobs from watchdog stall detector query (#339) (#409)
+
+
+## [0.86.4] - 2026-03-30
+
+### Features
+
+- MCP CLI bridge, invocation tracking, and analytics (Phase 1) (#407)
+
+
+## [0.86.3] - 2026-03-30
+
+### Bug Fixes
+
+- **oh-my-pi**: persist hidden Signet recall as agent messages (#404)
+
+
+## [0.86.2] - 2026-03-29
+
+### Bug Fixes
+
+- extraction-model reranker can synthesize recall summary (#402)
+
+
+## [0.86.1] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: harden dogfood runtime and MCP surfaces (#403)
+
+
+## [0.86.0] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: harden pipeline parsers and skill reconciler idempotency (#401)
+
+
+## [0.85.5] - 2026-03-29
+
+### Features
+
+- **memory**: derive MEMORY.md from canonical lineage (#399)
+
+
+## [0.85.3] - 2026-03-29
+
+### Bug Fixes
+
+- **pipeline**: harden dependency prompt auditability (#397)
+
+
+## [0.85.2] - 2026-03-29
+
+### Bug Fixes
+
+- **core**: align Signet prompt with identity stewardship (#398)
+
+
+## [0.85.1] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: preserve reranker score calibration + gate low-confidence prompt recalls (#396)
+
+
+## [0.85.0] - 2026-03-29
+
+### Bug Fixes
+
+- distinguish session-start timeouts from offline fallback (#395)
+
+
+## [0.84.2] - 2026-03-29
+
+### Features
+
+- add GitHub Projects sync for spec pipeline kanban
+
+### Docs
+
+- add link to memscore in benchmarking documentation
+- add oh my pi connector to readme
+
+
+## [0.84.1] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: populate content_hash in summary facts, backfill write-back, exhausted job recovery (#372)
+
+
+## [0.84.0] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon-rs**: parity for PR #372 -- startup recovery + content_hash notes
+
+
+## [0.83.0] - 2026-03-29
+
+### Features
+
+- **oh-my-pi**: add Oh My Pi support (#386)
+
+
+## [0.82.7] - 2026-03-29
+
+### Features
+
+- **dashboard**: ontology constellation view (#393)
+
+
+## [0.82.6] - 2026-03-29
+
+### Bug Fixes
+
+- **ci**: replace mapfile for macOS-compatible release uploads (#392)
+
+
+## [0.82.5] - 2026-03-29
+
+### Bug Fixes
+
+- **daemon**: prototype DP-19 adaptive write gate with scoped guards (#380)
+- **tray**: unblock mac self-signed CI and prefer bundled linux daemon (#388)
+
+
+## [0.82.4] - 2026-03-28
+
+### Bug Fixes
+
+- **tray**: resolve macOS bundled-daemon path compile regression (#387)
+
+
+## [0.82.3] - 2026-03-28
+
+### Bug Fixes
+
+- **ci**: harden self-signed desktop signing on macOS and windows (#384)
+
+
+## [0.82.2] - 2026-03-28
+
+### Bug Fixes
+
+- **ci**: add self-signed desktop signing and arch package validation (#383)
+
+
+## [0.82.0] - 2026-03-28
+
+### Bug Fixes
+
+- **cli**: protect OpenClaw-linked workspaces from unprotected data loss (#378)
+
+
+## [0.81.2] - 2026-03-28
+
+### Features
+
+- **setup**: deployment-aware setup defaults + native embedding docs alignment (#363)
+
+### Bug Fixes
+
+- **daemon**: batch watcher identity sync to keep health responsive (#375)
+
+### Docs
+
+- add Groundswell implementation specs + PRD + SSM synthesis (#381)
+- **specs**: add Groundswell PRD and gap analyses for community knowledge graphs
+
+
+## [0.81.1] - 2026-03-28
+
+### Bug Fixes
+
+- **daemon**: persist extraction fallback status with provider parity (replaces #367) (#373)
+
+### Docs
+
+- add alcar2364 to contributors
+
+
+## [0.81.0] - 2026-03-28
+
+### Bug Fixes
+
+- **docker**: unblock post-merge smoke failures from #374 (#377)
+
+
+## [0.80.0] - 2026-03-27
+
+### Features
+
+- **docker**: add first-party self-hosting stack (#374)
+
+
+## [0.79.0] - 2026-03-27
+
+### Features
+
+- **pipeline**: add command extraction provider for summary worker control-plane path (#368)
+- **docker**: add first-party self-hosting stack (Compose + Caddy + token bootstrap) and GHCR image workflows
+
+### Docs
+
+- add Docker self-hosting quickstart and operations runbook updates
+
+## [0.78.4] - 2026-03-27
+
+### Features
+
+- **dashboard**: add configurable log ordering (#371)
+
+### Docs
+
+- add first-PR guide for new contributors
+- **research**: add agent loop comparison across Forge, Codex, Hermes
+
+
+## [0.78.3] - 2026-03-27
+
+### Bug Fixes
+
+- **openclaw**: type-safe hooks, mid-session extraction, clean recall (#369)
+
+### Docs
+
+- add ddasgupta4 to contributors
+
+
+## [0.78.2] - 2026-03-27
+
+### Bug Fixes
+
+- **daemon**: stop workspace AGENTS.md sync watcher loop (#366)
+
+### Refactoring
+
+- **dashboard**: stabilize IA and gate experimental surfaces (#364)
+
+
+## [0.78.1] - 2026-03-27
+
+### Bug Fixes
+
+- **update**: verify installed version after install (#365)
+
+
+## [0.78.0] - 2026-03-27
+
+### Bug Fixes
+
+- **daemon**: add prompt-submit success telemetry on all success paths (#360)
+
+
+## [0.77.7] - 2026-03-26
+
+### Features
+
+- **forge**: require explicit dev-warning acknowledgement on install and launch (#359)
+
+
+## [0.77.5] - 2026-03-26
+
+### Bug Fixes
+
+- force event-driven MEMORY.md refresh after summary/compaction (#349)
+
+
+## [0.77.4] - 2026-03-26
+
+### Bug Fixes
+
+- **memory**: close lossless working-memory runtime gaps (#344)
+
+
+## [0.77.3] - 2026-03-26
+
+### Bug Fixes
+
+- **daemon**: broaden macOS SQLite runtime discovery for sqlite-vec (#338)
+- **docs**: align Signet positioning around context selection (#342)
+
+
+## [0.77.1] - 2026-03-25
+
+### Bug Fixes
+
+- **cli**: recover stale daemon processes on restart (#333)
+
+
+## [0.77.0] - 2026-03-25
+
+### Bug Fixes
+
+- **daemon**: keep startup recovery responsive on large databases (#332)
+
+
+## [0.76.6] - 2026-03-25
+
+### Features
+
+- **pipeline**: add live pause controls (#329)
+
+
+## [0.76.5] - 2026-03-25
+
+### Bug Fixes
+
+- recover stuck processing summary_jobs on startup + fix embed backfill infinite cycle (#319)
+
+
+## [0.76.2] - 2026-03-24
+
+### Bug Fixes
+
+- **memory**: raise contradiction timeout and guard embedding tracker null hashes
+
+
+## [0.76.0] - 2026-03-24
+
+### Bug Fixes
+
+- wire agent_id and visibility through memory write and recall (#317)
+
+### Docs
+
+- spec and index for sub-agent context continuity (#315)
+
+
+## [0.75.3] - 2026-03-24
+
+### Features
+
+- multi-agent support — scoped identity, memory, and OpenClaw routing (#316)
+
+
+## [0.75.2] - 2026-03-24
+
+### Bug Fixes
+
+- session expiry, hooks config, dead-memory API, openclaw health (#295)
+
+
+## [0.75.1] - 2026-03-24
+
+### Bug Fixes
+
+- **daemon**: graceful SIGTERM shutdown (#307)
+
+
+## [0.75.0] - 2026-03-24
+
+### Bug Fixes
+
+- complete DP-9 path feedback propagation pipeline (#310)
+
+### Docs
+
+- competitive systems research — 3-repo analysis with integration contracts (#309)
+
+
 ## [0.74.1] - 2026-03-23
 
 ### Features

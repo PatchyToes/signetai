@@ -2,14 +2,19 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkbox, confirm, input, select } from "@inquirer/prompts";
 import { OpenClawConnector } from "@signet/connector-openclaw";
-import { NETWORK_MODES, type NetworkMode, type SetupDetection, parseSimpleYaml, readNetworkMode } from "@signet/core";
+import { NETWORK_MODES, type NetworkMode, parseSimpleYaml, readNetworkMode } from "@signet/core";
 import chalk from "chalk";
 import open from "open";
 import ora from "ora";
+import { managedForgeInstallSupportedOnCurrentPlatform } from "./forge.js";
 import { runFreshSetup } from "./setup-fresh.js";
 import { runExistingSetupWizard } from "./setup-migrate.js";
+import { EXTRACTION_SAFETY_WARNING, defaultExtractionModel } from "./setup-pipeline.js";
+import { enforceSetupProtection, printSetupProtectionSummary } from "./setup-protection.js";
 import { hasCommand, preflightOllamaEmbedding, promptOpenAIEmbeddingModel } from "./setup-providers.js";
 import {
+	DEPLOYMENT_TYPE_CHOICES,
+	type DeploymentTypeChoice,
 	EMBEDDING_PROVIDER_CHOICES,
 	EXTRACTION_PROVIDER_CHOICES,
 	type EmbeddingProviderChoice,
@@ -18,9 +23,14 @@ import {
 	OPENCLAW_RUNTIME_CHOICES,
 	type OpenClawRuntimeChoice,
 	SETUP_HARNESS_CHOICES,
+	defaultEmbeddingProviderForDeployment,
+	defaultExtractionProviderForDeployment,
+	detectExtractionProviderFromAvailable,
 	detectPreferredOpenClawWorkspace,
 	failNonInteractiveSetup,
+	failSetupValidation,
 	formatDetectionSummary,
+	getDeploymentExtractionGuidance,
 	getEmbeddingDimensions,
 	hasExistingAgentState,
 	hasExistingIdentityFiles,
@@ -28,6 +38,7 @@ import {
 	readHarnesses,
 	readRecord,
 	readString,
+	resolveSetupExtractionProvider,
 } from "./setup-shared.js";
 import type { SetupDeps, SetupWizardOptions } from "./setup-types.js";
 
@@ -87,11 +98,44 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 	const existingMemory = readRecord(existingConfig.memory);
 	const existingPipeline = readRecord(existingMemory.pipelineV2);
 	const existingExtraction = readRecord(existingPipeline.extraction);
+	const rawDeploymentType = deps.normalizeStringValue(options.deploymentType);
+	const requestedDeploymentType = deps.normalizeChoice(rawDeploymentType, DEPLOYMENT_TYPE_CHOICES);
+	const rawEmbeddingProvider = deps.normalizeStringValue(options.embeddingProvider);
+	const requestedEmbeddingProvider = deps.normalizeChoice(rawEmbeddingProvider, EMBEDDING_PROVIDER_CHOICES);
+	const rawExtractionProvider = deps.normalizeStringValue(options.extractionProvider);
+	const requestedExtractionProvider = deps.normalizeChoice(rawExtractionProvider, EXTRACTION_PROVIDER_CHOICES);
 	const existingName = readString(existingConfig.name) ?? readString(existingAgent.name) ?? "My Agent";
 	const existingDesc =
 		readString(existingConfig.description) ?? readString(existingAgent.description) ?? "Personal AI assistant";
 	const existingHarnesses = readHarnesses(existingConfig.harnesses);
+	const normalizedExistingHarnesses = normalizeHarnessList(existingHarnesses, deps);
 	const existingNetworkMode = readNetworkMode(existingConfig);
+	const hasClaudeCommand = hasCommand("claude");
+	const hasCodexCommand = hasCommand("codex");
+	const hasOllamaCommand = hasCommand("ollama");
+	const hasOpenCodeCommand = hasCommand("opencode");
+	const availableToolExtractionProviders: ExtractionProviderChoice[] = [];
+	if (hasClaudeCommand) availableToolExtractionProviders.push("claude-code");
+	if (hasCodexCommand) availableToolExtractionProviders.push("codex");
+	if (hasOllamaCommand) availableToolExtractionProviders.push("ollama");
+	if (hasOpenCodeCommand) availableToolExtractionProviders.push("opencode");
+	const detectedProvider = detectExtractionProviderFromAvailable(availableToolExtractionProviders);
+
+	if (rawDeploymentType && !requestedDeploymentType) {
+		failSetupValidation(
+			`Unknown --deployment-type value: ${rawDeploymentType}. Valid choices: ${DEPLOYMENT_TYPE_CHOICES.join(", ")}.`,
+		);
+	}
+	if (rawEmbeddingProvider && !requestedEmbeddingProvider) {
+		failSetupValidation(
+			`Unknown --embedding-provider value: ${rawEmbeddingProvider}. Valid choices: ${EMBEDDING_PROVIDER_CHOICES.join(", ")}.`,
+		);
+	}
+	if (rawExtractionProvider && !requestedExtractionProvider) {
+		failSetupValidation(
+			`Unknown --extraction-provider value: ${rawExtractionProvider}. Valid choices: ${EXTRACTION_PROVIDER_CHOICES.join(", ")}.`,
+		);
+	}
 
 	if (existing.agentsDir && existing.memoryDb) {
 		console.log(chalk.green("  ✓ Existing Signet installation detected"));
@@ -99,6 +143,13 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		console.log();
 
 		if (nonInteractive) {
+			const protection = await enforceSetupProtection({
+				basePath,
+				nonInteractive: true,
+				allowUnprotectedWorkspace: options.allowUnprotectedWorkspace === true,
+				createLocalBackup: options.createLocalBackup === true,
+			});
+
 			const running = await deps.isDaemonRunning();
 			if (!running) {
 				const spinner = ora("Starting daemon...").start();
@@ -114,6 +165,7 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				await open(`http://localhost:${deps.DEFAULT_PORT}`);
 			}
 
+			printSetupProtectionSummary(protection);
 			return;
 		}
 
@@ -176,23 +228,31 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		console.log();
 
 		if (nonInteractive) {
-			const migrationEmbeddingProvider = deps.normalizeChoice(options.embeddingProvider, EMBEDDING_PROVIDER_CHOICES);
-			const migrationExtractionProvider = deps.normalizeChoice(options.extractionProvider, EXTRACTION_PROVIDER_CHOICES);
-			if (!migrationEmbeddingProvider) {
-				failNonInteractiveSetup(
-					"Non-interactive setup requires --embedding-provider (native, ollama, openai, or none).",
-				);
-			}
-			if (!migrationExtractionProvider) {
-				failNonInteractiveSetup(
-					"Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, openrouter, or none).",
-				);
-			}
+			const deploymentType: DeploymentTypeChoice = requestedDeploymentType ?? "local";
+			const existingEmbeddingProvider = deps.normalizeChoice(existingEmbedding.provider, EMBEDDING_PROVIDER_CHOICES);
+			const existingExtractionProvider =
+				deps.normalizeChoice(existingPipeline.extractionProvider, EXTRACTION_PROVIDER_CHOICES) ||
+				deps.normalizeChoice(existingExtraction.provider, EXTRACTION_PROVIDER_CHOICES);
+			const migrationEmbeddingProvider =
+				requestedEmbeddingProvider ??
+				existingEmbeddingProvider ??
+				defaultEmbeddingProviderForDeployment(deploymentType);
+			const migrationExtractionProvider = resolveSetupExtractionProvider({
+				deploymentType,
+				requestedProvider: requestedExtractionProvider,
+				providerFromConfig: existingExtractionProvider,
+				preserveExisting: true,
+				detectedProvider,
+				availableProviders: availableToolExtractionProviders,
+				preferredHarnesses: normalizedExistingHarnesses,
+			});
 
 			await runExistingSetupWizard(basePath, existing, existingConfig, deps, {
 				nonInteractive: true,
 				openDashboard: options.openDashboard === true,
 				skipGit: options.skipGit === true,
+				allowUnprotectedWorkspace: options.allowUnprotectedWorkspace === true,
+				createLocalBackup: options.createLocalBackup === true,
 				embeddingProvider: migrationEmbeddingProvider,
 				embeddingModel: deps.normalizeStringValue(options.embeddingModel) || undefined,
 				extractionProvider: migrationExtractionProvider,
@@ -227,7 +287,57 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				return;
 			}
 		} else {
-			await runExistingSetupWizard(basePath, existing, existingConfig, deps);
+			console.log();
+			const deploymentType =
+				requestedDeploymentType ??
+				(await select({
+					message: "Where is Signet running?",
+					choices: [
+						{ value: "local", name: "Local machine (dev / personal)" },
+						{ value: "vps", name: "VPS or cloud server (shared / constrained resources)" },
+						{ value: "server", name: "Self-hosted server (dedicated hardware)" },
+					],
+					default: "local",
+				}));
+			if (requestedDeploymentType) {
+				console.log(chalk.dim(`  Using deployment type from CLI: ${requestedDeploymentType}`));
+			}
+			console.log();
+			console.log(chalk.cyan("  Deployment guidance:"));
+			for (const line of getDeploymentExtractionGuidance(deploymentType)) {
+				console.log(chalk.dim(`    ${line}`));
+			}
+			console.log();
+
+			const existingEmbeddingProvider = deps.normalizeChoice(existingEmbedding.provider, EMBEDDING_PROVIDER_CHOICES);
+			const existingExtractionProvider =
+				deps.normalizeChoice(existingPipeline.extractionProvider, EXTRACTION_PROVIDER_CHOICES) ||
+				deps.normalizeChoice(existingExtraction.provider, EXTRACTION_PROVIDER_CHOICES);
+			const migrationEmbeddingProvider =
+				requestedEmbeddingProvider ??
+				existingEmbeddingProvider ??
+				defaultEmbeddingProviderForDeployment(deploymentType);
+			const migrationExtractionProvider = resolveSetupExtractionProvider({
+				deploymentType,
+				requestedProvider: requestedExtractionProvider,
+				providerFromConfig: existingExtractionProvider,
+				preserveExisting: true,
+				detectedProvider,
+				availableProviders: availableToolExtractionProviders,
+				preferredHarnesses: normalizedExistingHarnesses,
+			});
+
+			await runExistingSetupWizard(basePath, existing, existingConfig, deps, {
+				allowUnprotectedWorkspace: false,
+				createLocalBackup: false,
+				embeddingProvider: migrationEmbeddingProvider,
+				embeddingModel: deps.normalizeStringValue(existingEmbedding.model) || undefined,
+				extractionProvider: migrationExtractionProvider,
+				extractionModel:
+					deps.normalizeStringValue(existingPipeline.extractionModel) ||
+					deps.normalizeStringValue(existingExtraction.model) ||
+					undefined,
+			});
 			return;
 		}
 	} else {
@@ -265,9 +375,19 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		{ value: "codex", name: "Codex", checked: existingHarnesses.includes("codex") },
 		{ value: "opencode", name: "OpenCode", checked: existingHarnesses.includes("opencode") },
 		{ value: "openclaw", name: "OpenClaw", checked: existingHarnesses.includes("openclaw") },
+		{ value: "oh-my-pi", name: "Oh My Pi", checked: existingHarnesses.includes("oh-my-pi") },
+		{
+			value: "forge",
+			name: "Forge (native Signet harness)",
+			checked: existingHarnesses.includes("forge"),
+			disabled:
+				!existing.harnesses.forge && !managedForgeInstallSupportedOnCurrentPlatform()
+					? "managed install unavailable on this platform; install Forge separately first"
+					: false,
+		},
 	];
 
-	let harnesses: string[] = [];
+	let harnesses: HarnessChoice[] = [];
 	if (nonInteractive) {
 		const rawParts = (options.harness ?? []).flatMap((value) =>
 			value
@@ -291,17 +411,29 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		}
 	} else {
 		console.log();
-		harnesses = await checkbox({
+		const selectedHarnesses = await checkbox({
 			message: "Which AI platforms do you use?",
 			choices: harnessChoices,
 		});
+		harnesses = normalizeHarnessList(selectedHarnesses, deps);
+	}
+
+	if (harnesses.includes("forge") && !existing.harnesses.forge && !managedForgeInstallSupportedOnCurrentPlatform()) {
+		const message =
+			"Forge selected, but Signet-managed Forge binaries are only available on macOS/Linux arm64/x64. Install Forge separately first, then rerun setup.";
+		if (nonInteractive) {
+			failNonInteractiveSetup(message);
+		}
+		throw new Error(message);
 	}
 
 	let configureOpenClawWs = false;
 	let openclawRuntimePath: OpenClawRuntimeChoice = "plugin";
+	let openclawConfigCount = 0;
 	if (harnesses.includes("openclaw")) {
 		const connector = new OpenClawConnector();
 		const existingConfigs = connector.getDiscoveredConfigPaths();
+		openclawConfigCount = existingConfigs.length;
 
 		if (nonInteractive) {
 			configureOpenClawWs = options.configureOpenclawWorkspace === true && existingConfigs.length > 0;
@@ -310,7 +442,7 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 			if (existingConfigs.length > 0) {
 				console.log();
 				configureOpenClawWs = await confirm({
-					message: `Set OpenClaw workspace to ${basePath} in ${existingConfigs.length} config file(s)?`,
+					message: `Set OpenClaw workspace to ${basePath} in ${existingConfigs.length} config file(s)? This can be destructive on OpenClaw uninstall unless backups are configured.`,
 					default: true,
 				});
 			}
@@ -366,23 +498,31 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		});
 	}
 
-	const requestedEmbeddingProvider = deps.normalizeChoice(options.embeddingProvider, EMBEDDING_PROVIDER_CHOICES);
-	const requestedExtractionProvider = deps.normalizeChoice(options.extractionProvider, EXTRACTION_PROVIDER_CHOICES);
-
-	if (nonInteractive && !requestedEmbeddingProvider) {
-		failNonInteractiveSetup("Non-interactive setup requires --embedding-provider (native, ollama, openai, or none).");
-	}
-
-	if (nonInteractive && !requestedExtractionProvider) {
-		failNonInteractiveSetup(
-			"Non-interactive setup requires --extraction-provider (claude-code, codex, ollama, opencode, openrouter, or none).",
-		);
+	let deploymentType: DeploymentTypeChoice;
+	if (nonInteractive) {
+		deploymentType = requestedDeploymentType ?? "local";
+	} else if (requestedDeploymentType) {
+		deploymentType = requestedDeploymentType;
+		console.log();
+		console.log(chalk.dim(`  Using deployment type from CLI: ${requestedDeploymentType}`));
+	} else {
+		console.log();
+		deploymentType = await select({
+			message: "Where is Signet running?",
+			choices: [
+				{ value: "local", name: "Local machine (dev / personal)" },
+				{ value: "vps", name: "VPS or cloud server (shared / constrained resources)" },
+				{ value: "server", name: "Self-hosted server (dedicated hardware)" },
+			],
+			default: "local",
+		});
 	}
 
 	let embeddingProvider: EmbeddingProviderChoice;
 	if (nonInteractive) {
 		const providerFromConfig = deps.normalizeChoice(existingEmbedding.provider, EMBEDDING_PROVIDER_CHOICES);
-		embeddingProvider = requestedEmbeddingProvider ?? providerFromConfig ?? "none";
+		embeddingProvider =
+			requestedEmbeddingProvider ?? providerFromConfig ?? defaultEmbeddingProviderForDeployment(deploymentType);
 	} else {
 		console.log();
 		embeddingProvider = await select({
@@ -455,53 +595,61 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				],
 			});
 
-	const detectedProvider: ExtractionProviderChoice = hasCommand("claude")
-		? "claude-code"
-		: hasCommand("codex")
-			? "codex"
-			: hasCommand("opencode")
-				? "opencode"
-				: deps.normalizeStringValue(process.env.OPENROUTER_API_KEY)
-					? "openrouter"
-					: hasCommand("ollama")
-						? "ollama"
-						: "none";
-
 	let extractionProvider: ExtractionProviderChoice;
 	if (nonInteractive) {
 		const providerFromConfig =
 			deps.normalizeChoice(existingPipeline.extractionProvider, EXTRACTION_PROVIDER_CHOICES) ||
 			deps.normalizeChoice(existingExtraction.provider, EXTRACTION_PROVIDER_CHOICES);
-		extractionProvider = requestedExtractionProvider ?? providerFromConfig ?? detectedProvider;
+		extractionProvider = resolveSetupExtractionProvider({
+			deploymentType,
+			requestedProvider: requestedExtractionProvider,
+			providerFromConfig,
+			preserveExisting: false,
+			detectedProvider,
+			availableProviders: availableToolExtractionProviders,
+			preferredHarnesses: harnesses,
+		});
 	} else {
+		console.log();
+		console.log(chalk.cyan("  Deployment guidance:"));
+		for (const line of getDeploymentExtractionGuidance(deploymentType)) {
+			console.log(chalk.dim(`    ${line}`));
+		}
+		console.log();
+		console.log(chalk.yellow(`  Warning: ${EXTRACTION_SAFETY_WARNING}`));
 		console.log();
 		const choices = [
 			{
 				value: "claude-code",
-				name: `Claude Code (uses your Claude subscription via CLI)${detectedProvider === "claude-code" ? " — detected" : ""}`,
+				name: `Claude Code (Haiku, recommended if you already have Pro/Max)${detectedProvider === "claude-code" ? " — detected" : ""}`,
 			},
 			{
 				value: "codex",
-				name: `Codex (uses your OpenAI Codex CLI locally)${detectedProvider === "codex" ? " — detected" : ""}`,
-			},
-			{
-				value: "opencode",
-				name: `OpenCode (uses the OpenCode CLI or local server)${detectedProvider === "opencode" ? " — detected" : ""}`,
-			},
-			{
-				value: "openrouter",
-				name: `OpenRouter (cloud API, requires OPENROUTER_API_KEY)${detectedProvider === "openrouter" ? " — detected" : ""}`,
+				name: `Codex (GPT Mini, recommended if you already have Pro/Max)${detectedProvider === "codex" ? " — detected" : ""}`,
 			},
 			{
 				value: "ollama",
-				name: `Ollama (local, requires running Ollama server)${detectedProvider === "ollama" ? " — detected" : ""}`,
+				name: `Ollama (local, qwen3:4b minimum)${detectedProvider === "ollama" ? " — detected" : ""}`,
 			},
-			{ value: "none", name: "Skip extraction pipeline" },
+			{ value: "none", name: "Disable extraction pipeline" },
+			{
+				value: "opencode",
+				name: `OpenCode (advanced, can route to paid APIs)${detectedProvider === "opencode" ? " — detected" : ""}`,
+			},
+			{
+				value: "openrouter",
+				name: "OpenRouter (cloud API, billed usage, expensive if left running)",
+			},
 		];
 		extractionProvider = await select({
 			message: "Memory extraction provider (analyzes conversations):",
 			choices,
-			default: detectedProvider,
+			default: defaultExtractionProviderForDeployment(
+				deploymentType,
+				detectedProvider,
+				availableToolExtractionProviders,
+				harnesses,
+			),
 		});
 	}
 
@@ -512,7 +660,7 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				deps.normalizeStringValue(options.extractionModel) ||
 				deps.normalizeStringValue(existingPipeline.extractionModel) ||
 				deps.normalizeStringValue(existingExtraction.model) ||
-				"haiku";
+				defaultExtractionModel("claude-code");
 		} else {
 			console.log();
 			extractionModel = await select({
@@ -529,15 +677,15 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				deps.normalizeStringValue(options.extractionModel) ||
 				deps.normalizeStringValue(existingPipeline.extractionModel) ||
 				deps.normalizeStringValue(existingExtraction.model) ||
-				"gpt-5.3-codex";
+				defaultExtractionModel("codex");
 		} else {
 			console.log();
 			extractionModel = await select({
 				message: "Which Codex model for extraction?",
 				choices: [
-					{ value: "gpt-5.3-codex", name: "gpt-5.3-codex (recommended)" },
+					{ value: "gpt-5-codex-mini", name: "gpt-5-codex-mini (GPT Mini, recommended)" },
+					{ value: "gpt-5.3-codex", name: "gpt-5.3-codex (higher usage)" },
 					{ value: "gpt-5-codex", name: "gpt-5-codex (stable fallback)" },
-					{ value: "gpt-5-codex-mini", name: "gpt-5-codex-mini (faster, lighter)" },
 				],
 			});
 		}
@@ -565,7 +713,7 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				deps.normalizeStringValue(options.extractionModel) ||
 				deps.normalizeStringValue(existingPipeline.extractionModel) ||
 				deps.normalizeStringValue(existingExtraction.model) ||
-				"openai/gpt-4o-mini";
+				defaultExtractionModel("openrouter");
 		} else {
 			console.log();
 			extractionModel = await select({
@@ -584,14 +732,14 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 				deps.normalizeStringValue(options.extractionModel) ||
 				deps.normalizeStringValue(existingPipeline.extractionModel) ||
 				deps.normalizeStringValue(existingExtraction.model) ||
-				"glm-4.7-flash";
+				defaultExtractionModel("ollama");
 		} else {
 			console.log();
 			extractionModel = await select({
 				message: "Which Ollama model for extraction?",
 				choices: [
-					{ value: "glm-4.7-flash", name: "glm-4.7-flash (good quality, recommended)" },
-					{ value: "qwen3:4b", name: "qwen3:4b (lighter, faster)" },
+					{ value: "qwen3:4b", name: "qwen3:4b (minimum recommended local model)" },
+					{ value: "glm-4.7-flash", name: "glm-4.7-flash (alternative)" },
 					{ value: "llama3", name: "llama3 (general purpose)" },
 				],
 			});
@@ -670,6 +818,7 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		harnesses,
 		openclawRuntimePath,
 		configureOpenClawWs,
+		openclawConfigCount,
 		embeddingProvider,
 		embeddingModel,
 		embeddingDimensions,
@@ -684,6 +833,8 @@ export async function setupWizard(options: SetupWizardOptions, deps: SetupDeps):
 		existingAgentsDir: existing.agentsDir,
 		nonInteractive,
 		openDashboard: options.openDashboard === true,
+		allowUnprotectedWorkspace: options.allowUnprotectedWorkspace === true,
+		createLocalBackup: options.createLocalBackup === true,
 	};
 
 	await runFreshSetup(cfg, deps);

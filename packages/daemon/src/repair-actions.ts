@@ -16,9 +16,11 @@ import {
 	syncVecInsert,
 	vectorToBlob,
 } from "./db-helpers";
+import { type UnembeddedRow, countUnembeddedMemories, listUnembeddedMemories } from "./embedding-coverage";
 import { logger } from "./logger";
 import type { EmbeddingConfig } from "./memory-config";
 import type { PipelineV2Config } from "./memory-config";
+import { recoverStaleLeases } from "./pipeline/stale-leases";
 import { insertHistoryEvent } from "./transactions";
 
 // ---------------------------------------------------------------------------
@@ -295,25 +297,25 @@ export function releaseStaleLeases(
 
 	const cutoff = new Date(Date.now() - cfg.worker.leaseTimeoutMs).toISOString();
 
-	const affected = accessor.withWriteTx((db) => {
+	const result = accessor.withWriteTx((db) => {
 		const now = new Date().toISOString();
-		const result = db
-			.prepare(
-				`UPDATE memory_jobs
-				 SET status = 'pending', leased_at = NULL, updated_at = ?
-				 WHERE status = 'leased' AND leased_at < ?`,
-			)
-			.run(now, cutoff);
-
-		const count = countChanges(result);
-		const msg = `released ${count} stale lease(s) back to pending`;
-		writeRepairAudit(db, action, ctx, count, msg);
-		return count;
+		const recovered = recoverStaleLeases(db, { cutoff, now });
+		const msg =
+			recovered.dead > 0
+				? `released ${recovered.pending} stale lease(s) back to pending and dead-lettered ${recovered.dead} exhausted job(s)`
+				: `released ${recovered.pending} stale lease(s) back to pending`;
+		writeRepairAudit(db, action, ctx, recovered.total, msg);
+		return {
+			msg,
+			recovered,
+		};
 	});
 
 	limiter.record(action);
 	logger.info("pipeline", "repair: released stale leases", {
-		affected,
+		affected: result.recovered.total,
+		pending: result.recovered.pending,
+		dead: result.recovered.dead,
 		cutoff,
 		actor: ctx.actor,
 		reason: ctx.reason,
@@ -322,8 +324,8 @@ export function releaseStaleLeases(
 	return {
 		action,
 		success: true,
-		affected,
-		message: `released ${affected} stale lease(s) back to pending`,
+		affected: result.recovered.total,
+		message: result.msg,
 	};
 }
 
@@ -468,17 +470,8 @@ export interface EmbeddingGapStats {
 export function getEmbeddingGapStats(accessor: DbAccessor): EmbeddingGapStats {
 	return accessor.withReadDb((db) => {
 		const totalRow = db.prepare("SELECT COUNT(*) as n FROM memories WHERE is_deleted = 0").get() as { n: number };
-		const unembeddedRow = db
-			.prepare(
-				`SELECT COUNT(*) as n FROM memories m
-				 LEFT JOIN embeddings e
-				   ON e.source_type = 'memory' AND e.source_id = m.id
-				 WHERE m.is_deleted = 0 AND e.id IS NULL`,
-			)
-			.get() as { n: number };
-
 		const total = totalRow.n;
-		const unembedded = unembeddedRow.n;
+		const unembedded = countUnembeddedMemories(db);
 		const pct = total > 0 ? ((total - unembedded) / total) * 100 : 100;
 
 		return {
@@ -495,12 +488,6 @@ export function getEmbeddingGapStats(accessor: DbAccessor): EmbeddingGapStats {
 
 const DEFAULT_REEMBED_BATCH = 50;
 
-interface UnembeddedMemory {
-	readonly id: string;
-	readonly content: string;
-	readonly content_hash: string | null;
-}
-
 interface ReembedBatchOutcome {
 	readonly selected: number;
 	readonly written: number;
@@ -516,17 +503,7 @@ async function reembedMissingMemoriesBatch(
 	batchSize: number,
 ): Promise<ReembedBatchOutcome> {
 	const unembedded = accessor.withReadDb((db) => {
-		return db
-			.prepare(
-				`SELECT m.id, m.content, m.content_hash
-				 FROM memories m
-				 LEFT JOIN embeddings e
-				   ON e.source_type = 'memory' AND e.source_id = m.id
-				 WHERE m.is_deleted = 0 AND e.id IS NULL
-				 ORDER BY m.created_at ASC
-				 LIMIT ?`,
-			)
-			.all(batchSize) as UnembeddedMemory[];
+		return listUnembeddedMemories(db, batchSize) as UnembeddedRow[];
 	});
 
 	if (unembedded.length === 0) {
@@ -538,7 +515,7 @@ async function reembedMissingMemoriesBatch(
 	}
 
 	const results: Array<{
-		memory: UnembeddedMemory;
+		memory: UnembeddedRow;
 		vector: readonly number[];
 	}> = [];
 
@@ -567,12 +544,32 @@ async function reembedMissingMemoriesBatch(
 	const written = accessor.withWriteTx((db) => {
 		const now = new Date().toISOString();
 		let count = 0;
+		// Hoisted outside loop (pattern: db.prepare inside a loop is flagged)
+		const writeHash = db.prepare("UPDATE memories SET content_hash = ? WHERE id = ? AND content_hash IS NULL");
+		// Guard against unique constraint violation: idx_memories_content_hash_unique
+		// is a partial unique index on (content_hash) WHERE content_hash IS NOT NULL AND is_deleted = 0.
+		// If another non-deleted memory already owns the same hash, writing it back would throw
+		// and abort the entire batch. Skip the write-back in that case -- the dedup worker
+		// will soft-delete the duplicate in a later pass.
+		const checkHash = db.prepare(
+			`SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0 AND id <> ? LIMIT 1`,
+		);
 
 		for (const { memory, vector } of results) {
 			const contentHash =
-				typeof memory.content_hash === "string" && memory.content_hash.trim().length > 0
-					? memory.content_hash
+				typeof memory.contentHash === "string" && memory.contentHash.trim().length > 0
+					? memory.contentHash
 					: normalizeAndHashContent(memory.content).contentHash;
+
+			// Write computed hash back to the memories row when it was NULL.
+			// Without this, the embedding-coverage queries can never use the
+			// content_hash match branch for these rows, so they keep showing up
+			// as unembedded and the backfill cycles indefinitely.
+			if (!memory.contentHash) {
+				const collision = checkHash.get(contentHash, memory.id) as { id: string } | undefined;
+				if (!collision) writeHash.run(contentHash, memory.id);
+			}
+
 			const embId = crypto.randomUUID();
 			const blob = vectorToBlob(vector);
 			syncVecDeleteBySourceExceptHash(db, "memory", memory.id, contentHash);
@@ -591,15 +588,14 @@ async function reembedMissingMemoriesBatch(
 					   vector = excluded.vector,
 					   dimensions = excluded.dimensions,
 					   source_type = excluded.source_type,
-					   source_id = excluded.source_id,
 					   chunk_text = excluded.chunk_text,
 					   created_at = excluded.created_at`,
 				)
 				.run(embId, contentHash, blob, vector.length, memory.id, memory.content, now);
 			// Resolve actual embedding ID (may differ from embId on conflict)
-			const actualRow = db
-				.prepare("SELECT id FROM embeddings WHERE content_hash = ?")
-				.get(contentHash) as { id: string } | undefined;
+			const actualRow = db.prepare("SELECT id FROM embeddings WHERE content_hash = ?").get(contentHash) as
+				| { id: string }
+				| undefined;
 			if (actualRow) {
 				syncVecInsert(db, actualRow.id, vector);
 				count++;
@@ -760,7 +756,8 @@ export async function reembedMissingMemories(
 // ---------------------------------------------------------------------------
 
 /**
- * Remove embeddings whose source memory is deleted or missing.
+ * Remove embeddings whose source memory is deleted or missing, unless the
+ * vector is still covering an active memory with the same content hash.
  * Syncs vec_embeddings to match.
  */
 export function cleanOrphanedEmbeddings(
@@ -786,8 +783,13 @@ export function cleanOrphanedEmbeddings(
 			.prepare(
 				`SELECT e.id FROM embeddings e
 				 LEFT JOIN memories m ON e.source_type = 'memory' AND e.source_id = m.id
+				 LEFT JOIN memories m2
+				   ON e.source_type = 'memory'
+				  AND e.content_hash = m2.content_hash
+				  AND m2.is_deleted = 0
 				 WHERE e.source_type = 'memory'
-				   AND (m.id IS NULL OR m.is_deleted = 1)`,
+				   AND (m.id IS NULL OR m.is_deleted = 1)
+				   AND m2.id IS NULL`,
 			)
 			.all() as Array<{ id: string }>;
 
@@ -1206,12 +1208,8 @@ export async function deduplicateMemories(
 	// Process exact hash clusters (scope-aware: only dedup within same scope)
 	for (const cluster of hashClusters) {
 		const removed = accessor.withWriteTx((db) => {
-			const scopeFilter = cluster.scope_key === "__NULL__"
-				? "AND scope IS NULL"
-				: "AND scope = ?";
-			const scopeArgs = cluster.scope_key === "__NULL__"
-				? []
-				: [cluster.scope_key];
+			const scopeFilter = cluster.scope_key === "__NULL__" ? "AND scope IS NULL" : "AND scope = ?";
+			const scopeArgs = cluster.scope_key === "__NULL__" ? [] : [cluster.scope_key];
 			const candidates = db
 				.prepare(
 					`SELECT id, content, content_hash, tags, importance,
@@ -1364,15 +1362,7 @@ async function findSemanticDuplicates(
 // Reclassify extracted entities via LLM
 // ---------------------------------------------------------------------------
 
-const VALID_ENTITY_TYPES = new Set([
-	"person",
-	"project",
-	"system",
-	"tool",
-	"concept",
-	"skill",
-	"task",
-]);
+const VALID_ENTITY_TYPES = new Set(["person", "project", "system", "tool", "concept", "skill", "task"]);
 
 const DEFAULT_RECLASSIFY_BATCH = 20;
 const MIN_RECLASSIFY_BATCH = 5;
@@ -1391,7 +1381,10 @@ interface ReclassifyEntry {
 
 function tryParseJsonArray(raw: string): unknown {
 	// Strip markdown fences if present
-	const stripped = raw.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
+	const stripped = raw
+		.replace(/^```(?:json)?\s*/m, "")
+		.replace(/```\s*$/m, "")
+		.trim();
 	try {
 		return JSON.parse(stripped);
 	} catch {
@@ -1460,9 +1453,7 @@ export async function reclassifyEntities(
 		};
 	}
 
-	const entityList = entities
-		.map((e, idx) => `${idx + 1}. ${e.canonical_name ?? e.name}`)
-		.join("\n");
+	const entityList = entities.map((e, idx) => `${idx + 1}. ${e.canonical_name ?? e.name}`).join("\n");
 
 	const prompt = `Classify each entity into one of these types: person, project, system, tool, concept, skill, task
 
@@ -1507,12 +1498,7 @@ Respond with ONLY a JSON array, no other text:
 	// Build a map of 1-based index -> validated type
 	const classifications = new Map<number, string>();
 	for (const entry of parsed) {
-		if (
-			typeof entry === "object" &&
-			entry !== null &&
-			"i" in entry &&
-			"type" in entry
-		) {
+		if (typeof entry === "object" && entry !== null && "i" in entry && "type" in entry) {
 			const rec = entry as Record<string, unknown>;
 			const idx = typeof rec.i === "number" ? rec.i : -1;
 			const entityType = typeof rec.type === "string" ? rec.type.toLowerCase().trim() : "";
@@ -1601,12 +1587,9 @@ export function pruneChunkGroupEntities(
 
 	const batchSize = options?.batchSize ?? 500;
 
-	const total = accessor.withReadDb((db) =>
-		(
-			db
-				.prepare("SELECT COUNT(*) as n FROM entities WHERE entity_type = 'chunk_group'")
-				.get() as { n: number }
-		).n,
+	const total = accessor.withReadDb(
+		(db) =>
+			(db.prepare("SELECT COUNT(*) as n FROM entities WHERE entity_type = 'chunk_group'").get() as { n: number }).n,
 	);
 
 	if (options?.dryRun) {
@@ -1619,9 +1602,9 @@ export function pruneChunkGroupEntities(
 	}
 
 	const affected = accessor.withWriteTx((db) => {
-		const ids = db
-			.prepare("SELECT id FROM entities WHERE entity_type = 'chunk_group' LIMIT ?")
-			.all(batchSize) as { id: string }[];
+		const ids = db.prepare("SELECT id FROM entities WHERE entity_type = 'chunk_group' LIMIT ?").all(batchSize) as {
+			id: string;
+		}[];
 		if (ids.length === 0) return 0;
 		const placeholders = ids.map(() => "?").join(",");
 		db.prepare(`DELETE FROM entities WHERE id IN (${placeholders})`).run(...ids.map((r) => r.id));
@@ -1660,10 +1643,11 @@ export function pruneSingletonExtractedEntities(
 	const batchSize = options?.batchSize ?? 200;
 	const maxMentions = options?.maxMentions ?? 1;
 
-	const candidates = accessor.withReadDb((db) =>
-		db
-			.prepare(
-				`SELECT e.id FROM entities e
+	const candidates = accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT e.id FROM entities e
 				 WHERE e.entity_type = 'extracted'
 				   AND e.mentions <= ?
 				   AND NOT EXISTS (SELECT 1 FROM entity_aspects WHERE entity_id = e.id LIMIT 1)
@@ -1683,8 +1667,8 @@ export function pruneSingletonExtractedEntities(
 				     LIMIT 1
 				   )
 				 LIMIT ?`,
-			)
-			.all(maxMentions, batchSize) as { id: string }[],
+				)
+				.all(maxMentions, batchSize) as { id: string }[],
 	);
 
 	if (options?.dryRun) {
@@ -1711,13 +1695,7 @@ export function pruneSingletonExtractedEntities(
 		).run(...ids, ...ids);
 		// Delete entities — cascades entity_aspects and entity_dependencies
 		db.prepare(`DELETE FROM entities WHERE id IN (${placeholders})`).run(...ids);
-		writeRepairAudit(
-			db,
-			action,
-			ctx,
-			ids.length,
-			`deleted ${ids.length} singleton extracted entities`,
-		);
+		writeRepairAudit(db, action, ctx, ids.length, `deleted ${ids.length} singleton extracted entities`);
 		return ids.length;
 	});
 
@@ -1758,10 +1736,11 @@ export function structuralBackfill(
 
 	const batchSize = options?.batchSize ?? 100;
 
-	const rows = accessor.withReadDb((db) =>
-		db
-			.prepare(
-				`SELECT m.id as memory_id, m.content,
+	const rows = accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT m.id as memory_id, m.content,
 				        e.id as entity_id, e.entity_type, e.canonical_name, e.agent_id
 				 FROM memories m
 				 JOIN memory_entity_mentions mem ON mem.memory_id = m.id
@@ -1771,15 +1750,15 @@ export function structuralBackfill(
 				   AND NOT EXISTS (SELECT 1 FROM entity_attributes WHERE memory_id = m.id LIMIT 1)
 				 GROUP BY m.id
 				 LIMIT ?`,
-			)
-			.all(batchSize) as Array<{
-			memory_id: string;
-			content: string;
-			entity_id: string;
-			entity_type: string;
-			canonical_name: string;
-		agent_id: string;
-		}>,
+				)
+				.all(batchSize) as Array<{
+				memory_id: string;
+				content: string;
+				entity_id: string;
+				entity_type: string;
+				canonical_name: string;
+				agent_id: string;
+			}>,
 	);
 
 	if (rows.length === 0 || options?.dryRun) {
@@ -1881,16 +1860,17 @@ export function backfillSkippedSessions(
 		return { action, success: true, affected: 0, message: "required tables not found" };
 	}
 
-	const skipped = accessor.withReadDb((db) =>
-		db
-			.prepare(
-				`SELECT sj.id FROM summary_jobs sj
+	const skipped = accessor.withReadDb(
+		(db) =>
+			db
+				.prepare(
+					`SELECT sj.id FROM summary_jobs sj
 				 LEFT JOIN session_summaries ss ON ss.session_key = sj.session_key
 				 WHERE sj.status = 'completed'
 				   AND ss.id IS NULL
 				 LIMIT ?`,
-			)
-			.all(limit) as Array<{ id: string }>,
+				)
+				.all(limit) as Array<{ id: string }>,
 	);
 
 	if (skipped.length === 0 || options?.dryRun) {
@@ -1932,4 +1912,106 @@ export function backfillSkippedSessions(
 		affected: count,
 		message: `re-enqueued ${count} skipped session(s) for extraction`,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Dead memory hygiene
+// ---------------------------------------------------------------------------
+
+export interface DeadMemory {
+	readonly id: string;
+	readonly content: string;
+	readonly confidence: number;
+	readonly last_accessed: string | null;
+	readonly importance: number;
+	readonly reason: "low_confidence" | "never_accessed" | "stale";
+}
+
+export const DEAD_MEMORY_DEFAULT_CONFIDENCE = 0.1;
+export const DEAD_MEMORY_DEFAULT_ACCESS_DAYS = 90;
+
+export interface DeadMemoryOpts {
+	/** Max confidence to flag as dead. Default: 0.10. */
+	readonly maxConfidence?: number;
+	/** Days since last access (or creation if never accessed) to flag as stale. Default: 90. */
+	readonly maxAccessDays?: number;
+	/** Max rows to return. Default: 200. */
+	readonly limit?: number;
+}
+
+/**
+ * Find memories that are candidates for deletion:
+ * - Low confidence (below threshold), OR
+ * - Never accessed and old, OR
+ * - Not accessed in maxAccessDays
+ *
+ * Never flags memories with importance > 0.8 regardless of other criteria.
+ */
+export function findDeadMemories(db: ReadDb, opts: DeadMemoryOpts = {}): DeadMemory[] {
+	const maxConf = opts.maxConfidence ?? DEAD_MEMORY_DEFAULT_CONFIDENCE;
+	const maxDays = opts.maxAccessDays ?? DEAD_MEMORY_DEFAULT_ACCESS_DAYS;
+	const limit = opts.limit ?? 200;
+
+	const rows = db
+		.prepare(
+			`SELECT id, content, confidence, last_accessed, importance
+			 FROM memories
+			 WHERE is_deleted = 0
+			   AND importance <= 0.8
+			   AND (
+			     confidence < ?
+			     OR (last_accessed IS NULL AND julianday('now') - julianday(created_at) > ?)
+			     OR (last_accessed IS NOT NULL AND julianday('now') - julianday(last_accessed) > ?)
+			   )
+			 ORDER BY confidence ASC, last_accessed ASC NULLS FIRST
+			 LIMIT ?`,
+		)
+		.all(maxConf, maxDays, maxDays, limit) as Array<{
+		id: string;
+		content: string;
+		confidence: number;
+		last_accessed: string | null;
+		importance: number;
+	}>;
+
+	return rows.map((row) => {
+		let reason: DeadMemory["reason"];
+		if (row.confidence < maxConf) {
+			reason = "low_confidence";
+		} else if (row.last_accessed === null) {
+			reason = "never_accessed";
+		} else {
+			reason = "stale";
+		}
+		return { ...row, reason };
+	});
+}
+
+/**
+ * Soft-delete a batch of memories by ID in a single transaction.
+ * Returns the number actually deleted (skips already-deleted).
+ */
+export function forgetDeadMemories(accessor: DbAccessor, ids: readonly string[]): number {
+	if (ids.length === 0) return 0;
+	const now = new Date().toISOString();
+	return accessor.withWriteTx((db) => {
+		const stmt = db.prepare("UPDATE memories SET is_deleted = 1, deleted_at = ? WHERE id = ? AND is_deleted = 0");
+		let total = 0;
+		for (const id of ids) {
+			total += countChanges(stmt.run(now, id));
+		}
+		writeRepairAudit(
+			db,
+			"forget-dead-memories",
+			{
+				actor: "api",
+				reason: "dead-memory hygiene",
+				actorType: "system",
+				requestId: null,
+			},
+			total,
+			`soft-deleted ${total} dead memories`,
+		);
+		return total;
+	});
 }

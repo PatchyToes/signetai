@@ -11,6 +11,9 @@ Contributing to Signet
 This guide is for developers contributing to the `signetai/` monorepo,
 the reference implementation of the Signet open standard.
 
+**New to git or GitHub?** Start with [Your First PR](./FIRST-PR.md),
+a step-by-step walkthrough of making your first contribution.
+
 Development Setup
 ---
 
@@ -69,9 +72,10 @@ pipeline]]. It runs in stages: extraction (`extraction.ts`, uses Ollama by
 default with `qwen3:4b`) → decision (`decision.ts`, write/update/skip) →
 optional graph operations → retention decay. The entrypoint is `worker.ts`;
 `provider.ts` wires up the stages. Config modes like `shadowMode` and
-`mutationsFrozen` are respected here.
+`mutationsFrozen` are respected here. For live prompt checks against local
+Ollama models, see `packages/daemon/src/pipeline/README.md`.
 
-**`packages/daemon/src/auth/`** handles ERC-8128 wallet-based [[auth]] for the
+**`packages/daemon/src/auth/`** handles token-based [[auth]] for the
 HTTP API. Key files: `middleware.ts` (Hono middleware), `tokens.ts` (token
 lifecycle), `policy.ts` (access rules), `rate-limiter.ts`.
 

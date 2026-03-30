@@ -4,8 +4,8 @@
  * Own your agent. Bring it anywhere.
  */
 
-import { spawnSync } from "child_process";
-import { createHash } from "crypto";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
@@ -22,12 +22,13 @@ import {
 	statSync,
 	symlinkSync,
 	writeFileSync,
-} from "fs";
-import { homedir, tmpdir } from "os";
-import { dirname, join, resolve as resolvePath } from "path";
-import { fileURLToPath } from "url";
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeCodeConnector } from "@signet/connector-claude-code";
 import { CodexConnector } from "@signet/connector-codex";
+import { OhMyPiConnector } from "@signet/connector-oh-my-pi";
 import { OpenClawConnector } from "@signet/connector-openclaw";
 import { OpenCodeConnector } from "@signet/connector-opencode";
 import {
@@ -40,44 +41,29 @@ import {
 	detectExistingSetup as detectExistingSetupCore,
 	formatYaml,
 	getGlobalInstallCommand,
-	resolveGlobalPackagePath,
 	getMissingIdentityFiles,
 	getSkillsRunnerCommand,
 	hasValidIdentity,
 	importMemoryLogs,
 	loadSqliteVec,
 	parseSimpleYaml,
+	readStaticIdentity,
+	resolveGlobalPackagePath,
 	resolvePrimaryPackageManager,
 	symlinkSkills,
-	readStaticIdentity,
 	unifySkills,
 } from "@signet/core";
 import chalk from "chalk";
 import { Command } from "commander";
 import ora from "ora";
-import {
-	type CondaInfo,
-	type PyenvInfo,
-	type PythonInfo,
-	checkZvecInstalled,
-	createCondaEnv,
-	createVenv,
-	detectBestPython,
-	detectConda,
-	detectPyenv,
-	detectSystemPython,
-	getCondaPython,
-	getPyenvPython,
-	installDeps,
-	installPyenvPython,
-	isZvecCompatible,
-} from "./python.js";
-import Database from "./sqlite.js";
 import { registerBrowseCommand } from "./browse.js";
+import { registerAgentCommands } from "./commands/agent.js";
 import { registerAppCommands } from "./commands/app.js";
 import { registerDaemonCommands } from "./commands/daemon.js";
+import { registerForgeCommands } from "./commands/forge.js";
 import { registerGitCommands } from "./commands/git.js";
 import { registerHookCommands } from "./commands/hook.js";
+import { registerMcpCommands } from "./commands/mcp.js";
 import { registerMemoryCommands } from "./commands/memory.js";
 import { registerPortableCommands } from "./commands/portable.js";
 import { registerSecretCommands } from "./commands/secret.js";
@@ -87,7 +73,17 @@ import { registerUpdateCommands } from "./commands/update.js";
 import { registerVectorCommands } from "./commands/vector.js";
 import { registerWorkspaceCommands } from "./commands/workspace.js";
 import { configureAgent } from "./features/configure.js";
-import { doRestart, doStart, doStop, launchDashboard, migrateSchema, showLogs } from "./features/daemon.js";
+import {
+	doPause,
+	doRestart,
+	doResume,
+	doStart,
+	doStop,
+	launchDashboard,
+	migrateSchema,
+	showLogs,
+} from "./features/daemon.js";
+import { doctorForge, installForge, showForgeStatus, updateForge } from "./features/forge.js";
 import { getStatusReport, showDoctor, showStatus } from "./features/health.js";
 import { importFromGitHub } from "./features/import.js";
 import { setupWizard } from "./features/setup.js";
@@ -100,11 +96,13 @@ import {
 	formatUptime,
 	getDaemonStatus,
 	getReachableDaemonUrls,
+	hasDaemonProcess,
 	isDaemonRunning,
 	sleep,
 	startDaemon,
 	stopDaemon,
 } from "./lib/runtime.js";
+import "./sqlite.js";
 
 // Template directory location (relative to built CLI)
 function getTemplatesDir() {
@@ -237,6 +235,11 @@ async function configureHarnessHooks(
 			await connector.install(basePath);
 			break;
 		}
+		case "oh-my-pi": {
+			const connector = new OhMyPiConnector();
+			await connector.install(basePath);
+			break;
+		}
 		case "openclaw": {
 			const connector = new OpenClawConnector();
 			const runtimePath = options?.openclawRuntimePath ?? connector.getConfiguredRuntimePath() ?? "plugin";
@@ -274,6 +277,11 @@ async function configureHarnessHooks(
 					}
 				}
 			}
+			break;
+		}
+		case "forge": {
+			// Forge is a first-party native harness managed as its own product.
+			// There are no hook/config patches to apply from the Signet CLI.
 			break;
 		}
 	}
@@ -1180,7 +1188,7 @@ program.hook("preAction", async (_thisCommand, actionCommand) => {
 	let current: Command | null = actionCommand;
 	let topLevelCommand = "";
 
-	while (current && current.parent) {
+	while (current?.parent) {
 		if (current.parent.name() === "signet") {
 			topLevelCommand = current.name();
 			break;
@@ -1220,6 +1228,7 @@ const daemonDeps = {
 	defaultPort: DEFAULT_PORT,
 	extractPathOption,
 	getDaemonStatus,
+	hasDaemonProcess,
 	isDaemonRunning,
 	normalizeAgentPath,
 	signetLogo,
@@ -1282,11 +1291,44 @@ registerAppCommands(program, {
 });
 
 registerDaemonCommands(program, {
+	doPause: (options) => doPause(options, daemonDeps),
 	doRestart: (options) => doRestart(options, daemonDeps),
+	doResume: (options) => doResume(options, daemonDeps),
 	doStart: (options) => doStart(options, daemonDeps),
 	doStop: (options) => doStop(options, daemonDeps),
 	showLogs: (options) => showLogs(options, daemonDeps),
 	showStatus: (options) => showStatus(options, healthDeps),
+});
+
+registerForgeCommands(program, {
+	doctorForge: (options) =>
+		doctorForge(options, {
+			agentsDir: AGENTS_DIR,
+			defaultPort: DEFAULT_PORT,
+			getTemplatesDir,
+			isDaemonRunning,
+		}),
+	installForge: (options) =>
+		installForge(options, {
+			agentsDir: AGENTS_DIR,
+			defaultPort: DEFAULT_PORT,
+			getTemplatesDir,
+			isDaemonRunning,
+		}),
+	showForgeStatus: (options) =>
+		showForgeStatus(options, {
+			agentsDir: AGENTS_DIR,
+			defaultPort: DEFAULT_PORT,
+			getTemplatesDir,
+			isDaemonRunning,
+		}),
+	updateForge: (options) =>
+		updateForge(options, {
+			agentsDir: AGENTS_DIR,
+			defaultPort: DEFAULT_PORT,
+			getTemplatesDir,
+			isDaemonRunning,
+		}),
 });
 
 // ============================================================================
@@ -1297,7 +1339,7 @@ async function ensureDaemonForSecrets(): Promise<boolean> {
 	return ensureDaemonRunning(isDaemonRunning);
 }
 
-const { fetchFromDaemon, secretApiCall } = createDaemonClient(DEFAULT_PORT);
+const { fetchFromDaemon, fetchDaemonResult, secretApiCall } = createDaemonClient(DEFAULT_PORT);
 const SKILLS_DIR = join(AGENTS_DIR, "skills");
 
 registerSecretCommands(program, {
@@ -1312,9 +1354,19 @@ registerSkillCommands(program, {
 	isDaemonRunning,
 });
 
+registerMcpCommands(program, {
+	fetchFromDaemon,
+	isDaemonRunning,
+});
+
 registerMemoryCommands(program, {
 	ensureDaemonForSecrets,
 	secretApiCall,
+});
+
+registerAgentCommands(program, {
+	AGENTS_DIR,
+	fetchFromDaemon,
 });
 
 registerPortableCommands(program, {
@@ -1331,7 +1383,7 @@ registerWorkspaceCommands(program, {
 
 registerHookCommands(program, {
 	AGENTS_DIR,
-	fetchFromDaemon,
+	fetchDaemonResult,
 	readStaticIdentity,
 });
 
@@ -1345,6 +1397,7 @@ registerUpdateCommands(program, {
 	fetchFromDaemon,
 	getTemplatesDir,
 	isOpenClawInstalled: () => new OpenClawConnector().isInstalled(),
+	isOhMyPiInstalled: () => new OhMyPiConnector().isInstalled(),
 	syncBuiltinSkills,
 });
 

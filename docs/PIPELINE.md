@@ -26,6 +26,10 @@ back into the memory store. This means the caller's raw content is never
 lost — it is always durably committed before any LLM call runs — and
 derived facts are layered on top rather than replacing the original.
 
+This is substrate work. The pipeline's job is to turn raw interaction
+data into cleaner, more structured material the rest of the system can
+use for retrieval, repair, and eventually learned context selection.
+
 The central constraint governing every design decision here is: **no LLM
 calls inside write-locked transactions.** SQLite write locks are exclusive,
 and a blocking HTTP call to Ollama inside one would stall the entire [[daemon]].
@@ -110,6 +114,11 @@ The decision stage evaluates each extracted fact independently against the
 existing memory store. For each fact, the engine retrieves the top-5
 candidate memories via hybrid search, then asks the LLM which of four
 actions to take: ADD, UPDATE, DELETE, or NONE.
+
+This stage is intentionally conservative. It is better understood as a
+proposal and curation layer than as autonomous semantic rewriting. Its
+output improves memory quality and auditability; it does not eliminate
+the need for downstream relevance learning.
 
 Candidate retrieval uses the same BM25 + vector hybrid search that powers
 recall. The BM25 leg queries `memories_fts` with the fact's content as the
@@ -524,10 +533,14 @@ Two implementations are shipped:
 
 **OllamaProvider** calls the Ollama HTTP API at `POST /api/generate` with
 `stream: false`. The default base URL is `http://localhost:11434` and the
-default model is `qwen3:4b`. Each `generate` call sets an `AbortController`
+default model is `qwen3:4b` (deprecated — see below). `nemotron-3-nano:4b` is the
+preferred local Ollama model going forward; Nemotron's superior reasoning produces
+better extraction results and `qwen3:4b` will be removed in a future update. Each `generate` call sets an `AbortController`
 timeout (default 45,000 ms) and throws a descriptive error on abort. HTTP
 errors surface the status code and the first 200 characters of the response
 body. The `available` check uses a 3-second timeout against `GET /api/tags`.
+For live prompt harness commands, see
+`packages/daemon/src/pipeline/README.md`.
 
 **ClaudeCodeProvider** invokes the Claude Code CLI as a subprocess:
 `claude -p <prompt> --model <model> --no-session-persistence --output-format text`.
@@ -562,8 +575,10 @@ is called in the summary worker. It builds comparison pairs from the session
 `predictor_comparisons`. The EMA health signal and drift detector are updated
 based on the session's NDCG@10 score.
 
-The predictor is disabled by default (`predictor.enabled: false`). When
-disabled, both hooks are no-ops and the baseline pipeline is unchanged.
+In the current config defaults, the predictor path is enabled, but it
+still fails open. During cold start, sidecar unavailability, or explicit
+`predictor.enabled: false`, both hooks fall back to baseline ordering and
+the baseline pipeline remains unchanged.
 
 
 Optional Reranking
@@ -585,6 +600,11 @@ The `noopReranker` pass-through is provided for testing. Custom providers
 implement the `RerankProvider` signature
 `(query, candidates, cfg) => Promise<RerankCandidate[]>` and can call any
 scoring backend.
+
+Set `reranker.useExtractionModel: true` to run reranking through the
+active extraction provider/model instead of the embedding reranker.
+When enabled, recall also prepends a short synthesized summary card
+grounded in the top recalled memories.
 
 ### Embedding-Based Reranker
 
@@ -897,6 +917,48 @@ response. This lets callers retrieve the full conversation context
 behind a recalled memory without a separate API call.
 
 
+Canonical Markdown Lineage and MEMORY.md Projection
+---
+
+Rolling history now has an explicit authority split.
+
+Canonical historical content lives as immutable markdown artifacts in
+`$SIGNET_WORKSPACE/memory/`:
+
+- `--transcript.md`
+- `--summary.md`
+- `--compaction.md`
+
+Each session also has one mutable `--manifest.md` file. The manifest is the
+only artifact that may gain new links after session end, such as a later
+`compaction_path`.
+
+`MEMORY.md` is no longer canonical history. It is a rebuildable projection over:
+
+- durable memory rows for the Tier 1 head
+- persisted thread heads plus temporal DAG state for Tier 2
+- canonical artifact frontmatter for the strict 30-day session ledger
+
+The renderer is programmatic. LLM output in this lane is limited to the single
+`memory_sentence` stored in summary and compaction frontmatter, with a
+deterministic fallback when the quality gate fails. The final `MEMORY.md`
+projection always includes:
+
+- `## Global Head (Tier 1)`
+- `## Thread Heads (Tier 2)`
+- `## Session Ledger (Last 30 Days)`
+- `## Open Threads`
+- `## Durable Notes & Constraints`
+- `## Temporal Index`
+
+Session-end jobs write canonical transcript artifacts immediately, then the
+summary worker writes the matching canonical summary artifact for normal
+`session_end` jobs. `compaction-complete` writes a canonical compaction
+artifact and backfills the session manifest. Mid-session
+`session-checkpoint-extract` jobs remain DB-native and only write checkpoint
+nodes into `session_summaries`.
+
+
 Decision Auto-Protection
 ---
 
@@ -948,17 +1010,43 @@ telemetryEnabled                    false
 
 ### Nested sub-objects and defaults
 
+Extraction safety note:
+
+- intended usage is Claude Code on Haiku, Codex CLI on GPT Mini with a
+  Pro/Max subscription, or local Ollama with at least `qwen3:4b`
+- set `provider: none` on a VPS if you do not want background
+  extraction
+- remote API extraction can accumulate extreme fees quickly
+  (`anthropic`, `openrouter`, or remote OpenCode routes)
+
 ```yaml
 extraction:
-  provider: claude-code          # "ollama" | "claude-code" | "opencode"
-  model: haiku
-  timeout: 45000                 # ms, range 5000–300000
+  provider: ollama               # "none" | "ollama" | "claude-code" | "codex" | "opencode" | "anthropic" | "openrouter" | "command"
+  model: qwen3:4b
+  timeout: 90000                 # ms, range 5000–300000
   minConfidence: 0.7             # fraction 0.0–1.0
+  command:                       # required when provider: command
+    bin: node
+    args: ["./extract.mjs", "--transcript", "$TRANSCRIPT", "--session", "$SESSION_KEY", "--agent", "$AGENT_ID"]
+    # tokens: $TRANSCRIPT (temp file path), $SESSION_KEY, $PROJECT, $AGENT_ID, $SIGNET_PATH
+    # keep bin/cwd fixed (or trusted $SIGNET_PATH/$AGENT_ID only); use args/env for session/project tokens
+    # command stdout/stderr are ignored; command must write memories to Signet state directly
+    # after command success, synthesis hooks can run when configured, but markdown/fact writes are skipped in command mode
+
+synthesis:
+  enabled: true
+  provider: ollama               # same provider choices as extraction, except "command"
+  model: qwen3:4b
+  timeout: 120000                # ms, range 5000–300000
+  # when omitted entirely, synthesis falls back to extraction provider/model
+  # except extraction.provider=command, which falls back to synthesis defaults
 
 worker:
   pollMs: 2000                   # ms, range 100–60000
   maxRetries: 3                  # range 1–10
   leaseTimeoutMs: 300000         # ms, range 10000–600000
+  maxLoadPerCpu: 0.8             # load-per-CPU threshold, range 0.1–8.0
+  overloadBackoffMs: 30000       # ms, range 1000–300000
 
 graph:
   enabled: true
@@ -968,6 +1056,7 @@ graph:
 reranker:
   enabled: true
   model: ""
+  useExtractionModel: false
   topN: 20                       # range 1–100
   timeoutMs: 2000                # ms, range 100–30000
 
@@ -1091,3 +1180,24 @@ memory:
       enabled: true
       pollMs: 5000
 ```
+
+
+---
+
+Multi-Agent Pipeline Notes
+---------------------------
+
+When multiple agents share a daemon, the pipeline tags each extracted memory
+with the requesting agent's ID. The `agent_id` is resolved from the
+session-start hook request: if the caller provides `agentId` in the body it
+is used directly; otherwise the daemon parses OpenClaw's session key format
+(`agent:{id}:{rest}`) as a fallback.
+
+Extracted memories default to `visibility = 'global'`. Callers that want
+private memories must set `visibility = 'private'` explicitly in the
+remember request or via `signet remember --private`.
+
+The pipeline worker itself is agent-agnostic: it operates on the `memory_jobs`
+queue and reads `agent_id` from each job record. Entity graph operations
+(extraction, traversal, aspect updates) all pass `agent_id` through to
+ensure knowledge is scoped to the correct agent.

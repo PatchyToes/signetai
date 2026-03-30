@@ -1,10 +1,70 @@
+import { STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS, resolveSessionStartTimeoutMs } from "@signet/core";
 import chalk from "chalk";
 import type { Command } from "commander";
+import type { DaemonFetchResult } from "../lib/daemon.js";
 
 interface HookDeps {
 	readonly AGENTS_DIR: string;
-	readonly fetchFromDaemon: <T>(path: string, opts?: RequestInit & { timeout?: number }) => Promise<T | null>;
-	readonly readStaticIdentity: (basePath: string) => string | null;
+	readonly fetchDaemonResult: <T>(
+		path: string,
+		opts?: RequestInit & { timeout?: number },
+	) => Promise<DaemonFetchResult<T>>;
+	readonly readStaticIdentity: (basePath: string, status?: string) => string | null;
+}
+
+const SESSION_START_TIMEOUT_MS = resolveSessionStartTimeout();
+
+function readTimeoutEnv(name: string): string {
+	const value = process.env[name];
+	return typeof value === "string" ? value.trim() : "";
+}
+
+export function resolveSessionStartTimeout(): number {
+	const raw = readTimeoutEnv("SIGNET_SESSION_START_TIMEOUT") || readTimeoutEnv("SIGNET_FETCH_TIMEOUT");
+	return resolveSessionStartTimeoutMs(raw);
+}
+
+export function buildSessionStartFallback(
+	readStaticIdentity: HookDeps["readStaticIdentity"],
+	agentsDir: string,
+	reason: "offline" | "timeout" | "http" | "invalid-json",
+): string | null {
+	if (reason === "timeout") {
+		return readStaticIdentity(agentsDir, STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS);
+	}
+	// offline, http error, invalid-json — all degrade to static identity
+	return readStaticIdentity(agentsDir);
+}
+
+function formatHookFailure(
+	name: string,
+	res: {
+		readonly reason: "offline" | "timeout" | "http" | "invalid-json";
+		readonly status?: number;
+	},
+): string {
+	if (res.reason === "http") {
+		return `[signet] daemon ${name} failed with HTTP ${res.status ?? "unknown"}, hook skipped\n`;
+	}
+	if (res.reason === "invalid-json") {
+		return `[signet] daemon ${name} returned invalid JSON, hook skipped\n`;
+	}
+	if (res.reason === "timeout") {
+		return `[signet] daemon ${name} timed out, hook skipped\n`;
+	}
+	return "[signet] daemon not running, hook skipped\n";
+}
+
+async function fetchHookData<T>(
+	deps: HookDeps,
+	name: string,
+	path: string,
+	opts?: RequestInit & { timeout?: number },
+): Promise<T | null> {
+	const res = await deps.fetchDaemonResult<T>(path, opts);
+	if (res.ok) return res.data;
+	process.stderr.write(formatHookFailure(name, res));
+	return null;
 }
 
 export function registerHookCommands(program: Command, deps: HookDeps): void {
@@ -26,9 +86,9 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.option("--json", "Output as JSON")
 		.action(async (options) => {
 			const input = await readJson();
-			const sessionKey = pickString(input?.session_id, input?.sessionId);
+			const sessionKey = pickSessionKey(input);
 			const stdinProject = pickString(input?.cwd);
-			const data = await deps.fetchFromDaemon<{
+			const res = await deps.fetchDaemonResult<{
 				identity?: { name: string; description?: string };
 				memories?: Array<{ content: string }>;
 				inject?: string;
@@ -43,21 +103,40 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 					context: options.context,
 					sessionKey,
 				}),
+				timeout: SESSION_START_TIMEOUT_MS,
 			});
-			if (!data) {
-				const fallback = deps.readStaticIdentity(deps.AGENTS_DIR);
+			if (!res.ok) {
+				if (res.reason === "http") {
+					process.stderr.write(
+						`[signet] daemon session-start failed with HTTP ${res.status ?? "unknown"} — using static identity\n`,
+					);
+				} else if (res.reason === "invalid-json") {
+					process.stderr.write("[signet] daemon session-start returned invalid JSON — using static identity\n");
+				}
+				const fallback = buildSessionStartFallback(deps.readStaticIdentity, deps.AGENTS_DIR, res.reason);
 				if (fallback) {
-					process.stderr.write("[signet] daemon offline — using static identity\n");
+					if (res.reason === "timeout") {
+						process.stderr.write("[signet] daemon session-start timed out — using static identity\n");
+					}
+					if (res.reason === "offline") {
+						process.stderr.write("[signet] daemon offline — using static identity\n");
+					}
 					if (options.json) {
 						console.log(JSON.stringify({ inject: fallback, identity: { name: "signet" }, memories: [] }));
 					} else {
 						console.log(fallback);
 					}
-				} else {
+					process.exit(0);
+				}
+				if (res.reason === "timeout") {
+					process.stderr.write("[signet] daemon session-start timed out, no identity files found\n");
+				}
+				if (res.reason === "offline") {
 					process.stderr.write("[signet] daemon not running, no identity files found\n");
 				}
 				process.exit(0);
 			}
+			const data = res.data;
 			if (data.error) {
 				console.error(chalk.red(`Error: ${data.error}`));
 				process.exit(1);
@@ -76,23 +155,18 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.option("--project <project>", "Project path")
 		.action(async (options) => {
 			const input = await readJson();
-			const userPrompt = pickString(input?.prompt, input?.user_prompt, input?.userPrompt);
-			const sessionKey = pickString(input?.session_id, input?.sessionId);
 			const stdinProject = pickString(input?.cwd);
-			const lastAssistantMessage = readLastAssistantMessage(input);
-			const data = await deps.fetchFromDaemon<{ inject?: string }>("/api/hooks/user-prompt-submit", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					harness: options.harness,
-					project: options.project || stdinProject,
-					userPrompt,
-					sessionKey,
-					lastAssistantMessage: lastAssistantMessage || undefined,
-				}),
-			});
+			const data = await fetchHookData<{ inject?: string }>(
+				deps,
+				"user-prompt-submit",
+				"/api/hooks/user-prompt-submit",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(buildUserPromptSubmitBody(input, options.harness, options.project || stdinProject)),
+				},
+			);
 			if (!data) {
-				process.stderr.write("[signet] daemon not running, hook skipped\n");
 				process.exit(0);
 			}
 			if (data.inject) console.log(data.inject);
@@ -104,21 +178,13 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.requiredOption("-H, --harness <harness>", "Harness name")
 		.action(async (options) => {
 			const body = (await readJson()) ?? {};
-			const data = await deps.fetchFromDaemon<{ memoriesSaved?: number }>("/api/hooks/session-end", {
+			const data = await fetchHookData<{ memoriesSaved?: number }>(deps, "session-end", "/api/hooks/session-end", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					harness: options.harness,
-					transcriptPath: pickString(body.transcript_path, body.transcriptPath),
-					sessionId: pickString(body.session_id, body.sessionId),
-					sessionKey: pickString(body.session_id, body.sessionId),
-					cwd: pickString(body.cwd),
-					reason: pickString(body.reason),
-				}),
+				body: JSON.stringify(buildSessionEndBody(body, options.harness)),
 				timeout: 60_000,
 			});
 			if (!data) {
-				process.stderr.write("[signet] daemon not running, hook skipped\n");
 				process.exit(0);
 			}
 			if ((data.memoriesSaved ?? 0) > 0) {
@@ -135,9 +201,11 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.option("--json", "Output as JSON")
 		.action(async (options) => {
 			const input = await readJson();
-			const sessionKey = pickString(input?.session_id, input?.sessionId);
+			const sessionKey = pickSessionKey(input);
 			const sessionContext = pickString(input?.session_context, input?.sessionContext);
-			const data = await deps.fetchFromDaemon<{ summaryPrompt?: string; guidelines?: string; error?: string }>(
+			const data = await fetchHookData<{ summaryPrompt?: string; guidelines?: string; error?: string }>(
+				deps,
+				"pre-compaction",
 				"/api/hooks/pre-compaction",
 				{
 					method: "POST",
@@ -149,6 +217,7 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 					}),
 				},
 			);
+			if (!data) return;
 			if (data?.error) {
 				console.error(chalk.red(`Error: ${data.error}`));
 				process.exit(1);
@@ -165,14 +234,27 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.description("Save session summary after compaction")
 		.requiredOption("-H, --harness <harness>", "Harness name")
 		.requiredOption("-s, --summary <summary>", "Session summary text")
+		.option("--session-key <key>", "Session key")
+		.option("--project <project>", "Project path")
+		.option("--agent-id <id>", "Agent ID")
 		.action(async (options) => {
-			const data = await deps.fetchFromDaemon<{ success?: boolean; memoryId?: number; error?: string }>(
+			const input = shouldReadCompactionInput(process.stdin.isTTY, options) ? await readJson() : null;
+			const data = await fetchHookData<{ success?: boolean; memoryId?: number; error?: string }>(
+				deps,
+				"compaction-complete",
 				"/api/hooks/compaction-complete",
 				{
 					method: "POST",
-					body: JSON.stringify({ harness: options.harness, summary: options.summary }),
+					body: JSON.stringify(
+						buildCompactionCompleteBody(input, options.harness, options.summary, {
+							agentId: options.agentId,
+							project: options.project,
+							sessionKey: options.sessionKey,
+						}),
+					),
 				},
 			);
+			if (!data) return;
 			if (data?.error) {
 				console.error(chalk.red(`Error: ${data.error}`));
 				process.exit(1);
@@ -188,16 +270,17 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.description("Request MEMORY.md synthesis (returns prompt for configured harness)")
 		.option("--json", "Output as JSON")
 		.action(async (options) => {
-			const data = await deps.fetchFromDaemon<{
+			const data = await fetchHookData<{
 				harness?: string;
 				model?: string;
 				prompt?: string;
 				fileCount?: number;
 				error?: string;
-			}>("/api/hooks/synthesis", {
+			}>(deps, "synthesis", "/api/hooks/synthesis", {
 				method: "POST",
 				body: JSON.stringify({ trigger: "manual" }),
 			});
+			if (!data) return;
 			if (data?.error) {
 				console.error(chalk.red(`Error: ${data.error}`));
 				process.exit(1);
@@ -218,10 +301,16 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		.description("Save synthesized MEMORY.md content")
 		.requiredOption("-c, --content <content>", "Synthesized MEMORY.md content")
 		.action(async (options) => {
-			const data = await deps.fetchFromDaemon<{ success?: boolean; error?: string }>("/api/hooks/synthesis/complete", {
-				method: "POST",
-				body: JSON.stringify({ content: options.content }),
-			});
+			const data = await fetchHookData<{ success?: boolean; error?: string }>(
+				deps,
+				"synthesis-complete",
+				"/api/hooks/synthesis/complete",
+				{
+					method: "POST",
+					body: JSON.stringify({ content: options.content }),
+				},
+			);
+			if (!data) return;
 			if (data?.error) {
 				console.error(chalk.red(`Error: ${data.error}`));
 				process.exit(1);
@@ -230,8 +319,22 @@ export function registerHookCommands(program: Command, deps: HookDeps): void {
 		});
 }
 
+export function shouldReadCompactionInput(
+	isTTY: boolean,
+	options: {
+		sessionKey?: string;
+		project?: string;
+		agentId?: string;
+	},
+): boolean {
+	if (isTTY) return false;
+	if (options.sessionKey && options.project && options.agentId) return false;
+	return true;
+}
+
 async function readJson(): Promise<Record<string, unknown> | null> {
 	try {
+		if (process.stdin.isTTY) return null;
 		const chunks: Buffer[] = [];
 		for await (const chunk of process.stdin) {
 			chunks.push(chunk);
@@ -239,10 +342,16 @@ async function readJson(): Promise<Record<string, unknown> | null> {
 		const input = Buffer.concat(chunks).toString("utf-8").trim();
 		if (!input) return null;
 		const parsed = JSON.parse(input);
-		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+		return toRecord(parsed);
 	} catch {
 		return null;
 	}
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+	if (typeof value !== "object" || value === null) return null;
+	if (Array.isArray(value)) return null;
+	return Object.fromEntries(Object.entries(value));
 }
 
 function pickString(...values: unknown[]): string {
@@ -250,6 +359,96 @@ function pickString(...values: unknown[]): string {
 		if (typeof value === "string" && value.trim().length > 0) return value;
 	}
 	return "";
+}
+
+export function pickSessionKey(input: Record<string, unknown> | null): string {
+	if (!input) return "";
+	return pickString(input.session_key, input.sessionKey, input.session_id, input.sessionId);
+}
+
+export function buildUserPromptSubmitBody(
+	input: Record<string, unknown> | null,
+	harness: string,
+	project: string,
+): {
+	harness: string;
+	project: string;
+	userMessage: string;
+	userPrompt: string;
+	sessionKey: string;
+	transcriptPath: string;
+	transcript: string;
+	lastAssistantMessage?: string;
+} {
+	const body = input;
+	const userPrompt = pickString(body?.prompt, body?.user_prompt, body?.userPrompt);
+	const userMessage = pickString(body?.user_message, body?.userMessage, userPrompt);
+	const lastAssistantMessage = readLastAssistantMessage(body);
+	return {
+		harness,
+		project,
+		userMessage,
+		userPrompt,
+		sessionKey: pickSessionKey(body),
+		transcriptPath: pickString(body?.transcript_path, body?.transcriptPath),
+		transcript: pickString(body?.transcript),
+		...(lastAssistantMessage ? { lastAssistantMessage } : {}),
+	};
+}
+
+export function buildCompactionCompleteBody(
+	input: Record<string, unknown> | null,
+	harness: string,
+	summary: string,
+	overrides: {
+		agentId?: string;
+		project?: string;
+		sessionKey?: string;
+	} = {},
+): {
+	harness: string;
+	summary: string;
+	agentId?: string;
+	sessionKey?: string;
+	project?: string;
+} {
+	const body = input;
+	const agentId = pickString(overrides.agentId, body?.agent_id, body?.agentId);
+	const sessionKey = pickString(overrides.sessionKey, pickSessionKey(body));
+	const project = pickString(overrides.project, body?.project, body?.cwd);
+	return {
+		harness,
+		summary,
+		...(agentId ? { agentId } : {}),
+		...(sessionKey ? { sessionKey } : {}),
+		...(project ? { project } : {}),
+	};
+}
+
+export function buildSessionEndBody(
+	input: Record<string, unknown> | null,
+	harness: string,
+): {
+	harness: string;
+	transcriptPath: string;
+	transcript: string;
+	sessionId: string;
+	sessionKey: string;
+	cwd: string;
+	reason: string;
+} {
+	const body = input ?? {};
+	const sessionKey = pickSessionKey(body);
+	const sessionId = pickString(body.session_id, body.sessionId, sessionKey);
+	return {
+		harness,
+		transcriptPath: pickString(body.transcript_path, body.transcriptPath),
+		transcript: pickString(body.transcript),
+		sessionId,
+		sessionKey,
+		cwd: pickString(body.cwd),
+		reason: pickString(body.reason),
+	};
 }
 
 function readLastAssistantMessage(input: Record<string, unknown> | null): string {

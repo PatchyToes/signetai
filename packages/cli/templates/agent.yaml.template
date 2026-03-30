@@ -26,6 +26,7 @@ agent:
 
 # AI tools this agent works with
 harnesses:
+  - forge
   - claude-code
   - codex
   - opencode
@@ -84,7 +85,7 @@ memory:
   
   # MEMORY.md synthesis configuration
   synthesis:
-    # Which harness performs the synthesis (openclaw, claude-code, codex, opencode)
+    # Which harness performs the synthesis (forge, openclaw, claude-code, codex, opencode)
     harness: openclaw
     
     # Model to use for synthesis (harness-specific format)
@@ -103,6 +104,10 @@ memory:
     # When false, shadowMode is ignored and the pipeline is fully disabled.
     enabled: true
 
+    # Temporary operator pause. Keeps queueing raw work, but workers stay offline
+    # until you run `signet daemon resume`.
+    # paused: false
+
     # Shadow mode: extract but don't write to DB (dry-run for testing)
     # shadowMode: false
 
@@ -110,14 +115,20 @@ memory:
     # mutationsFrozen: false
 
     # Extraction provider and model
+    # Safety: on a VPS, set provider: none unless you explicitly want
+    # background extraction.
+    # Intended usage: Claude Code on haiku, Codex on GPT Mini with a
+    # Pro/Max subscription, or local Ollama at qwen3:4b or larger.
+    # Remote API extraction can rack up extreme fees fast.
     extraction:
-      # "claude-code" (Claude CLI), "codex" (Codex CLI), "opencode" (OpenCode), or "ollama" (local)
+      # "none", "claude-code" (Claude CLI), "codex" (Codex CLI),
+      # "opencode" (OpenCode), or "ollama" (local)
       provider: claude-code
       model: haiku
       # endpoint/base_url override (ollama base URL, or OpenCode server URL when provider=opencode)
       # endpoint: http://127.0.0.1:11434  # ollama
       # endpoint: http://127.0.0.1:4096   # opencode
-      # timeout: 45000
+      # timeout: 120000
       # minConfidence: 0.7
 
     # Knowledge graph — boosts related memories in search results

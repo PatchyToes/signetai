@@ -31,9 +31,54 @@ Environment variables control the network address:
 - `SIGNET_PORT` — port to listen on (default: `3850`)
 - `SIGNET_PATH` — override the data directory (default: `$SIGNET_WORKSPACE/`)
 - `SIGNET_LOG_FILE` — optional explicit daemon log file path
+- `SIGNET_SQLITE_PATH` — macOS explicit override for a custom `libsqlite3.dylib`
 
 Bun is a hard requirement. The daemon uses `bun:sqlite` directly and will
 refuse to start under Node.
+
+On macOS, `SIGNET_SQLITE_PATH` is authoritative when set. If it points
+at a missing file, Signet refuses fallback so the misconfiguration is
+obvious. If it is unset, Signet checks
+`$SIGNET_WORKSPACE/libsqlite3.dylib`, where the workspace resolves from
+`SIGNET_PATH`, then `~/.config/signet/workspace.json`, then the default
+`~/.agents`, and then standard Homebrew SQLite paths so `sqlite-vec`
+can load before the first Bun connection opens.
+
+
+Docker Compose (first-party)
+----------------------------
+
+Signet now ships a first-party Docker stack in `deploy/docker/` for
+self-hosted daemon deployments:
+
+```bash
+cd deploy/docker
+cp .env.example .env
+docker compose up -d --build
+```
+
+This stack includes:
+
+- `signet` service (daemon runtime)
+- `caddy` reverse proxy (TLS-capable, SSE-safe)
+- named Docker volumes for persistent workspace and proxy state
+
+The container entrypoint creates `$SIGNET_WORKSPACE/agent.yaml` with
+`auth.mode: team` on first start when no config exists. To generate an
+initial admin token from the auth secret, run:
+
+```bash
+docker compose exec signet \
+  bun /app/deploy/docker/scripts/create-token.mjs --role admin --sub bootstrap
+```
+
+The command prints a bearer token to stdout. Store it securely and use it
+for admin API calls (for example `/api/auth/token` to mint scoped
+operator/agent tokens).
+
+By default, Compose publishes Caddy on ports 80/443. Override
+`SIGNET_HTTP_PORT` and `SIGNET_HTTPS_PORT` in `.env` when those ports are
+already occupied.
 
 
 Running as a Service
@@ -446,17 +491,33 @@ switch back to `team` mode.
 
 ### Pipeline not processing
 
-The memory extraction pipeline requires Ollama running locally with the
-extraction model pulled. Confirm:
+First check whether extraction is intentionally disabled:
+
+```yaml
+memory:
+  pipelineV2:
+    enabled: false
+    extraction:
+      provider: none
+```
+
+If `provider: none` is set, or `enabled: false`, the pipeline staying
+idle is expected. This is the recommended configuration for VPS installs
+that should not make background LLM calls.
+
+If extraction is enabled and using Ollama, confirm the server is
+running and the model is pulled:
 
 ```bash
 curl -s http://localhost:11434/api/tags | jq '.models[].name'
 ```
 
-The default model is `qwen3:4b`. If it is not listed:
+The recommended local model is `nemotron-3-nano:4b`. `qwen3:4b` is deprecated — Nemotron's superior reasoning produces better extraction quality and `qwen3:4b` will be removed in a future update. If neither is listed:
 
 ```bash
 ollama pull qwen3:4b
+# or
+ollama pull nemotron-3-nano:4b
 ```
 
 If Ollama is running but the pipeline is still idle, check whether it is
@@ -471,6 +532,11 @@ memory:
 `shadowMode: true` means the pipeline extracts but does not write to the
 database — useful for testing, but memories will not persist. Set it to
 `false` for production operation.
+
+Cost warning: the intended extraction setups are Claude Code on Haiku,
+Codex CLI on GPT Mini with a Pro/Max subscription, or local Ollama.
+Remote API extraction can create extreme fees quickly if left running in
+the background.
 
 ### High memory usage
 

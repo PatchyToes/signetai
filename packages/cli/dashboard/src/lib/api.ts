@@ -6,11 +6,11 @@
 import type { ModelRegistryEntry } from "@signet/core";
 import { marked } from "marked";
 
-// When served by the daemon, use relative URLs.
-// When served by Tauri (frontendDist) or Vite dev server, use absolute URL.
-const isDev = import.meta.env.DEV;
+// When served by the daemon (production) or Vite dev server (proxied), use relative URLs.
+// Tauri needs an absolute URL since it serves from a different origin.
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-export const API_BASE = isDev || isTauri ? "http://localhost:3850" : "";
+const tauriHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
+export const API_BASE = isTauri ? `http://${tauriHost}:3850` : "";
 
 export interface Memory {
 	id: string;
@@ -274,9 +274,15 @@ export async function saveConfigFileResult(file: string, content: string): Promi
 	}
 }
 
-export async function getMemories(limit = 100, offset = 0): Promise<{ memories: Memory[]; stats: MemoryStats }> {
+export async function getMemories(
+	limit = 100,
+	offset = 0,
+	agentId?: string,
+): Promise<{ memories: Memory[]; stats: MemoryStats }> {
 	try {
-		const response = await fetch(`${API_BASE}/api/memories?limit=${limit}&offset=${offset}`);
+		const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+		if (agentId) params.set("agent_id", agentId);
+		const response = await fetch(`${API_BASE}/api/memories?${params}`);
 		if (!response.ok) throw new Error("Failed to fetch memories");
 		return await response.json();
 	} catch {
@@ -637,7 +643,7 @@ export async function deleteMemory(
 
 export async function getEmbeddings(
 	withVectors = false,
-	options: { limit?: number; offset?: number } = {},
+	options: { limit?: number; offset?: number; agentId?: string } = {},
 ): Promise<EmbeddingsResponse> {
 	try {
 		const params = new URLSearchParams({
@@ -648,6 +654,9 @@ export async function getEmbeddings(
 		}
 		if (typeof options.offset === "number") {
 			params.set("offset", options.offset.toString());
+		}
+		if (typeof options.agentId === "string" && options.agentId.length > 0) {
+			params.set("agent_id", options.agentId);
 		}
 
 		const response = await fetch(`${API_BASE}/api/embeddings?${params}`);
@@ -721,6 +730,7 @@ export interface ProjectionQueryOptions {
 	until?: string;
 	importanceMin?: number;
 	importanceMax?: number;
+	agentId?: string;
 }
 
 export async function getProjection(
@@ -743,6 +753,7 @@ export async function getProjection(
 		if (typeof options.until === "string" && options.until.length > 0) params.set("until", options.until);
 		if (typeof options.importanceMin === "number") params.set("importanceMin", String(options.importanceMin));
 		if (typeof options.importanceMax === "number") params.set("importanceMax", String(options.importanceMax));
+		if (typeof options.agentId === "string" && options.agentId.length > 0) params.set("agent_id", options.agentId);
 
 		const response = await fetch(`${API_BASE}/api/embeddings/projection?${params}`);
 		if (response.status === 202) return { status: "computing" };
@@ -1863,6 +1874,51 @@ export interface PipelineStatus {
 	};
 }
 
+export interface PipelinePauseResult {
+	success: boolean;
+	changed?: boolean;
+	paused?: boolean;
+	file?: string;
+	mode?: string;
+	error?: string;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function readPipelinePauseResult(body: unknown, fallback: string): PipelinePauseResult {
+	if (!isObject(body)) return { success: false, error: fallback };
+	if (body.success !== true) {
+		return {
+			success: false,
+			error: typeof body.error === "string" ? body.error : fallback,
+		};
+	}
+
+	return {
+		success: true,
+		changed: typeof body.changed === "boolean" ? body.changed : undefined,
+		paused: typeof body.paused === "boolean" ? body.paused : undefined,
+		file: typeof body.file === "string" ? body.file : undefined,
+		mode: typeof body.mode === "string" ? body.mode : undefined,
+	};
+}
+
+async function updatePipelineMode(mode: "pause" | "resume"): Promise<PipelinePauseResult> {
+	try {
+		const res = await fetch(`${API_BASE}/api/pipeline/${mode}`, {
+			method: "POST",
+		});
+		const body = await res.json().catch(() => null);
+		const fallback = `Request failed (${res.status})`;
+		if (!res.ok) return readPipelinePauseResult(body, fallback);
+		return readPipelinePauseResult(body, "Malformed pipeline response");
+	} catch (e) {
+		return { success: false, error: String(e) };
+	}
+}
+
 export async function getPipelineStatus(): Promise<PipelineStatus | null> {
 	try {
 		const res = await fetch(`${API_BASE}/api/pipeline/status`);
@@ -1871,6 +1927,14 @@ export async function getPipelineStatus(): Promise<PipelineStatus | null> {
 	} catch {
 		return null;
 	}
+}
+
+export async function pausePipeline(): Promise<PipelinePauseResult> {
+	return updatePipelineMode("pause");
+}
+
+export async function resumePipeline(): Promise<PipelinePauseResult> {
+	return updatePipelineMode("resume");
 }
 
 export interface KnowledgeEntityListItem {
@@ -2087,7 +2151,7 @@ export async function getKnowledgeAttributes(
 		if (filters.status) params.set("status", filters.status);
 		if (typeof filters.limit === "number") params.set("limit", String(filters.limit));
 		if (typeof filters.offset === "number") params.set("offset", String(filters.offset));
-		params.set("agent_id", filters.agentId ?? "default");
+		if (filters.agentId) params.set("agent_id", filters.agentId);
 		const res = await fetch(
 			`${API_BASE}/api/knowledge/entities/${encodeURIComponent(entityId)}/aspects/${encodeURIComponent(aspectId)}/attributes?${params.toString()}`,
 		);
@@ -2116,9 +2180,12 @@ export async function getKnowledgeDependencies(
 	}
 }
 
-export async function getKnowledgeStats(): Promise<KnowledgeStats | null> {
+export async function getKnowledgeStats(agentId?: string): Promise<KnowledgeStats | null> {
 	try {
-		const res = await fetch(`${API_BASE}/api/knowledge/stats`);
+		const url = agentId
+			? `${API_BASE}/api/knowledge/stats?agent_id=${encodeURIComponent(agentId)}`
+			: `${API_BASE}/api/knowledge/stats`;
+		const res = await fetch(url);
 		if (!res.ok) return null;
 		return await res.json();
 	} catch {
@@ -2274,9 +2341,10 @@ export interface ConstellationGraph {
 	dependencies: ConstellationDependency[];
 }
 
-export async function getConstellationOverlay(agentId = "default"): Promise<ConstellationGraph | null> {
+export async function getConstellationOverlay(agentId: string): Promise<ConstellationGraph | null> {
 	try {
-		const res = await fetch(`${API_BASE}/api/knowledge/constellation?agent_id=${encodeURIComponent(agentId)}`);
+		const path = `${API_BASE}/api/knowledge/constellation?agent_id=${encodeURIComponent(agentId)}`;
+		const res = await fetch(path);
 		if (!res.ok) return null;
 		return (await res.json()) as ConstellationGraph;
 	} catch {
@@ -2505,4 +2573,68 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
 			error: e instanceof Error ? e.message : String(e),
 		};
 	}
+}
+
+// ---------------------------------------------------------------------------
+// MCP Analytics
+// ---------------------------------------------------------------------------
+
+export interface McpToolStats {
+	toolName: string;
+	count: number;
+	successCount: number;
+	avgLatencyMs: number;
+}
+
+export interface McpServerStats {
+	serverId: string;
+	count: number;
+	successCount: number;
+	avgLatencyMs: number;
+}
+
+export interface McpAnalyticsSummary {
+	totalCalls: number;
+	successRate: number;
+	topServers: McpServerStats[];
+	topTools: McpToolStats[];
+	latency: { p50: number; p95: number };
+}
+
+export interface McpServerAnalytics {
+	serverId: string;
+	totalCalls: number;
+	successRate: number;
+	tools: McpToolStats[];
+	timeline: { date: string; count: number }[];
+}
+
+export async function getMcpAnalytics(params?: {
+	server?: string;
+	since?: string;
+	agentId?: string;
+}): Promise<McpAnalyticsSummary> {
+	const qs = new URLSearchParams();
+	if (params?.server) qs.set("server", params.server);
+	if (params?.since) qs.set("since", params.since);
+	if (params?.agentId) qs.set("agent_id", params.agentId);
+	const query = qs.toString();
+	const response = await fetch(`${API_BASE}/api/mcp/analytics${query ? `?${query}` : ""}`);
+	if (!response.ok) throw new Error("Failed to fetch MCP analytics");
+	return response.json();
+}
+
+export async function getMcpServerAnalytics(
+	serverId: string,
+	params?: { since?: string; agentId?: string },
+): Promise<McpServerAnalytics> {
+	const qs = new URLSearchParams();
+	if (params?.since) qs.set("since", params.since);
+	if (params?.agentId) qs.set("agent_id", params.agentId);
+	const query = qs.toString();
+	const response = await fetch(
+		`${API_BASE}/api/mcp/analytics/${encodeURIComponent(serverId)}${query ? `?${query}` : ""}`,
+	);
+	if (!response.ok) throw new Error("Failed to fetch server analytics");
+	return response.json();
 }

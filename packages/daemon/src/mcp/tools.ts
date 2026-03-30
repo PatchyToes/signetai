@@ -115,6 +115,7 @@ const BASE_TOOL_NAMES = new Set<string>([
 	"memory_feedback",
 	"knowledge_expand",
 	"knowledge_expand_session",
+	"lcm_expand",
 	"agent_peers",
 	"agent_message_send",
 	"agent_message_inbox",
@@ -148,9 +149,10 @@ async function daemonFetch<T>(
 		readonly method?: string;
 		readonly body?: unknown;
 		readonly timeout?: number;
+		readonly extraHeaders?: Readonly<Record<string, string>>;
 	} = {},
 ): Promise<FetchResult<T>> {
-	const { method = "GET", body, timeout = 10_000 } = options;
+	const { method = "GET", body, timeout = 10_000, extraHeaders } = options;
 
 	const init: RequestInit = {
 		method,
@@ -159,6 +161,7 @@ async function daemonFetch<T>(
 			"x-signet-runtime-path": "plugin",
 			"x-signet-actor": "mcp-server",
 			"x-signet-actor-type": "harness",
+			...extraHeaders,
 		},
 		signal: AbortSignal.timeout(timeout),
 	};
@@ -505,7 +508,8 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			mode: "hybrid",
 			maxExpandedTools: 12,
 			maxSearchResults: 8,
-			updatedAt: new Date(0).toISOString(),
+			// Sentinel: "never explicitly set" — matches DEFAULT_EXPOSURE_POLICY.
+			updatedAt: "1970-01-01T00:00:00.000Z",
 		},
 	});
 
@@ -522,10 +526,7 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				limit: z.number().optional().describe("Max results to return (default 10)"),
 				type: z.string().optional().describe("Filter by memory type"),
 				min_score: z.number().optional().describe("Minimum relevance score threshold"),
-				expand: z
-					.boolean()
-					.optional()
-					.describe("Include lossless session transcripts as sources"),
+				expand: z.boolean().optional().describe("Include lossless session transcripts as sources"),
 			}),
 		},
 		async ({ query, limit, type, min_score, expand }) => {
@@ -750,14 +751,44 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 				"Scores from -1 (harmful) to 1 (directly helpful). 0 = unused.",
 			inputSchema: z.object({
 				session_key: z.string().describe("Current session key"),
+				agent_id: z.string().optional().describe("Agent id scope (default: default)"),
 				ratings: z.record(z.string(), z.number()).describe("Map of memory ID to relevance score (-1 to 1)"),
+				paths: z
+					.record(
+						z.string(),
+						z.object({
+							entity_ids: z.array(z.string()).optional(),
+							aspect_ids: z.array(z.string()).optional(),
+							dependency_ids: z.array(z.string()).optional(),
+						}),
+					)
+					.optional()
+					.describe("Optional path provenance keyed by memory id"),
+				rewards: z
+					.record(
+						z.string(),
+						z.object({
+							forward_citation: z.number().optional(),
+							update_after_retrieval: z.number().optional(),
+							downstream_creation: z.number().optional(),
+							dead_end: z.number().optional(),
+						}),
+					)
+					.optional()
+					.describe("Optional reward signals keyed by memory id"),
 			}),
 			annotations: { readOnlyHint: false },
 		},
-		async ({ session_key, ratings }) => {
+		async ({ session_key, agent_id, ratings, paths, rewards }) => {
 			const result = await daemonFetch<{ ok: boolean; recorded: number }>(baseUrl, "/api/memory/feedback", {
 				method: "POST",
-				body: { sessionKey: session_key, feedback: ratings },
+				body: {
+					sessionKey: session_key,
+					agentId: agent_id,
+					feedback: ratings,
+					paths,
+					rewards,
+				},
 			});
 			if (!result.ok) {
 				return errorResult(`Feedback failed: ${result.error}`);
@@ -1285,6 +1316,10 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 					args: args ?? {},
 				},
 				timeout: 60_000,
+				// x-signet-agent-id intentionally omitted — the MCP server is
+				// workspace-level and lacks per-agent context. The marketplace
+				// route derives agent_id from auth claims (Phase 2: per-agent MCP sessions).
+				extraHeaders: { "x-signet-mcp-source": "agent" },
 			});
 
 			if (!result.ok) {
@@ -1311,13 +1346,17 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 			inputSchema: z.object({
 				session_key: z.string().describe("Session key to bypass"),
 				enabled: z.boolean().describe("true = bypass (disable hooks), false = re-enable"),
+				agent_id: z.string().optional().describe("Agent owning the session (defaults to current agent)"),
 			}),
 			annotations: { readOnlyHint: false },
 		},
-		async ({ session_key, enabled }) => {
+		async ({ session_key, enabled, agent_id }) => {
+			// Always thread agent_id so the scoped route resolves correctly.
+			// Default to "default" matching other cross-agent MCP tools.
+			const aid = agent_id ?? "default";
 			const result = await daemonFetch<{ key: string; bypassed: boolean }>(
 				baseUrl,
-				`/api/sessions/${encodeURIComponent(session_key)}/bypass`,
+				`/api/sessions/${encodeURIComponent(session_key)}/bypass?agent_id=${encodeURIComponent(aid)}`,
 				{ method: "POST", body: { enabled } },
 			);
 			if (!result.ok) return errorResult(`Bypass toggle failed: ${result.error}`);
@@ -1393,6 +1432,37 @@ export async function createMcpServer(opts?: McpServerOptions): Promise<McpServe
 
 			if (!result.ok) {
 				return errorResult(`Session expansion failed: ${result.error}`);
+			}
+			return textResult(result.data);
+		},
+	);
+
+	server.registerTool(
+		"lcm_expand",
+		{
+			title: "Expand Temporal Node",
+			description:
+				"Expand a temporal MEMORY.md or session DAG node by id. " +
+				"Returns parent and child lineage, linked memories, and " +
+				"optionally transcript context for drill-down.",
+			inputSchema: z.object({
+				id: z.string().describe("Temporal node id from MEMORY.md or /api/sessions/summaries"),
+				include_transcript: z.boolean().optional().describe("Include transcript context when available"),
+				transcript_char_limit: z.number().optional().describe("Max transcript chars to return (default 2000)"),
+			}),
+		},
+		async ({ id, include_transcript, transcript_char_limit }) => {
+			const result = await daemonFetch<unknown>(baseUrl, "/api/sessions/summaries/expand", {
+				method: "POST",
+				body: {
+					id,
+					includeTranscript: include_transcript ?? true,
+					transcriptCharLimit: transcript_char_limit,
+				},
+			});
+
+			if (!result.ok) {
+				return errorResult(`Temporal expansion failed: ${result.error}`);
 			}
 			return textResult(result.data);
 		},

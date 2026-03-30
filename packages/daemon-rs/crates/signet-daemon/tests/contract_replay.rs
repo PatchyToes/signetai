@@ -258,6 +258,32 @@ async fn search_endpoints() {
 
 #[tokio::test]
 #[ignore = "requires built daemon binary"]
+async fn feedback_endpoint() {
+    let server = TestServer::start().await;
+
+    let bad = server
+        .post("/api/memory/feedback", json!({"sessionKey": "sess-1"}))
+        .await;
+    assert_eq!(bad.status(), 400);
+
+    let ok = server
+        .post(
+            "/api/memory/feedback",
+            json!({
+                "sessionKey": "sess-1",
+                "feedback": { "missing-memory": 1 }
+            }),
+        )
+        .await;
+    assert_eq!(ok.status(), 200);
+    let body = server.json(ok).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["recorded"], 1);
+    assert_eq!(body["accepted"], 0);
+}
+
+#[tokio::test]
+#[ignore = "requires built daemon binary"]
 async fn knowledge_endpoints() {
     let server = TestServer::start().await;
 
@@ -279,7 +305,21 @@ async fn pipeline_endpoints() {
     let resp = server.get("/api/pipeline/status").await;
     assert_eq!(resp.status(), 200);
     let body = server.json(resp).await;
-    assert!(body["pending"].is_number() || body["enabled"].is_boolean());
+    assert!(body["queues"].is_object());
+    assert!(body["mode"].is_string());
+
+    let resp = server.post("/api/pipeline/pause", json!({})).await;
+    assert_eq!(resp.status(), 200);
+    let body = server.json(resp).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["paused"], true);
+    assert_eq!(body["mode"], "paused");
+
+    let resp = server.post("/api/pipeline/resume", json!({})).await;
+    assert_eq!(resp.status(), 200);
+    let body = server.json(resp).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["paused"], false);
 }
 
 #[tokio::test]
@@ -459,7 +499,7 @@ async fn hook_session_lifecycle() {
         .await;
     assert_eq!(resp.status(), 200);
     let body = server.json(resp).await;
-    assert!(body.get("injections").is_some() || body.get("injection").is_some());
+    assert!(body.get("inject").is_some());
 
     // prompt-submit
     let resp = server
@@ -467,7 +507,8 @@ async fn hook_session_lifecycle() {
             "/api/hooks/user-prompt-submit",
             json!({
                 "sessionKey": "test-session-001",
-                "prompt": "test prompt"
+                "harness": "claude-code",
+                "userMessage": "test prompt"
             }),
         )
         .await;
@@ -478,7 +519,9 @@ async fn hook_session_lifecycle() {
         .post(
             "/api/hooks/session-end",
             json!({
-                "sessionKey": "test-session-001"
+                "sessionKey": "test-session-001",
+                "harness": "claude-code",
+                "transcript": "User: test prompt\nAssistant: acknowledged"
             }),
         )
         .await;

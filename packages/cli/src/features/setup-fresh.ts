@@ -7,6 +7,9 @@ import open from "open";
 import ora from "ora";
 import { daemonAccessLines } from "../lib/network.js";
 import Database from "../sqlite.js";
+import { installForge, managedForgeInstallSupportedOnCurrentPlatform } from "./forge.js";
+import { buildSetupPipeline } from "./setup-pipeline.js";
+import { enforceSetupProtection, printSetupProtectionSummary, refreshSnapshotProtection } from "./setup-protection.js";
 import { readErr, readRecord } from "./setup-shared.js";
 import type { FreshSetupConfig, SetupDeps } from "./setup-types.js";
 
@@ -14,6 +17,16 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 	const spinner = ora("Setting up Signet...").start();
 
 	try {
+		if (cfg.nonInteractive && !cfg.allowUnprotectedWorkspace && !cfg.createLocalBackup) {
+			await enforceSetupProtection({
+				basePath: cfg.basePath,
+				nonInteractive: true,
+				allowUnprotectedWorkspace: false,
+				createLocalBackup: false,
+				assumeOpenClawLinked: cfg.configureOpenClawWs && cfg.openclawConfigCount > 0,
+			});
+		}
+
 		const templatesDir = deps.getTemplatesDir();
 		mkdirSync(cfg.basePath, { recursive: true });
 
@@ -106,27 +119,9 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 			};
 		}
 
-		if (cfg.extractionProvider !== "none") {
-			const memory = readRecord(config.memory);
-			memory.pipelineV2 = {
-				enabled: true,
-				extraction: {
-					provider: cfg.extractionProvider,
-					model: cfg.extractionModel,
-				},
-				semanticContradictionEnabled: true,
-				graph: { enabled: true },
-				reranker: { enabled: true },
-				autonomous: {
-					enabled: true,
-					allowUpdateDelete: true,
-					maintenanceMode: "execute",
-				},
-				predictor: { enabled: true },
-				predictorPipeline: { agentFeedback: true, trainingTelemetry: false },
-			};
-			config.memory = memory;
-		}
+		const memory = readRecord(config.memory);
+		memory.pipelineV2 = buildSetupPipeline(cfg.extractionProvider, cfg.extractionModel);
+		config.memory = memory;
 
 		writeFileSync(join(cfg.basePath, "agent.yaml"), formatYaml(config));
 
@@ -159,6 +154,32 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 			db.close();
 		}
 
+		let protection = await enforceSetupProtection({
+			basePath: cfg.basePath,
+			nonInteractive: cfg.nonInteractive,
+			allowUnprotectedWorkspace: cfg.allowUnprotectedWorkspace,
+			createLocalBackup: cfg.createLocalBackup,
+			assumeOpenClawLinked: cfg.configureOpenClawWs && cfg.openclawConfigCount > 0,
+		});
+
+		if (cfg.harnesses.includes("forge") && !deps.detectExistingSetup(cfg.basePath).harnesses.forge) {
+			if (!managedForgeInstallSupportedOnCurrentPlatform()) {
+				throw new Error(
+					`Forge is selected, but Signet-managed Forge binaries are only available on macOS/Linux arm64/x64. Install Forge separately on ${process.platform} ${process.arch}, then rerun ${chalk.cyan("signet setup")}.`,
+				);
+			}
+			spinner.text = "Installing Forge...";
+			await installForge(
+				{},
+				{
+					agentsDir: cfg.basePath,
+					defaultPort: deps.DEFAULT_PORT,
+					getTemplatesDir: deps.getTemplatesDir,
+					isDaemonRunning: deps.isDaemonRunning,
+				},
+			);
+		}
+
 		spinner.text = "Configuring harness hooks...";
 		const configuredHarnesses: string[] = [];
 		for (const harness of cfg.harnesses) {
@@ -176,6 +197,17 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 			if (patched.length > 0) {
 				console.log(chalk.dim(`\n  ✓ OpenClaw workspace set to ${cfg.basePath}`));
 			}
+		}
+
+		if (protection.state === "snapshot") {
+			spinner.text = "Refreshing workspace snapshot...";
+			protection = refreshSnapshotProtection(cfg.basePath, protection);
+		}
+
+		let committed = false;
+		if (cfg.gitEnabled) {
+			const date = new Date().toISOString().split("T")[0];
+			committed = await deps.gitAddAndCommit(cfg.basePath, `${date}_signet-setup`);
 		}
 
 		spinner.text = "Starting daemon...";
@@ -196,7 +228,7 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 
 		if (configuredHarnesses.length > 0) {
 			console.log();
-			console.log(chalk.dim("  Hooks configured for:"));
+			console.log(chalk.dim("  Harnesses configured:"));
 			for (const harness of configuredHarnesses) {
 				console.log(chalk.dim(`    ✓ ${harness}`));
 			}
@@ -211,12 +243,8 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 		}
 
 		console.log();
-		if (cfg.gitEnabled) {
-			const date = new Date().toISOString().split("T")[0];
-			const committed = await deps.gitAddAndCommit(cfg.basePath, `${date}_signet-setup`);
-			if (committed) {
-				console.log(chalk.dim("  ✓ Changes committed to git"));
-			}
+		if (committed) {
+			console.log(chalk.dim("  ✓ Changes committed to git"));
 		}
 
 		if (cfg.nonInteractive) {
@@ -233,9 +261,14 @@ export async function runFreshSetup(cfg: FreshSetupConfig, deps: SetupDeps): Pro
 		}
 
 		console.log();
+		printSetupProtectionSummary(protection);
+		console.log();
 		console.log(chalk.cyan("  → Next step: Say '/onboarding' to personalize your agent"));
 		console.log(chalk.dim("    This will walk you through setting up your agent's personality,"));
 		console.log(chalk.dim("    communication style, and your preferences."));
+		if (protection.state === "bypass") {
+			console.log(chalk.red("    Backup warning: this workspace is still unprotected."));
+		}
 	} catch (err) {
 		spinner.fail(chalk.red("Setup failed"));
 		console.error(err);

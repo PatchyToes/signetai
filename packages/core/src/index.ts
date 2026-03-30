@@ -25,6 +25,8 @@ export type {
 	LlmProvider,
 	LlmUsage,
 	LlmGenerateResult,
+	ReadPolicy,
+	AgentDefinition,
 	Memory,
 	MemoryType,
 	Conversation,
@@ -76,6 +78,13 @@ export type {
 	PipelineHintsConfig,
 	ModelRegistryEntry,
 } from "./types";
+export {
+	DEFAULT_PIPELINE_TIMEOUT_MS,
+	PIPELINE_PROVIDER_CHOICES,
+	defaultPipelineModel,
+	isPipelineProvider,
+} from "./pipeline-providers";
+export type { PipelineProviderChoice } from "./pipeline-providers";
 export { parseManifest, generateManifest } from "./manifest";
 export { parseSoul, generateSoul } from "./soul";
 export { parseMemory, generateMemory } from "./memory";
@@ -143,12 +152,20 @@ export {
 	REQUIRED_IDENTITY_KEYS,
 	OPTIONAL_IDENTITY_KEYS,
 	detectExistingSetup,
+	findSignetForgeBinary,
+	isCompatibleForgeBinary,
+	isSignetForgeBinary,
 	loadIdentityFiles,
 	loadIdentityFilesSync,
 	hasValidIdentity,
 	getMissingIdentityFiles,
 	summarizeIdentity,
 	readStaticIdentity,
+	resolveSessionStartTimeoutMs,
+	STATIC_IDENTITY_OFFLINE_STATUS,
+	STATIC_IDENTITY_SESSION_START_TIMEOUT_STATUS,
+	resolveSignetForgeManagedPath,
+	resolveAgentBasePath,
 } from "./identity";
 export type {
 	IdentityFileSpec,
@@ -156,6 +173,24 @@ export type {
 	IdentityMap,
 	SetupDetection,
 } from "./identity";
+
+export {
+	clearConfiguredOhMyPiAgentDir,
+	getOhMyPiConfigPath,
+	listOhMyPiAgentDirCandidates,
+	readConfiguredOhMyPiAgentDir,
+	resolveOhMyPiAgentDir,
+	resolveOhMyPiExtensionsDir,
+	writeConfiguredOhMyPiAgentDir,
+} from "./oh-my-pi";
+
+// Multi-agent support
+export {
+	discoverAgents,
+	scaffoldAgent,
+	getAgentIdentityFiles,
+	resolveAgentSkills,
+} from "./agents";
 
 // Skills unification
 export {
@@ -198,6 +233,14 @@ export {
 
 // YAML utilities
 export { parseSimpleYaml, formatYaml } from "./yaml";
+export {
+	PIPELINE_CONFIG_FILES,
+	findPipelineConfigFile,
+	readPipelineConfigData,
+	readPipelinePauseState,
+	setPipelinePaused,
+} from "./pipeline-pause";
+export type { PipelineConfigData, PipelinePauseState } from "./pipeline-pause";
 
 // Symlink utilities
 export {

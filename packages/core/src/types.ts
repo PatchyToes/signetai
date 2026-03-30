@@ -27,6 +27,34 @@ export interface LlmProvider {
 	available(): Promise<boolean>;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-agent types
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls which agents' memories are visible on read.
+ * - "isolated": only own memories
+ * - "shared": all global memories + own private
+ * - { type: "group" }: global memories from group members + own private
+ */
+export type ReadPolicy = "isolated" | "shared" | { readonly type: "group"; readonly group: string };
+
+/** A named agent entry in the roster. */
+export interface AgentDefinition {
+	readonly name: string;
+	readonly model?: string;
+	readonly harnesses?: readonly string[];
+	/** Skills allowlist. Omit or empty string[] = all skills. */
+	readonly skills?: readonly string[];
+	/** Relative path to agent's SOUL.md (defaults to root SOUL.md). */
+	readonly personality?: string;
+	readonly memory?: {
+		readonly read_policy?: ReadPolicy;
+	};
+}
+
+// ---------------------------------------------------------------------------
+
 export interface AgentManifest {
 	version: number;
 	schema: string;
@@ -45,6 +73,11 @@ export interface AgentManifest {
 		localId?: string;
 		ens?: string;
 		name?: string;
+	};
+
+	// Multi-agent roster (optional; omit for single-agent installs)
+	agents?: {
+		readonly roster: readonly AgentDefinition[];
 	};
 
 	// Harnesses this agent works with
@@ -127,6 +160,7 @@ export interface AgentConfig {
 
 export const PIPELINE_FLAGS = [
 	"enabled",
+	"paused",
 	"shadowMode",
 	"mutationsFrozen",
 	"graph.enabled",
@@ -148,20 +182,22 @@ export interface PipelineEscalationConfig {
 	readonly level2MaxEntities: number;
 }
 
+export interface PipelineCommandConfig {
+	readonly bin: string;
+	readonly args: ReadonlyArray<string>;
+	readonly cwd?: string;
+	readonly env?: Readonly<Record<string, string>>;
+}
+
 export interface PipelineExtractionConfig {
-	readonly provider:
-		| "none"
-		| "ollama"
-		| "claude-code"
-		| "opencode"
-		| "codex"
-		| "anthropic"
-		| "openrouter";
+	readonly provider: "none" | "ollama" | "claude-code" | "opencode" | "codex" | "anthropic" | "openrouter" | "command";
+	readonly fallbackProvider?: "ollama" | "none";
 	readonly model: string;
 	readonly strength: "low" | "medium" | "high";
 	readonly endpoint?: string;
 	readonly timeout: number;
 	readonly minConfidence: number;
+	readonly command?: PipelineCommandConfig;
 	readonly escalation?: PipelineEscalationConfig;
 }
 
@@ -169,6 +205,8 @@ export interface PipelineWorkerConfig {
 	readonly pollMs: number;
 	readonly maxRetries: number;
 	readonly leaseTimeoutMs: number;
+	readonly maxLoadPerCpu: number;
+	readonly overloadBackoffMs: number;
 }
 
 export interface PipelineGraphConfig {
@@ -195,6 +233,7 @@ export interface PipelineTraversalConfig {
 export interface PipelineRerankerConfig {
 	readonly enabled: boolean;
 	readonly model: string;
+	readonly useExtractionModel: boolean;
 	readonly topN: number;
 	readonly timeoutMs: number;
 }
@@ -248,9 +287,16 @@ export interface PipelineContinuityConfig {
 	readonly recoveryBudgetChars: number;
 }
 
+export interface PipelineWriteGateConfig {
+	readonly enabled: boolean;
+	readonly threshold: number;
+	readonly continuityDiscount: number;
+}
+
 export interface PipelineV2Config {
 	// Master switches (flat)
 	readonly enabled: boolean;
+	readonly paused: boolean;
 	readonly shadowMode: boolean;
 	readonly nativeShadowEnabled: boolean;
 	readonly mutationsFrozen: boolean;
@@ -276,6 +322,7 @@ export interface PipelineV2Config {
 	readonly structural: PipelineStructuralConfig;
 	readonly feedback: PipelineFeedbackConfig;
 	readonly significance?: PipelineSignificanceConfig;
+	readonly writeGate?: PipelineWriteGateConfig;
 	readonly predictor?: PredictorConfig;
 	readonly predictorPipeline: PipelinePredictorConfig;
 	readonly modelRegistry: PipelineModelRegistryConfig;
@@ -323,13 +370,7 @@ export interface PipelineEmbeddingTrackerConfig {
 
 export interface PipelineSynthesisConfig {
 	readonly enabled: boolean;
-	readonly provider:
-		| "none"
-		| "ollama"
-		| "claude-code"
-		| "opencode"
-		| "anthropic"
-		| "openrouter";
+	readonly provider: "none" | "ollama" | "claude-code" | "codex" | "opencode" | "anthropic" | "openrouter";
 	readonly model: string;
 	readonly endpoint?: string;
 	readonly timeout: number;
@@ -625,16 +666,31 @@ export type AttributeStatus = (typeof ATTRIBUTE_STATUSES)[number];
 
 export const DEPENDENCY_TYPES = [
 	// core
-	"uses", "requires", "owned_by", "blocks", "informs",
+	"uses",
+	"requires",
+	"owned_by",
+	"blocks",
+	"informs",
 	// knowledge
-	"built", "depends_on", "related_to", "learned_from",
-	"teaches", "knows", "assumes",
+	"built",
+	"depends_on",
+	"related_to",
+	"learned_from",
+	"teaches",
+	"knows",
+	"assumes",
 	// structural
-	"contradicts", "supersedes", "part_of",
+	"contradicts",
+	"supersedes",
+	"part_of",
 	// temporal / execution flow
-	"precedes", "follows", "triggers",
+	"precedes",
+	"follows",
+	"triggers",
 	// impact
-	"impacts", "produces", "consumes",
+	"impacts",
+	"produces",
+	"consumes",
 ] as const;
 export type DependencyType = (typeof DEPENDENCY_TYPES)[number];
 

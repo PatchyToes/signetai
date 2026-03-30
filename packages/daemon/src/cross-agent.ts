@@ -411,12 +411,14 @@ export function upsertAgentPresence(input: UpsertAgentPresenceInput): AgentPrese
 	return out;
 }
 
-export function touchAgentPresence(sessionKey: string): AgentPresence | null {
+export function touchAgentPresence(sessionKey: string, agentId?: string): AgentPresence | null {
 	const normalized = normalizeText(sessionKey);
 	if (!normalized) return null;
 	pruneState();
 	const presence = presenceByKey.get(`session:${normalized}`);
 	if (!presence) return null;
+	// Guard: if caller provides agentId, verify record ownership before touching.
+	if (agentId && presence.agentId !== agentId) return null;
 	presence.lastSeenAt = new Date().toISOString();
 	return clonePresence(presence);
 }
@@ -775,6 +777,24 @@ export async function relayMessageViaAcp(request: AcpRelayRequest): Promise<AcpR
 			error: message,
 		};
 	}
+}
+
+/** Remove all presence entries (for graceful shutdown). Returns count cleared. */
+export function clearAllPresence(): number {
+	const now = new Date().toISOString();
+	let count = 0;
+	for (const [, presence] of presenceByKey) {
+		emit({
+			type: "presence",
+			action: "remove",
+			presence: clonePresence(presence),
+			activeCount: presenceByKey.size - count - 1,
+			timestamp: now,
+		});
+		count++;
+	}
+	presenceByKey.clear();
+	return count;
 }
 
 export function resetCrossAgentStateForTest(): void {
