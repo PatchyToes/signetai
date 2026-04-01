@@ -265,7 +265,7 @@ import {
 	startUpdateTimer,
 	stopUpdateTimer,
 } from "./update-system";
-import { createAgentsWatcherIgnoreMatcher } from "./watcher-ignore";
+import { createAgentsWatcherIgnoreMatcher, shouldExcludeFromIngestion } from "./watcher-ignore";
 import { closeWidgetProvider, initWidgetProvider } from "./widget-llm";
 
 // Paths
@@ -9816,6 +9816,9 @@ setupStaticServing();
 
 let watcher: ReturnType<typeof watch> | null = null;
 
+/** User-configured ingest exclude patterns loaded from agent.yaml `watcher.ingestExclude`. */
+let userIngestExcludePatterns: string[] = [];
+
 // ============================================================================
 // Git Sync System
 // ============================================================================
@@ -10734,6 +10737,29 @@ function scheduleSyncHarnessConfigs() {
 }
 
 function startFileWatcher() {
+	// Load user-configured ingest exclude patterns from agent.yaml
+	try {
+		for (const name of ["agent.yaml", "AGENT.yaml", "config.yaml"]) {
+			const cfgPath = join(AGENTS_DIR, name);
+			if (!existsSync(cfgPath)) continue;
+			const yaml = parseSimpleYaml(readFileSync(cfgPath, "utf-8"));
+			const watcherCfg = isRecord(yaml) && isRecord((yaml as Record<string, unknown>).watcher)
+				? (yaml as Record<string, unknown>).watcher as Record<string, unknown>
+				: undefined;
+			if (watcherCfg && Array.isArray(watcherCfg.ingestExclude)) {
+				userIngestExcludePatterns = (watcherCfg.ingestExclude as unknown[]).filter(
+					(p): p is string => typeof p === "string" && p.length > 0,
+				);
+				logger.info("watcher", "Loaded ingest exclude patterns from config", {
+					patterns: userIngestExcludePatterns,
+				});
+			}
+			break;
+		}
+	} catch (e) {
+		logger.warn("watcher", "Failed to load ingest exclude patterns", { error: String(e) });
+	}
+
 	watcher = watch(
 		[
 			join(AGENTS_DIR, "agent.yaml"),
@@ -11153,6 +11179,12 @@ function chunkMarkdownHierarchically(
 async function ingestMemoryMarkdown(filePath: string): Promise<number> {
 	// Skip MEMORY.md (index file, not content)
 	if (filePath.endsWith("MEMORY.md")) return 0;
+
+	// Skip temporal DAG artifacts and synthesis backups (configurable via watcher.ingestExclude)
+	if (shouldExcludeFromIngestion(filePath, userIngestExcludePatterns)) {
+		logger.debug("watcher", "Skipping excluded memory file", { path: filePath });
+		return 0;
+	}
 
 	// Read file content
 	let content: string;

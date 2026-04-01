@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentsWatcherIgnoreMatcher } from "./watcher-ignore";
+import { createAgentsWatcherIgnoreMatcher, matchesSimpleGlob, shouldExcludeFromIngestion } from "./watcher-ignore";
 
 const tmpDirs: string[] = [];
 
@@ -70,5 +70,85 @@ describe("createAgentsWatcherIgnoreMatcher", () => {
 		);
 		expect(shouldIgnore(join(agentsDir, "agents-backup", "claude-code", "workspace", "AGENTS.md"))).toBe(false);
 		expect(shouldIgnore(join(agentsDir, "agents", "claude-code", "SOUL.md"))).toBe(false);
+	});
+});
+
+describe("matchesSimpleGlob", () => {
+	it("matches prefix patterns (trailing wildcard)", () => {
+		expect(matchesSimpleGlob("MEMORY.backup-2026-03-31T14-02-20.md", "MEMORY.backup-*")).toBe(true);
+		expect(matchesSimpleGlob("MEMORY.md", "MEMORY.backup-*")).toBe(false);
+		expect(matchesSimpleGlob("notes.md", "MEMORY.backup-*")).toBe(false);
+	});
+
+	it("matches suffix patterns (leading wildcard)", () => {
+		expect(matchesSimpleGlob("2026-03-31T14-18-24.399Z--y3mgugrv4vq2rmvn--summary.md", "*--summary.md")).toBe(true);
+		expect(matchesSimpleGlob("abc--summary.md", "*--summary.md")).toBe(true);
+		expect(matchesSimpleGlob("summary.md", "*--summary.md")).toBe(false);
+		expect(matchesSimpleGlob("2026-03-31.md", "*--summary.md")).toBe(false);
+	});
+
+	it("matches contains patterns (both wildcards)", () => {
+		expect(matchesSimpleGlob("foo-debug-bar.md", "*debug*")).toBe(true);
+		expect(matchesSimpleGlob("nodebug.md", "*debug*")).toBe(true); // contains "debug"
+		expect(matchesSimpleGlob("notes.md", "*debug*")).toBe(false);
+	});
+
+	it("matches exact patterns (no wildcards)", () => {
+		expect(matchesSimpleGlob("scratch.md", "scratch.md")).toBe(true);
+		expect(matchesSimpleGlob("scratch.txt", "scratch.md")).toBe(false);
+	});
+});
+
+describe("shouldExcludeFromIngestion", () => {
+	it("excludes MEMORY.backup files by default", () => {
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/MEMORY.backup-2026-03-31T14-02-20.md")).toBe(true);
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/MEMORY.backup-2026-04-01T00-19-18.md")).toBe(true);
+	});
+
+	it("excludes temporal DAG summary files by default", () => {
+		expect(
+			shouldExcludeFromIngestion(
+				"/home/user/.agents/memory/2026-03-31T14-18-24.399Z--y3mgugrv4vq2rmvn--summary.md",
+			),
+		).toBe(true);
+	});
+
+	it("excludes temporal DAG transcript files by default", () => {
+		expect(
+			shouldExcludeFromIngestion(
+				"/home/user/.agents/memory/2026-03-31T13-35-00.763Z--hmgekv4bp5yoqr6d--transcript.md",
+			),
+		).toBe(true);
+	});
+
+	it("excludes temporal DAG manifest files by default", () => {
+		expect(
+			shouldExcludeFromIngestion(
+				"/home/user/.agents/memory/2026-03-31T14-18-24.399Z--y3mgugrv4vq2rmvn--manifest.md",
+			),
+		).toBe(true);
+	});
+
+	it("does NOT exclude regular memory files", () => {
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/2026-03-31.md")).toBe(false);
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/star-notes.md")).toBe(false);
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/2026-03-16-patchyhub.md")).toBe(false);
+	});
+
+	it("applies user-configured patterns", () => {
+		const userPatterns = ["scratch-*", "*-draft.md"];
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/scratch-123.md", userPatterns)).toBe(true);
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/newsletter-draft.md", userPatterns)).toBe(true);
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/2026-03-31.md", userPatterns)).toBe(false);
+	});
+
+	it("combines built-in and user patterns", () => {
+		const userPatterns = ["custom-ignore.md"];
+		// Built-in still works
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/MEMORY.backup-2026-04-01.md", userPatterns)).toBe(true);
+		// User pattern also works
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/custom-ignore.md", userPatterns)).toBe(true);
+		// Non-matching still passes through
+		expect(shouldExcludeFromIngestion("/home/user/.agents/memory/2026-03-31.md", userPatterns)).toBe(false);
 	});
 });

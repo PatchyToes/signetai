@@ -1,4 +1,4 @@
-import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { loadMemoryConfig } from "./memory-config";
 import { resolvePredictorCheckpointPath } from "./predictor-client";
 
@@ -15,6 +15,65 @@ function relativePathWithin(root: string, target: string): string | null {
 	if (rel === "" || rel === ".") return "";
 	if (rel.startsWith("..") || isAbsolute(rel)) return null;
 	return rel;
+}
+
+/**
+ * Built-in filename patterns for memory markdown files that should be excluded
+ * from watcher-driven ingestion. These are temporal DAG artifacts and synthesis
+ * backups that would otherwise flood the memory store with low-value chunks.
+ *
+ * Pattern semantics:
+ * - Patterns are matched against the **filename** (basename without directory).
+ * - A leading `*` matches any prefix. A trailing `*` matches any suffix.
+ * - Patterns without wildcards require an exact filename match.
+ */
+const DEFAULT_INGEST_EXCLUDE_PATTERNS: string[] = [
+	// MEMORY.md synthesis backups (e.g. MEMORY.backup-2026-03-31T14-02-20.md)
+	"MEMORY.backup-*",
+	// Temporal DAG session artifacts (e.g. 2026-03-31T14-18-24.399Z--y3mgugrv4vq2rmvn--summary.md)
+	"*--summary.md",
+	"*--transcript.md",
+	"*--manifest.md",
+];
+
+/**
+ * Test whether a filename matches a simple glob pattern.
+ * Supports leading `*` (suffix match), trailing `*` (prefix match),
+ * both (contains match), and exact match.
+ */
+export function matchesSimpleGlob(filename: string, pattern: string): boolean {
+	const startsWithWild = pattern.startsWith("*");
+	const endsWithWild = pattern.endsWith("*");
+
+	if (startsWithWild && endsWithWild) {
+		// *foo* → contains
+		const inner = pattern.slice(1, -1);
+		return inner.length > 0 && filename.includes(inner);
+	}
+	if (startsWithWild) {
+		// *foo → suffix match
+		return filename.endsWith(pattern.slice(1));
+	}
+	if (endsWithWild) {
+		// foo* → prefix match
+		return filename.startsWith(pattern.slice(0, -1));
+	}
+	// exact match
+	return filename === pattern;
+}
+
+/**
+ * Check whether a memory markdown file should be excluded from watcher-driven
+ * ingestion based on built-in defaults and optional user-configured patterns.
+ *
+ * @param filePath - Absolute or relative path to the .md file
+ * @param userPatterns - Additional exclude patterns from agent.yaml `watcher.ingestExclude`
+ * @returns true if the file should be skipped
+ */
+export function shouldExcludeFromIngestion(filePath: string, userPatterns: string[] = []): boolean {
+	const filename = basename(filePath);
+	const allPatterns = [...DEFAULT_INGEST_EXCLUDE_PATTERNS, ...userPatterns];
+	return allPatterns.some((pattern) => matchesSimpleGlob(filename, pattern));
 }
 
 export function createAgentsWatcherIgnoreMatcher(agentsDir: string): (path: string) => boolean {
